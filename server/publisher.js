@@ -744,24 +744,21 @@ async function fillVariantSpecs(page, variantGroups) {
     const result = await page.evaluate(({ aliases: expectedAliases, expectedValue }) => {
       const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
       const normalize = (text) => String(text || '').replace(/\s+/g, ' ').trim();
-      const matchesAlias = (node) => {
-        const text = normalize(node.textContent).replace(/^[*＊]\s*/, '');
-        return expectedAliases.includes(text);
-      };
+      const matchesAlias = (node) => expectedAliases.includes(normalize(node.textContent).replace(/^[*＊]\s*/, ''));
       const headings = [...document.querySelectorAll('label, legend, h1, h2, h3, div, span, p')]
         .filter((node) => visible(node) && matchesAlias(node));
       const heading = headings.sort((a, b) => normalize(a.textContent).length - normalize(b.textContent).length)[0];
       if (!heading) return false;
-      let container = heading;
-      for (let depth = 0; depth < 8 && container; depth += 1, container = container.parentElement) {
-        const add = [...container.querySelectorAll('button, [role="button"], a, span, div')]
-          .filter((node) => visible(node) && /^(?:\+\s*)?添加$/.test(normalize(node.textContent)))
-          .sort((a, b) => normalize(a.textContent).length - normalize(b.textContent).length)[0];
-        if (!add) continue;
-        add.click();
-        return true;
-      }
-      return false;
+      const headingBox = heading.getBoundingClientRect();
+      const candidates = [...document.querySelectorAll('button, [role="button"], a, span, div')]
+        .filter((node) => visible(node) && /^(?:\+\s*)?添加$/.test(normalize(node.textContent)))
+        .map((node) => ({ node, box: node.getBoundingClientRect() }))
+        .filter(({ box }) => box.top >= headingBox.bottom - 8 && box.top - headingBox.bottom < 900)
+        .sort((a, b) => (a.box.top - headingBox.bottom) - (b.box.top - headingBox.bottom));
+      const add = candidates[0]?.node;
+      if (!add) return false;
+      add.click();
+      return true;
     }, { aliases, expectedValue: value }).catch(() => false);
     if (!result) return false;
     await page.waitForTimeout(250);
@@ -769,28 +766,31 @@ async function fillVariantSpecs(page, variantGroups) {
       const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
       const normalize = (text) => String(text || '').replace(/\s+/g, ' ').trim();
       const matchesAlias = (node) => expectedAliases.includes(normalize(node.textContent).replace(/^[*＊]\s*/, ''));
-      const headings = [...document.querySelectorAll('label, legend, h1, h2, h3, div, span, p')]
-        .filter((node) => visible(node) && matchesAlias(node));
-      const heading = headings.sort((a, b) => normalize(a.textContent).length - normalize(b.textContent).length)[0];
+      const heading = [...document.querySelectorAll('label, legend, h1, h2, h3, div, span, p')]
+        .filter((node) => visible(node) && matchesAlias(node))
+        .sort((a, b) => normalize(a.textContent).length - normalize(b.textContent).length)[0];
       if (!heading) return false;
-      let container = heading;
-      for (let depth = 0; depth < 8 && container; depth += 1, container = container.parentElement) {
-        const input = [...container.querySelectorAll('input')]
-          .filter((node) => visible(node) && !node.value && (node.placeholder || '').includes('输入')).at(-1);
-        if (!input) continue;
-        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-        setter?.call(input, expectedValue);
-        input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: expectedValue }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-        input.dispatchEvent(new Event('blur', { bubbles: true }));
-        const add = [...container.querySelectorAll('button, [role="button"], a, span, div')]
-          .filter((node) => visible(node) && /^(?:\+\s*)?添加$/.test(normalize(node.textContent)))
-          .sort((a, b) => normalize(a.textContent).length - normalize(b.textContent).length)[0];
-        if (!add) return false;
-        add.click();
-        return true;
-      }
-      return false;
+      const headingBox = heading.getBoundingClientRect();
+      const input = [...document.querySelectorAll('input')]
+        .filter((node) => visible(node) && !node.value && /输入|enter/i.test(node.placeholder || ''))
+        .map((node) => ({ node, box: node.getBoundingClientRect() }))
+        .filter(({ box }) => box.top >= headingBox.bottom - 8 && box.top - headingBox.bottom < 900)
+        .sort((a, b) => (a.box.top - headingBox.bottom) - (b.box.top - headingBox.bottom))[0]?.node;
+      if (!input) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      setter?.call(input, expectedValue);
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: expectedValue }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      input.dispatchEvent(new Event('blur', { bubbles: true }));
+      const inputBox = input.getBoundingClientRect();
+      const add = [...document.querySelectorAll('button, [role="button"], a, span, div')]
+        .filter((node) => visible(node) && /^(?:\+\s*)?添加$/.test(normalize(node.textContent)))
+        .map((node) => ({ node, box: node.getBoundingClientRect() }))
+        .filter(({ box }) => Math.abs(box.top - inputBox.top) < 80 && box.left > inputBox.right - 120)
+        .sort((a, b) => Math.abs(a.box.top - inputBox.top) - Math.abs(b.box.top - inputBox.top))[0]?.node;
+      if (!add) return false;
+      add.click();
+      return true;
     }, { aliases, expectedValue: value }).catch(() => false);
     if (!filled) return false;
     await page.waitForTimeout(350);
