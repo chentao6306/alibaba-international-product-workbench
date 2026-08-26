@@ -201,13 +201,31 @@ async function startCollectJob(jobId) {
   const job = initial.jobs.find((item) => item.id === jobId && item.type === 'collect');
   const group = initial.groups.find((item) => item.id === job?.metadata?.groupId);
   if (!job || !group) return;
+  // A queued job can be paused before setImmediate() gets a chance to start
+  // it. Do not turn that explicit pause back into a running job.
+  if (job.status === 'paused') {
+    const count = initial.products.filter((item) => item.groupId === group.id).length;
+    store.update((draft) => {
+      const target = draft.groups.find((item) => item.id === group.id);
+      if (target) Object.assign(target, { status: 'ready', collectedCount: count, activeJobId: '' });
+      const pausedJob = draft.jobs.find((item) => item.id === jobId);
+      if (pausedJob) Object.assign(pausedJob, { progress: count, message: `已暂停，已保存 ${count} 件商品，可继续采集`, updatedAt: new Date().toISOString() });
+    });
+    return;
+  }
   const options = { ...(job.metadata?.options || {}), shouldStop: () => ['pause_requested', 'paused'].includes(store.read().jobs.find((item) => item.id === jobId)?.status) };
   store.patchJob(jobId, { status: 'running', message: `开始读取“${group.name}”，已保存的商品会保留` });
   try {
     const products = await collector.collectGroup(group.url, (progress) => {
       if (progress.product) saveCollectedProduct(group.id, progress.product, options);
+      const currentStatus = store.read().jobs.find((item) => item.id === jobId)?.status;
+      const pauseStatus = ['pause_requested', 'paused'].includes(currentStatus) ? currentStatus : 'running';
       store.patchJob(jobId, {
-        status: 'running', progress: progress.current || progress.found || 0,
+        // Do not overwrite a pause request while the current detail finishes.
+        // The old unconditional `running` update made the stop request vanish
+        // before the callback checked shouldStop(), so collection continued.
+        status: pauseStatus,
+        progress: progress.current || progress.found || 0,
         total: progress.total || 0,
         message: progress.stage === 'listing' ? `正在读取第 ${progress.page} 页（${options.startPage}-${options.endPage}），已发现 ${progress.found} 件` : `正在读取详情 ${progress.current}/${progress.total}，已保存 ${progress.current} 件`
       });
