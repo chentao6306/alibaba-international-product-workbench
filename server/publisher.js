@@ -716,6 +716,35 @@ async function fillColorSpec(page, values) {
   return colors.every((color) => selected.some((item) => item.trim().toLowerCase() === color.toLowerCase())) && rowCount >= colors.length;
 }
 
+async function fillVariantSpecs(page, variantGroups) {
+  const groups = (variantGroups || []).filter((group) => group?.name && !/颜色|colou?r/i.test(group.name));
+  const unmapped = [];
+  for (const group of groups) {
+    for (const rawValue of [...new Set(group.options || [])]) {
+      const value = englishSpecText(rawValue);
+      if (!value) continue;
+      const option = await page.locator('label, span, div').filter({ hasText: new RegExp(`^${value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`) }).last();
+      if (!await option.isVisible().catch(() => false)) {
+        unmapped.push(`${group.name}: ${value}`);
+        continue;
+      }
+      let checked = await option.evaluate((node) => {
+        const host = node.closest('label') || node.parentElement;
+        const input = host?.querySelector('input[type="checkbox"], input[type="radio"]');
+        if (!input) return false;
+        if (!input.checked) input.click();
+        return true;
+      }).catch(() => false);
+      if (!checked) {
+        await option.click({ force: true }).catch(() => {});
+        checked = true;
+      }
+      await page.waitForTimeout(120);
+    }
+  }
+  return { unmapped };
+}
+
 async function switchToLegacyDetails(page) {
   const oldMode = page.getByRole('button', { name: '返回老版', exact: true }).first();
   if (await oldMode.isVisible().catch(() => false)) {
@@ -1557,6 +1586,7 @@ export class SellerPublisher {
 
     const colorGroup = (product.variantGroups || []).find((group) => /颜色|colou?r/i.test(group.name));
     const colorValues = colorGroup?.options?.length ? colorGroup.options : ['Black'];
+    const variantResult = await fillVariantSpecs(page, product.variantGroups);
     const colorControlSelector = [
       '.posting-field-color-select input[role="colorCombobox"]',
       '.posting-feild-color-select input[role="colorCombobox"]',
@@ -1603,7 +1633,7 @@ export class SellerPublisher {
         await fillAndVerify(daysInput, tier.leadDays, '交期天数').catch(() => {});
       }
     }
-    return { mappedAttributes, unmappedAttributes };
+    return { mappedAttributes, unmappedAttributes: [...unmappedAttributes, ...variantResult.unmapped] };
   }
 
   async fillPriceFields(page, product) {
