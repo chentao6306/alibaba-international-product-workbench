@@ -37,6 +37,20 @@ export function sanitizeCollectedProduct(product) {
   return { ...product, ...(categoryPath.length ? { sourceCategoryPath: categoryPath } : {}), productType, keywords, subtitle, description };
 }
 
+export function parseDeliveryTiers(deliveryTime) {
+  if (!Array.isArray(deliveryTime) || deliveryTime.length < 2) return [];
+  const quantityRow = Array.isArray(deliveryTime[0]) ? deliveryTime[0].slice(1) : [];
+  const leadRow = Array.isArray(deliveryTime[1]) ? deliveryTime[1].slice(1) : [];
+  return quantityRow.map((range, index) => {
+    const text = String(range || '').replace(/\s+/g, ' ').trim();
+    const upperMatch = text.match(/(?:^|[-–])\s*(\d+)\s*$/);
+    const upperQuantity = upperMatch ? Number(upperMatch[1]) : null;
+    const leadText = String(leadRow[index] || '').replace(/\s+/g, ' ').trim();
+    const leadDays = leadText.match(/\d+(?:\.\d+)?/)?.[0] || '';
+    return { range: text, upperQuantity, leadText, leadDays };
+  }).filter((tier) => tier.range || tier.leadText);
+}
+
 export function isAlibabaInternationalUrl(value) {
   try { return /(^|\.)alibaba\.com$/i.test(new URL(value).hostname); } catch { return false; }
 }
@@ -1530,12 +1544,22 @@ export class SellerPublisher {
     }
 
     await page.waitForTimeout(500);
+    const deliveryTiers = parseDeliveryTiers(product.deliveryTime);
     const deliveryInputs = page.locator('#struct-ladderPeriod input:not([type="hidden"])');
     const deliveryCount = await deliveryInputs.count().catch(() => 0);
-    const days = String(product.deliveryTime?.[1]?.[1] || '').match(/\d+/)?.[0] || '7';
-    for (let index = 0; index < deliveryCount; index += 1) {
-      const input = deliveryInputs.nth(index);
-      if (await input.isVisible().catch(() => false)) await input.fill(days).catch(() => {});
+    // Alibaba renders each delivery row as two inputs: quantity upper bound
+    // followed by lead-time days. Keep the source quantity ranges intact;
+    // writing the day value into every input changes 1-50 into 1-14.
+    for (let index = 0; index < deliveryTiers.length && index * 2 + 1 < deliveryCount; index += 1) {
+      const tier = deliveryTiers[index];
+      const quantityInput = deliveryInputs.nth(index * 2);
+      const daysInput = deliveryInputs.nth(index * 2 + 1);
+      if (tier.upperQuantity != null && await quantityInput.isVisible().catch(() => false)) {
+        await fillAndVerify(quantityInput, tier.upperQuantity, '交期数量').catch(() => {});
+      }
+      if (tier.leadDays && await daysInput.isVisible().catch(() => false)) {
+        await fillAndVerify(daysInput, tier.leadDays, '交期天数').catch(() => {});
+      }
     }
     return { mappedAttributes, unmappedAttributes };
   }

@@ -9,6 +9,7 @@ import {
   buildSkuCombinations,
   canonicalizePriceTiers,
   categoryMismatchMessage,
+  parseDeliveryTiers,
   isAlibabaInternationalUrl,
   isProductPostingUrl,
   normalizePriceTiers,
@@ -87,6 +88,16 @@ test('blocks publishing a product into a different target category', () => {
     title: 'FPV 42130 Folding Propeller',
     sourceCategoryPath: ['Consumer Electronics', 'Camera, Photo & Accessories', 'Drones Accessories']
   }, 'Consumer Electronics >> Camera, Photo & Accessories >> Drones Accessories'), '');
+});
+
+test('preserves source delivery quantity ranges separately from lead days', () => {
+  assert.deepEqual(parseDeliveryTiers([
+    ['Quantity (pieces)', '1 - 50', '> 50'],
+    ['Lead time (days)', '14', 'To be negotiated']
+  ]), [
+    { range: '1 - 50', upperQuantity: 50, leadText: '14', leadDays: '14' },
+    { range: '> 50', upperQuantity: null, leadText: 'To be negotiated', leadDays: '' }
+  ]);
 });
 
 test('parses Alibaba price ranges without treating discount text as a tier', () => {
