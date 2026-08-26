@@ -612,7 +612,20 @@ async function fillColorSpec(page, values) {
   const colors = [...new Set((values || []).map((value) => englishSpecText(value)).filter(Boolean))];
   if (!colors.length) return false;
   const colorRows = () => page.locator('.posting-feild-color-item');
-  const selectedColors = async () => page.locator('.posting-feild-color-item input[role="colorCombobox"]').evaluateAll((nodes) => nodes
+  // Do not fall back to generic "please enter or select" inputs here. The
+  // publish form contains hidden autocomplete templates and unrelated
+  // attribute inputs with the same placeholder; treating those as color
+  // controls caused valid products in categories without a color field to
+  // fail before submission.
+  const colorInputSelector = [
+    '.posting-field-color-select input[role="colorCombobox"]',
+    '.posting-feild-color-select input[role="colorCombobox"]',
+    '.posting-feild-color-item input[role="colorCombobox"]',
+    '.posting-field-color-select input[placeholder*="请输入"]',
+    '.posting-feild-color-select input[placeholder*="请输入"]',
+    '.posting-feild-color-item input[placeholder*="请输入"]'
+  ].join(', ');
+  const selectedColors = async () => page.locator('.posting-feild-color-item input[role="colorCombobox"], .posting-field-color-select input[role="colorCombobox"], .posting-feild-color-select input[role="colorCombobox"]').evaluateAll((nodes) => nodes
     .map((node) => String(node.value || '').replace(/\s+/g, ' ').trim()).filter(Boolean)).catch(() => []);
   const removeEmptyColorRows = async () => {
     const rows = colorRows();
@@ -626,11 +639,11 @@ async function fillColorSpec(page, values) {
       if (await remove.isVisible().catch(() => false)) await remove.click({ force: true }).catch(() => {});
     }
   };
-  const colorInput = await firstVisible(page, ['[role="colorCombobox"]', 'input[placeholder*="请输入或选择"]']);
+  const colorInput = await firstVisible(page, [colorInputSelector]);
   if (!colorInput) return false;
   for (const color of colors) {
     if ((await selectedColors()).some((item) => item.trim().toLowerCase() === color.toLowerCase())) continue;
-    const inputs = page.locator('.posting-feild-color-item input[role="colorCombobox"], .posting-feild-color-item input[placeholder*="请输入或选择"], [role="colorCombobox"]');
+    const inputs = page.locator(colorInputSelector);
     let input = null;
     for (let inputIndex = 0; inputIndex < await inputs.count().catch(() => 0); inputIndex += 1) {
       const candidate = inputs.nth(inputIndex);
@@ -1544,8 +1557,21 @@ export class SellerPublisher {
 
     const colorGroup = (product.variantGroups || []).find((group) => /颜色|colou?r/i.test(group.name));
     const colorValues = colorGroup?.options?.length ? colorGroup.options : ['Black'];
-    const colorFilled = await fillColorSpec(page, colorValues);
-    if (!colorFilled && await firstVisible(page, ['[role="colorCombobox"]', 'input[placeholder*="请输入或选择"]'])) {
+    const colorControlSelector = [
+      '.posting-field-color-select input[role="colorCombobox"]',
+      '.posting-feild-color-select input[role="colorCombobox"]',
+      '.posting-feild-color-item input[role="colorCombobox"]',
+      '.posting-field-color-select input[placeholder*="请输入"]',
+      '.posting-feild-color-select input[placeholder*="请输入"]',
+      '.posting-feild-color-item input[placeholder*="请输入"]'
+    ].join(', ');
+    const colorControl = await firstVisible(page, [colorControlSelector]);
+    // Color is optional at the source level and not every Alibaba category
+    // exposes it as a target specification. Only require a successful add
+    // when the selected target category actually renders a visible color
+    // control; hidden template inputs must never block a publish job.
+    const colorFilled = colorControl ? await fillColorSpec(page, colorValues) : true;
+    if (colorControl && !colorFilled) {
       throw new Error('国际站颜色规格未成功添加，请检查颜色输入框和“添加”按钮');
     }
 
