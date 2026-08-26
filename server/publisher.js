@@ -211,6 +211,9 @@ async function currentFormDiagnostics(page) {
     const colorInputs = [...document.querySelectorAll('[role="colorCombobox"]')].map((node) => ({
       visible: visible(node), value: node.value || '', ancestors: snapshot(node, 5)
     }));
+    const colorSpecContainers = [...document.querySelectorAll('.posting-feild-color-item-container, [class*="color"]')]
+      .filter((node) => /color|颜色/i.test(String(node.className || '') + ' ' + clean(node.innerText || '')))
+      .slice(0, 12).map((node) => ({ visible: visible(node), text: clean(node.innerText).slice(0, 500), html: node.outerHTML.slice(0, 5000) }));
     const textareas = [...document.querySelectorAll('textarea')].map((node) => ({
       id: node.id || '', name: node.name || '', visible: visible(node), valueLength: node.value?.length || 0,
       className: String(node.className || '').slice(0, 250), html: node.outerHTML.slice(0, 2500)
@@ -235,7 +238,7 @@ async function currentFormDiagnostics(page) {
     const editors = [...(window.tinymce?.editors || []), ...(window.tinyMCE?.editors || [])]
       .filter((editor, index, all) => editor && all.indexOf(editor) === index)
       .map((editor) => ({ id: editor.id || '', hidden: Boolean(editor.hidden), contentLength: editor.getContent?.().length || 0 }));
-    return { colorInputs, textareas, iframes, fileInputs, overlays, ordinaryLabels, errors, editors };
+    return { colorInputs, colorSpecContainers, textareas, iframes, fileInputs, overlays, ordinaryLabels, errors, editors };
   });
   main.frameBodies = [];
   for (const frame of page.frames()) {
