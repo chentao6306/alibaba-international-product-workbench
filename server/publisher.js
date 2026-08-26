@@ -733,13 +733,90 @@ async function fillColorSpec(page, values) {
 async function fillVariantSpecs(page, variantGroups) {
   const groups = (variantGroups || []).filter((group) => group?.name && !/颜色|colou?r/i.test(group.name));
   const unmapped = [];
+  const aliasesFor = (name) => {
+    const normalized = String(name || '').toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (/^(?:compatible\s+model|model\s+compatibility|适用型号)$/i.test(normalized)) return ['适用型号', 'compatible model'];
+    if (/^(?:type|类型)$/i.test(normalized)) return ['类型', 'type'];
+    if (/^(?:model|型号)$/i.test(normalized)) return ['型号', 'model'];
+    return [String(name || '').trim()].filter(Boolean);
+  };
+  const addCustomVariantValue = async (aliases, value) => {
+    const result = await page.evaluate(({ aliases: expectedAliases, expectedValue }) => {
+      const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
+      const normalize = (text) => String(text || '').replace(/\s+/g, ' ').trim();
+      const matchesAlias = (node) => {
+        const text = normalize(node.textContent).replace(/^[*＊]\s*/, '');
+        return expectedAliases.includes(text);
+      };
+      const headings = [...document.querySelectorAll('label, legend, h1, h2, h3, div, span, p')]
+        .filter((node) => visible(node) && matchesAlias(node));
+      const heading = headings.sort((a, b) => normalize(a.textContent).length - normalize(b.textContent).length)[0];
+      if (!heading) return false;
+      let container = heading;
+      for (let depth = 0; depth < 8 && container; depth += 1, container = container.parentElement) {
+        const add = [...container.querySelectorAll('button, [role="button"], a, span, div')]
+          .filter((node) => visible(node) && /^(?:\+\s*)?添加$/.test(normalize(node.textContent)))
+          .sort((a, b) => normalize(a.textContent).length - normalize(b.textContent).length)[0];
+        if (!add) continue;
+        add.click();
+        return true;
+      }
+      return false;
+    }, { aliases, expectedValue: value }).catch(() => false);
+    if (!result) return false;
+    await page.waitForTimeout(250);
+    const filled = await page.evaluate(({ aliases: expectedAliases, expectedValue }) => {
+      const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
+      const normalize = (text) => String(text || '').replace(/\s+/g, ' ').trim();
+      const matchesAlias = (node) => expectedAliases.includes(normalize(node.textContent).replace(/^[*＊]\s*/, ''));
+      const headings = [...document.querySelectorAll('label, legend, h1, h2, h3, div, span, p')]
+        .filter((node) => visible(node) && matchesAlias(node));
+      const heading = headings.sort((a, b) => normalize(a.textContent).length - normalize(b.textContent).length)[0];
+      if (!heading) return false;
+      let container = heading;
+      for (let depth = 0; depth < 8 && container; depth += 1, container = container.parentElement) {
+        const input = [...container.querySelectorAll('input')]
+          .filter((node) => visible(node) && !node.value && (node.placeholder || '').includes('输入')).at(-1);
+        if (!input) continue;
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        setter?.call(input, expectedValue);
+        input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: expectedValue }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dispatchEvent(new Event('blur', { bubbles: true }));
+        const add = [...container.querySelectorAll('button, [role="button"], a, span, div')]
+          .filter((node) => visible(node) && /^(?:\+\s*)?添加$/.test(normalize(node.textContent)))
+          .sort((a, b) => normalize(a.textContent).length - normalize(b.textContent).length)[0];
+        if (!add) return false;
+        add.click();
+        return true;
+      }
+      return false;
+    }, { aliases, expectedValue: value }).catch(() => false);
+    if (!filled) return false;
+    await page.waitForTimeout(350);
+    return page.evaluate(({ aliases: expectedAliases, expectedValue }) => {
+      const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
+      const normalize = (text) => String(text || '').replace(/\s+/g, ' ').trim();
+      const matchesAlias = (node) => expectedAliases.includes(normalize(node.textContent).replace(/^[*＊]\s*/, ''));
+      const headings = [...document.querySelectorAll('label, legend, h1, h2, h3, div, span, p')]
+        .filter((node) => visible(node) && matchesAlias(node));
+      const heading = headings.sort((a, b) => normalize(a.textContent).length - normalize(b.textContent).length)[0];
+      if (!heading) return false;
+      let container = heading;
+      for (let depth = 0; depth < 8 && container; depth += 1, container = container.parentElement) {
+        if ([...container.querySelectorAll('label, span, div, li')].some((node) => visible(node) && normalize(node.textContent) === expectedValue)) return true;
+      }
+      return false;
+    }, { aliases, expectedValue: value }).catch(() => false);
+  };
   for (const group of groups) {
     for (const rawValue of [...new Set(group.options || [])]) {
       const value = englishSpecText(rawValue);
       if (!value) continue;
       const option = await page.locator('label, span, div').filter({ hasText: new RegExp(`^${value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`) }).last();
       if (!await option.isVisible().catch(() => false)) {
-        unmapped.push(`${group.name}: ${value}`);
+        const added = await addCustomVariantValue(aliasesFor(group.name), value);
+        if (!added) unmapped.push(`${group.name}: ${value}`);
         continue;
       }
       let checked = await option.evaluate((node) => {
