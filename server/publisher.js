@@ -621,11 +621,13 @@ async function fillColorSpec(page, values) {
     '.posting-field-color-select input[role="colorCombobox"]',
     '.posting-feild-color-select input[role="colorCombobox"]',
     '.posting-feild-color-item input[role="colorCombobox"]',
+    '.posting-feild-color-item-container input[role="colorCombobox"]',
     '.posting-field-color-select input[placeholder*="请输入"]',
     '.posting-feild-color-select input[placeholder*="请输入"]',
-    '.posting-feild-color-item input[placeholder*="请输入"]'
+    '.posting-feild-color-item input[placeholder*="请输入"]',
+    '.posting-feild-color-item-container input[placeholder*="请输入"]'
   ].join(', ');
-  const selectedColors = async () => page.locator('.posting-feild-color-item input[role="colorCombobox"], .posting-field-color-select input[role="colorCombobox"], .posting-feild-color-select input[role="colorCombobox"]').evaluateAll((nodes) => nodes
+  const selectedColors = async () => page.locator('.posting-feild-color-item input[role="colorCombobox"], .posting-feild-color-item-container input[role="colorCombobox"], .posting-field-color-select input[role="colorCombobox"], .posting-feild-color-select input[role="colorCombobox"]').evaluateAll((nodes) => nodes
     .map((node) => String(node.value || '').replace(/\s+/g, ' ').trim()).filter(Boolean)).catch(() => []);
   const removeEmptyColorRows = async () => {
     const rows = colorRows();
@@ -1591,9 +1593,11 @@ export class SellerPublisher {
       '.posting-field-color-select input[role="colorCombobox"]',
       '.posting-feild-color-select input[role="colorCombobox"]',
       '.posting-feild-color-item input[role="colorCombobox"]',
+      '.posting-feild-color-item-container input[role="colorCombobox"]',
       '.posting-field-color-select input[placeholder*="请输入"]',
       '.posting-feild-color-select input[placeholder*="请输入"]',
-      '.posting-feild-color-item input[placeholder*="请输入"]'
+      '.posting-feild-color-item input[placeholder*="请输入"]',
+      '.posting-feild-color-item-container input[placeholder*="请输入"]'
     ].join(', ');
     const colorControl = await firstVisible(page, [colorControlSelector]);
     // Color is optional at the source level and not every Alibaba category
