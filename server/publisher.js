@@ -2015,6 +2015,12 @@ export class SellerPublisher {
       '[class*="stock"] input[type="text"]', '[class*="stock"] input[type="number"]'
     ], product.stock);
     const fieldMapping = await this.fillProductFields(page, product);
+    if (mode === 'submit') {
+      const unmappedRequiredVariant = fieldMapping.unmappedAttributes.find((item) => /^.+:\s*.+$/.test(String(item)));
+      if (unmappedRequiredVariant) {
+        throw new Error(`国际站目标类目没有与来源规格“${unmappedRequiredVariant}”一致的选项；为保证数据不被篡改，请先在发布页选择匹配类目或人工映射后再提交`);
+      }
+    }
     await this.uploadMainImages(page, product);
     let videoWarning = '';
     try {
