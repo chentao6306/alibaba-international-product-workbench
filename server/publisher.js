@@ -51,6 +51,17 @@ export function isProductPostingUrl(value) {
 
 export function categoryMismatchMessage(product, category) {
   const title = product?.title || '';
+  const targetPath = sanitizeCategoryPath(product?.categoryPath);
+  const sourcePath = sanitizeCategoryPath(product?.sourceCategoryPath);
+  const expectedPath = targetPath.length ? targetPath : sourcePath;
+  const actualPath = String(category || '').split(/\s*(?:>>|>|\/|\\)\s*/).map((value) => value.trim()).filter(Boolean);
+  if (expectedPath.length && actualPath.length) {
+    const expectedLeaf = expectedPath.at(-1).toLowerCase();
+    const actualLeaf = actualPath.at(-1).toLowerCase();
+    if (expectedLeaf && actualLeaf && expectedLeaf !== actualLeaf) {
+      return `当前发布类目“${category}”与商品目标类目“${expectedPath.join(' >> ')}”不一致，请绑定目标类目的国际站发布表单`;
+    }
+  }
   const electronics = /\b(phone|smartphone|mobile|tablet|pad)\b/i.test(title);
   const serviceCategory = /商务服务|认证、检验|检验和质量控制|business service|inspection service/i.test(category || '');
   if (electronics && serviceCategory) {

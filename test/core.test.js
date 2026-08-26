@@ -78,6 +78,17 @@ test('blocks motor controllers from a consumer-electronics posting category', ()
   }, '消费电子>>其他消费电子产品'), /Motor Controllers/);
 });
 
+test('blocks publishing a product into a different target category', () => {
+  assert.match(categoryMismatchMessage({
+    title: 'FPV 42130 Folding Propeller',
+    sourceCategoryPath: ['Consumer Electronics', 'Camera, Photo & Accessories', 'Drones Accessories']
+  }, 'Consumer Electronics >> Other Consumer Electronics'), /目标类目/);
+  assert.equal(categoryMismatchMessage({
+    title: 'FPV 42130 Folding Propeller',
+    sourceCategoryPath: ['Consumer Electronics', 'Camera, Photo & Accessories', 'Drones Accessories']
+  }, 'Consumer Electronics >> Camera, Photo & Accessories >> Drones Accessories'), '');
+});
+
 test('parses Alibaba price ranges without treating discount text as a tier', () => {
   const tiers = parsePriceTiers('¥2,327.78 50-499 pieces ¥2,260.89 500-2,999 pieces ¥2,194 ≥3,000 pieces 满 ¥66,890 可省 ¥3,344.50');
   assert.deepEqual(tiers, [
