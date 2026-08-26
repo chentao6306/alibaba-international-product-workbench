@@ -166,6 +166,18 @@ async function fillAndVerify(locator, value, fieldName) {
   if (actual !== expected) throw new Error(`${fieldName}写入失败，国际站输入框未保留内容`);
 }
 
+async function commitControlledInput(locator, value) {
+  const expected = String(value ?? '').trim();
+  await locator.evaluate((node, nextValue) => {
+    const prototype = node instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+    setter?.call(node, nextValue);
+    node.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: nextValue }));
+    node.dispatchEvent(new Event('change', { bubbles: true }));
+    node.blur();
+  }, expected).catch(() => {});
+}
+
 function compactText(value, limit = 220) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit);
 }
@@ -745,6 +757,39 @@ async function fillVariantSpecs(page, variantGroups) {
     }
   }
   return { unmapped };
+}
+
+async function enableSpecImageUpload(page, product, colorGroup, downloadImages) {
+  const colorValues = [...new Set(colorGroup?.options || [])].map((value) => englishSpecText(value)).filter(Boolean);
+  const imageUrl = colorValues.map((value) => colorGroup?.optionImages?.[value] || colorGroup?.optionImages?.[colorGroup.options?.find((item) => englishSpecText(item) === value)]).find(Boolean);
+  if (!imageUrl) return false;
+
+  // The product-specification selector is separate from the hidden color row.
+  // Enable the source color spec first so Alibaba materializes its combobox
+  // and specification-image switch.
+  const colorToggle = page.locator('label.next-checkbox-wrapper').filter({ hasText: /^Color$/i }).last();
+  if (await colorToggle.isVisible().catch(() => false)) {
+    const input = colorToggle.locator('input[type="checkbox"]').first();
+    if (await input.count().catch(() => 0) && !await input.isChecked().catch(() => false)) {
+      await colorToggle.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(350);
+    }
+  }
+
+  const row = page.locator('#p-191288010');
+  if (!await row.isVisible().catch(() => false)) return false;
+  const imageSwitch = row.locator('[role="switch"]').first();
+  if (await imageSwitch.isVisible().catch(() => false) && await imageSwitch.getAttribute('aria-checked').catch(() => 'false') !== 'true') {
+    await imageSwitch.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(250);
+  }
+  const files = await downloadImages([imageUrl], 'spec', 1);
+  if (!files.length) return false;
+  const input = row.locator('input[type="file"]').last();
+  if (!await input.count().catch(() => 0)) return false;
+  await input.setInputFiles(files[0]);
+  await page.waitForTimeout(1800);
+  return true;
 }
 
 async function switchToLegacyDetails(page) {
@@ -1401,11 +1446,20 @@ export class SellerPublisher {
     const urls = product.mainImages?.length ? product.mainImages : [product.mainImage, ...(product.images || [])];
     const images = await this.downloadImageSet(product, urls, 'main', 6);
     if (images.length < 4) throw new Error(`主图资料不足：仅下载到 ${images.length} 张，至少需要 4 张`);
-    const directInput = await firstVisible(page, ['input[type="file"][accept*="image"]', 'input[type="file"]']);
-    if (directInput) {
+    // Alibaba keeps the six main-image file inputs hidden inside each
+    // `.image-upload-list-item`; Playwright can still assign files to these
+    // controls directly. Looking only for visible file inputs caused the
+    // browser file picker fallback to hit the photo-bank menu and left all
+    // main-image slots empty.
+    const mainInput = page.locator('.image-upload-list-item input[type="file"][accept*="image"], .image-upload-list-item input[type="file"]').first();
+    if (await mainInput.count().catch(() => 0)) {
+      await mainInput.setInputFiles(images);
+      return await this.waitForMainImageUploads(page, images.length);
+    }
+    const directInput = page.locator('input[type="file"][accept*="image"], input[type="file"]').first();
+    if (await directInput.count().catch(() => 0)) {
       await directInput.setInputFiles(images);
-      await page.waitForTimeout(2500);
-      return images.length;
+      return await this.waitForMainImageUploads(page, images.length);
     }
     const triggerSelectors = [
       '.image-upload-list-item #image-placeholder-span',
@@ -1550,7 +1604,11 @@ export class SellerPublisher {
   async waitForMainImageUploads(page, expectedCount) {
     const uploadDeadline = Date.now() + 60000;
     while (Date.now() < uploadDeadline) {
-      const remainingSlots = await page.locator('.image-upload-list-item #image-placeholder-span').count().catch(() => 6);
+      const remainingSlots = await page.locator([
+        '.image-upload-list-item #image-placeholder-span',
+        '.image-upload-list-item #image-placeholder-icon',
+        '.image-upload-list-item .image-upload-photobank-placeholder'
+      ].join(', ')).count().catch(() => 6);
       const feedback = (await visibleFeedback(page)).join(' ');
       if (/上传失败|文件.*过大|图片.*不符合|upload failed/i.test(feedback)) {
         throw new Error(`国际站主图上传失败：${compactText(feedback, 300)}`);
@@ -1588,6 +1646,12 @@ export class SellerPublisher {
 
     const colorGroup = (product.variantGroups || []).find((group) => /颜色|colou?r/i.test(group.name));
     const colorValues = colorGroup?.options?.length ? colorGroup.options : ['Black'];
+    await enableSpecImageUpload(
+      page,
+      product,
+      colorGroup,
+      (urls, prefix, limit) => this.downloadImageSet(product, urls, prefix, limit)
+    );
     const variantResult = await fillVariantSpecs(page, product.variantGroups);
     const colorControlSelector = [
       '.posting-field-color-select input[role="colorCombobox"]',
@@ -1670,6 +1734,24 @@ export class SellerPublisher {
     for (let index = 0; index < rowCount; index += 1) {
       await fillAndVerify(quantityInputs.nth(index), tiers[index].minQuantity, `第 ${index + 1} 档起订量`);
       await fillAndVerify(priceInputs.nth(index), tiers[index].price, `第 ${index + 1} 档价格`);
+      await commitControlledInput(quantityInputs.nth(index), tiers[index].minQuantity);
+      await commitControlledInput(priceInputs.nth(index), tiers[index].price);
+    }
+    // The international form can retain a blank trailing range after adding
+    // rows. Alibaba validates that row too, so remove empty ranges before the
+    // submit/save action instead of letting it surface as a misleading MOQ
+    // error.
+    const rows = page.locator('tr[role="row"]:has([role="input-quantity"]):has([role="input-price"])');
+    for (let index = (await rows.count().catch(() => 0)) - 1; index >= tiers.length; index -= 1) {
+      const row = rows.nth(index);
+      const quantity = String(await row.locator('[role="input-quantity"]').inputValue().catch(() => '')).trim();
+      const price = String(await row.locator('[role="input-price"]').inputValue().catch(() => '')).trim();
+      if (quantity || price) continue;
+      const remove = row.locator('[role="remove"], button').last();
+      if (await remove.isVisible().catch(() => false) && !await remove.isDisabled().catch(() => true)) {
+        await remove.click({ force: true }).catch(() => {});
+        await page.waitForTimeout(200);
+      }
     }
     if (rowCount < tiers.length) throw new Error(`国际站价格表仅识别到 ${rowCount} 档，商品需要 ${tiers.length} 档`);
   }
