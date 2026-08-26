@@ -522,25 +522,42 @@ async function runPublishJob(jobId) {
         });
         store.patchJob(jobId, { progress: index + 1, total, message: `已处理 ${index + 1}/${total}：${product.title}` });
       } catch (error) {
-        if (!/captcha|verify|人机验证|安全验证|滑块|登录失效|人工验证/i.test(error.message || '')) await publisher.hide().catch(() => {});
+        const message = String(error.message || '');
+        const requiresHuman = /captcha|verify|人机验证|安全验证|滑块|登录失效|人工验证/i.test(message);
+        if (!requiresHuman) await publisher.hide().catch(() => {});
         store.update((draft) => {
           const target = draft.products.find((item) => item.id === product.id);
           if (target) {
-            const result = { status: 'failed', message: error.message };
+            const result = { status: 'failed', message };
             Object.assign(target, { status: 'publish_failed', publishResult: result, updatedAt: new Date().toISOString() });
             target.publishHistory = Array.isArray(target.publishHistory) ? target.publishHistory : [];
             target.publishHistory.unshift({ ...createPublishSnapshot(target, { mode, category: store.read().settings.publishCategory }), result });
             syncProductModel(target);
           }
         });
+        if (requiresHuman) {
+          store.patchJob(jobId, {
+            status: 'paused', progress: index, total,
+            message: `已暂停：${product.title} - ${message}。完成验证后可继续`
+          });
+          return;
+        }
+        // A product-level validation or upload error must not discard the
+        // remaining batch. Keep the failed item visible and continue with the
+        // next product; the final job status summarizes the failures.
         store.patchJob(jobId, {
-          status: 'failed', progress: index, total,
-          message: `已停止：${product.title} - ${error.message}`
+          status: 'running', progress: index + 1, total,
+          message: `第 ${index + 1}/${total} 件失败，继续处理下一件：${product.title}`
         });
-        return;
+        continue;
       }
     }
-    store.patchJob(jobId, { status: 'completed', progress: total, total, message: `上架任务完成，共处理 ${total} 件` });
+    const finalState = store.read();
+    const failedCount = productIds.filter((id) => finalState.products.find((item) => item.id === id)?.status === 'publish_failed').length;
+    store.patchJob(jobId, {
+      status: 'completed', progress: total, total,
+      message: failedCount ? `上架任务完成，成功 ${total - failedCount} 件，失败 ${failedCount} 件（可查看每件商品的具体原因）` : `上架任务完成，共处理 ${total} 件`
+    });
   } catch (error) {
     store.patchJob(jobId, { status: 'failed', message: error.message });
   } finally {

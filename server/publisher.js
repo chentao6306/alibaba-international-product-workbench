@@ -571,7 +571,8 @@ async function fillColorSpec(page, values) {
   const colors = [...new Set((values || []).map((value) => englishSpecText(value)).filter(Boolean))];
   if (!colors.length) return false;
   const colorRows = () => page.locator('.posting-feild-color-item');
-  const selectedColors = async () => page.locator('.posting-feild-color-item .next-sr-only').allInnerTexts().catch(() => []);
+  const selectedColors = async () => page.locator('.posting-feild-color-item input[role="colorCombobox"]').evaluateAll((nodes) => nodes
+    .map((node) => String(node.value || '').replace(/\s+/g, ' ').trim()).filter(Boolean)).catch(() => []);
   const removeEmptyColorRows = async () => {
     const rows = colorRows();
     const count = await rows.count().catch(() => 0);
@@ -588,7 +589,7 @@ async function fillColorSpec(page, values) {
   if (!colorInput) return false;
   for (const color of colors) {
     if ((await selectedColors()).some((item) => item.trim().toLowerCase() === color.toLowerCase())) continue;
-    const inputs = page.locator('[role="colorCombobox"], input[placeholder*="请输入或选择"]');
+    const inputs = page.locator('.posting-feild-color-item input[role="colorCombobox"], .posting-feild-color-item input[placeholder*="请输入或选择"], [role="colorCombobox"]');
     let input = null;
     for (let inputIndex = 0; inputIndex < await inputs.count().catch(() => 0); inputIndex += 1) {
       const candidate = inputs.nth(inputIndex);
@@ -598,18 +599,67 @@ async function fillColorSpec(page, values) {
     await input.click({ force: true });
     await input.fill(color);
     await page.waitForTimeout(500);
+    // The international form renders the suggestion as a plain list item on
+    // some categories (without role="option"). Prefer the last visible exact
+    // match so we commit the suggestion instead of leaving raw text in the
+    // combobox, which later produces “颜色规格未成功添加”.
+    let committed = false;
     const option = page.getByRole('option', { name: color, exact: true }).last();
-    if (await option.isVisible().catch(() => false)) await option.click({ force: true });
-    else { await input.press('ArrowDown').catch(() => {}); await input.press('Enter').catch(() => {}); }
-    await page.waitForTimeout(250);
-    const add = page.getByText('添加', { exact: true }).last();
-    if (await add.isVisible().catch(() => false)) await add.click({ force: true }).catch(() => {});
-    else await input.press('Enter').catch(() => {});
+    if (await option.isVisible().catch(() => false)) {
+      await option.click({ force: true }).catch(() => {});
+      committed = true;
+    } else {
+      committed = await page.evaluate((expected) => {
+        const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
+        const candidates = [...document.querySelectorAll('li, [role="option"], [class*="menu-item"], [class*="option-item"], [class*="select-option"]')]
+          .filter((node) => visible(node) && String(node.textContent || '').replace(/\s+/g, ' ').trim() === expected);
+        const target = candidates.at(-1);
+        if (!target) return false;
+        target.click();
+        return true;
+      }, color).catch(() => false);
+    }
+    // Always send the keyboard confirmation as well. Alibaba's autocomplete
+    // keeps the typed text in the input when a mouse click hits the label span
+    // instead of the option controller; ArrowDown+Enter commits the value in
+    // that implementation and is idempotent after a successful mouse click.
+    await input.press('ArrowDown').catch(() => {});
+    await input.press('Enter').catch(() => {});
+    // Some Alibaba categories render the suggestion as an unlabelled div and
+    // Playwright's role/text locators miss the click target. Trigger the same
+    // bubbling mouse sequence in the page as a final selection fallback.
+    if (!(await selectedColors()).some((item) => item.toLowerCase() === color.toLowerCase())) {
+      await page.evaluate((expected) => {
+        const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
+        const candidates = [...document.querySelectorAll('li, [role="option"], [class*=menu] *, [class*=popup] *, [class*=overlay] *')]
+          .filter((node) => visible(node) && !['INPUT', 'TEXTAREA'].includes(node.tagName) && String(node.textContent || '').replace(/\s+/g, ' ').trim() === expected);
+        const target = candidates.at(-1);
+        if (!target) return false;
+        for (const type of ['mousedown', 'mouseup', 'click']) target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+        return true;
+      }, color).catch(() => false);
+      await input.press('Enter').catch(() => {});
+    }
+    await page.waitForTimeout(450);
+    const addCandidates = [page.getByText('+ 添加', { exact: true }), page.getByText('添加', { exact: true })];
+    let addClicked = false;
+    for (const candidate of addCandidates) {
+      if (!await candidate.last().isVisible().catch(() => false)) continue;
+      await candidate.last().click({ force: true }).catch(() => {});
+      addClicked = true;
+      break;
+    }
+    if (!addClicked) await input.press('Enter').catch(() => {});
     await page.waitForTimeout(500);
   }
   await removeEmptyColorRows();
   const selected = await selectedColors();
-  return colors.every((color) => selected.some((item) => item.trim().toLowerCase() === color.toLowerCase()));
+  // On the current form a committed value remains in the combobox input (the
+  // screen reader span is empty), so the input values are the authoritative
+  // success signal. Require no empty row to remain either.
+  const rows = colorRows();
+  const rowCount = await rows.count().catch(() => 0);
+  return colors.every((color) => selected.some((item) => item.trim().toLowerCase() === color.toLowerCase())) && rowCount >= colors.length;
 }
 
 async function switchToLegacyDetails(page) {
