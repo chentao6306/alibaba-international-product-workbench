@@ -9,6 +9,7 @@ import {
   buildSkuCombinations,
   canonicalizePriceTiers,
   categoryMismatchMessage,
+  canonicalCategoryLeaf,
   parseDeliveryTiers,
   isAlibabaInternationalUrl,
   isProductPostingUrl,
@@ -88,6 +89,13 @@ test('blocks publishing a product into a different target category', () => {
     title: 'FPV 42130 Folding Propeller',
     sourceCategoryPath: ['Consumer Electronics', 'Camera, Photo & Accessories', 'Drones Accessories']
   }, 'Consumer Electronics >> Camera, Photo & Accessories >> Drones Accessories'), '');
+});
+
+test('treats translated category names as the same category', () => {
+  assert.equal(canonicalCategoryLeaf('无人机配件'), 'drones accessories');
+  assert.equal(categoryMismatchMessage({
+    sourceCategoryPath: ['Consumer Electronics', 'Camera, Photo & Accessories', 'Drones Accessories']
+  }, '消费电子 >> 相机，无人机配件 >> 无人机配件'), '');
 });
 
 test('preserves source delivery quantity ranges separately from lead days', () => {

@@ -230,7 +230,11 @@ function hasCategoryMismatch(product, category) {
   const text = `${product.title || ''} ${product.productType || ''} ${(product.sourceCategoryPath || []).join(' ')}`;
   const expectedPath = (product.categoryPath?.length ? product.categoryPath : product.sourceCategoryPath) || [];
   const actualPath = String(category || '').split(/\s*(?:>>|>|\/|\\)\s*/).map((value) => value.trim()).filter(Boolean);
-  if (expectedPath.length && actualPath.length && expectedPath.at(-1).toLowerCase() !== actualPath.at(-1).toLowerCase()) return true;
+  const canonicalLeaf = (value) => {
+    const normalized = String(value || '').toLowerCase().replace(/[,&._-]/g, ' ').replace(/\s+/g, ' ').trim();
+    return ({ '无人机配件': 'drones accessories', 'drones accessories': 'drones accessories', '相机照片配件': 'camera photo accessories', 'camera photo accessories': 'camera photo accessories', '其他消费电子产品': 'other consumer electronics', 'other consumer electronics': 'other consumer electronics', '坚固型手机': 'rugged phone', 'rugged phone': 'rugged phone', '电机控制器': 'motor controllers', 'motor controller': 'motor controllers', 'motor controllers': 'motor controllers' })[normalized] || normalized;
+  };
+  if (expectedPath.length && actualPath.length && canonicalLeaf(expectedPath.at(-1)) !== canonicalLeaf(actualPath.at(-1))) return true;
   if (/\b(phone|smartphone|mobile|tablet|pad)\b/i.test(text)
     && /商务服务|认证、检验|检验和质量控制|business service|inspection service/i.test(category || '')) return true;
   return /motor controllers?|brushless.*motor|电机控制器|无刷.*电机/i.test(text)

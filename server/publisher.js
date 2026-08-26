@@ -37,6 +37,19 @@ export function sanitizeCollectedProduct(product) {
   return { ...product, ...(categoryPath.length ? { sourceCategoryPath: categoryPath } : {}), productType, keywords, subtitle, description };
 }
 
+const CATEGORY_LEAF_ALIASES = new Map([
+  ['drones accessories', 'drones accessories'], ['无人机配件', 'drones accessories'],
+  ['camera photo accessories', 'camera photo accessories'], ['相机照片配件', 'camera photo accessories'],
+  ['other consumer electronics', 'other consumer electronics'], ['其他消费电子产品', 'other consumer electronics'],
+  ['rugged phone', 'rugged phone'], ['坚固型手机', 'rugged phone'],
+  ['motor controllers', 'motor controllers'], ['motor controller', 'motor controllers'], ['电机控制器', 'motor controllers']
+]);
+
+export function canonicalCategoryLeaf(value) {
+  const normalized = String(value || '').toLowerCase().replace(/[,&._-]/g, ' ').replace(/\s+/g, ' ').trim();
+  return CATEGORY_LEAF_ALIASES.get(normalized) || normalized;
+}
+
 export function parseDeliveryTiers(deliveryTime) {
   if (!Array.isArray(deliveryTime) || deliveryTime.length < 2) return [];
   const quantityRow = Array.isArray(deliveryTime[0]) ? deliveryTime[0].slice(1) : [];
@@ -70,8 +83,8 @@ export function categoryMismatchMessage(product, category) {
   const expectedPath = targetPath.length ? targetPath : sourcePath;
   const actualPath = String(category || '').split(/\s*(?:>>|>|\/|\\)\s*/).map((value) => value.trim()).filter(Boolean);
   if (expectedPath.length && actualPath.length) {
-    const expectedLeaf = expectedPath.at(-1).toLowerCase();
-    const actualLeaf = actualPath.at(-1).toLowerCase();
+    const expectedLeaf = canonicalCategoryLeaf(expectedPath.at(-1));
+    const actualLeaf = canonicalCategoryLeaf(actualPath.at(-1));
     if (expectedLeaf && actualLeaf && expectedLeaf !== actualLeaf) {
       return `当前发布类目“${category}”与商品目标类目“${expectedPath.join(' >> ')}”不一致，请绑定目标类目的国际站发布表单`;
     }
