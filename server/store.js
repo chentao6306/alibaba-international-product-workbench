@@ -29,9 +29,24 @@ export class JsonStore {
   }
 
   write(state) {
-    const temporary = `${this.filePath}.tmp`;
+    const temporary = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
     fs.writeFileSync(temporary, JSON.stringify(state, null, 2), 'utf8');
-    fs.renameSync(temporary, this.filePath);
+    let lastError = null;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        fs.renameSync(temporary, this.filePath);
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+        if (!['EPERM', 'EACCES', 'EBUSY'].includes(error.code)) break;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      }
+    }
+    if (lastError) {
+      fs.rmSync(temporary, { force: true });
+      throw lastError;
+    }
     return state;
   }
 

@@ -226,6 +226,213 @@ async function currentFormDiagnostics(page) {
     const colorSpecContainers = [...document.querySelectorAll('.posting-feild-color-item-container, [class*="color"]')]
       .filter((node) => /color|颜色/i.test(String(node.className || '') + ' ' + clean(node.innerText || '')))
       .slice(0, 12).map((node) => ({ visible: visible(node), text: clean(node.innerText).slice(0, 500), html: node.outerHTML.slice(0, 5000) }));
+    const saleSpecControls = [...document.querySelectorAll('.saleAttributesItems label.next-checkbox-wrapper')]
+      .map((wrapper) => {
+        const input = wrapper.querySelector('input[type="checkbox"]');
+        const box = wrapper.getBoundingClientRect();
+        return {
+          visible: visible(wrapper), text: clean(wrapper.innerText || wrapper.textContent),
+          left: box.left, top: box.top, width: box.width, height: box.height,
+          wrapperClass: wrapper.className || '', wrapperAriaChecked: wrapper.getAttribute('aria-checked'),
+          value: input?.value || '', checked: Boolean(input?.checked), disabled: Boolean(input?.disabled),
+          inputAriaChecked: input?.getAttribute('aria-checked') || null,
+          html: wrapper.outerHTML.slice(0, 5000)
+        };
+      });
+    const colorValueControls = [...document.querySelectorAll('input[value="191288010"]')]
+      .map((input) => {
+        const wrapper = input.closest('label') || input.parentElement;
+        const box = wrapper?.getBoundingClientRect() || input.getBoundingClientRect();
+        return {
+          visible: visible(wrapper), text: clean(wrapper?.innerText || wrapper?.textContent),
+          left: box.left, top: box.top, width: box.width, height: box.height,
+          checked: Boolean(input.checked), disabled: Boolean(input.disabled),
+          inputAriaChecked: input.getAttribute('aria-checked'),
+          ancestors: snapshot(input, 8)
+        };
+      });
+    const visibleCheckboxControls = [...document.querySelectorAll('label.next-checkbox-wrapper')]
+      .filter(visible).map((wrapper) => {
+        const input = wrapper.querySelector('input[type="checkbox"]');
+        const box = wrapper.getBoundingClientRect();
+        return {
+          text: clean(wrapper.innerText || wrapper.textContent), value: input?.value || '',
+          left: box.left, top: box.top, width: box.width, height: box.height,
+          checked: Boolean(input?.checked), disabled: Boolean(input?.disabled),
+          inputAriaChecked: input?.getAttribute('aria-checked') || null,
+          parentClass: wrapper.parentElement?.className || '',
+          grandparentClass: wrapper.parentElement?.parentElement?.className || ''
+        };
+      }).sort((a, b) => a.top - b.top).slice(0, 120);
+    const exactColorNodes = [...document.querySelectorAll('body *')]
+      .filter((node) => visible(node) && /^(?:颜色|colou?r)$/i.test(clean(node.innerText || node.textContent)))
+      .map((node) => {
+        const box = node.getBoundingClientRect();
+        return {
+          tag: node.tagName, className: String(node.className || ''),
+          left: box.left, top: box.top + window.scrollY, width: box.width, height: box.height,
+          ancestors: snapshot(node, 7)
+        };
+      }).sort((a, b) => a.top - b.top).slice(0, 30);
+    const keySpecNodes = [...document.querySelectorAll('body *')]
+      .filter((node) => visible(node) && /商品规格项|支持传图/.test(clean(node.innerText || node.textContent)))
+      .filter((node) => ![...node.children].some((child) => /商品规格项|支持传图/.test(clean(child.innerText || child.textContent))))
+      .map((node) => {
+        const box = node.getBoundingClientRect();
+        return {
+          tag: node.tagName, className: String(node.className || ''),
+          text: clean(node.innerText || node.textContent),
+          left: box.left, top: box.top + window.scrollY, width: box.width, height: box.height,
+          ancestors: snapshot(node, 8)
+        };
+      }).sort((a, b) => a.top - b.top).slice(0, 30);
+    const reactDetails = ['#p-191288010', '#p-210218404', '#p-200399262', '#saleAttributesItems', '#struct-saleAttributesItems', 'input[value="191288010"]']
+      .flatMap((selector) => [...document.querySelectorAll(selector)].map((node, index) => {
+        const own = Object.getOwnPropertyNames(node);
+        const propKey = own.find((key) => key.startsWith('__reactProps'));
+        const fiberKey = own.find((key) => key.startsWith('__reactFiber'));
+        const summarizeValue = (value) => {
+          if (typeof value === 'function') return `function:${String(value).slice(0, 1200)}`;
+          if (value == null || ['string', 'number', 'boolean'].includes(typeof value)) return value;
+          if (Array.isArray(value)) {
+            return {
+              type: `array(${value.length})`,
+              values: value.slice(0, 30).map((item) => {
+                if (item == null || ['string', 'number', 'boolean'].includes(typeof item)) return item;
+                if (typeof item === 'function') return `function:${String(item).slice(0, 500)}`;
+                return {
+                  constructor: item?.constructor?.name || '',
+                  keys: Object.keys(item || {}).slice(0, 50),
+                  values: Object.fromEntries(Object.entries(item || {})
+                    .filter(([, nested]) => nested == null || ['string', 'number', 'boolean'].includes(typeof nested))
+                    .slice(0, 50))
+                };
+              })
+            };
+          }
+          const entries = Object.entries(value || {}).slice(0, 80);
+          return {
+            constructor: value?.constructor?.name || '',
+            keys: Object.keys(value || {}).slice(0, 100),
+            values: Object.fromEntries(entries
+              .filter(([, item]) => item == null || ['string', 'number', 'boolean', 'function'].includes(typeof item))
+              .map(([key, item]) => [key, typeof item === 'function' ? `function:${String(item).slice(0, 800)}` : item]))
+          };
+        };
+        const summarize = (object) => Object.fromEntries(Object.entries(object || {}).slice(0, 80)
+          .map(([key, value]) => [key, summarizeValue(value)]));
+        const fibers = [];
+        let fiber = fiberKey ? node[fiberKey] : null;
+        for (let depth = 0; fiber && depth < 10; depth += 1, fiber = fiber.return) {
+          fibers.push({
+            depth,
+            elementType: typeof fiber.elementType === 'string' ? fiber.elementType : (fiber.elementType?.name || fiber.type?.name || ''),
+            props: summarize(fiber.memoizedProps),
+            stateNodeConstructor: fiber.stateNode?.constructor?.name || '',
+            stateNodeKeys: Object.getOwnPropertyNames(fiber.stateNode || {}).slice(0, 100),
+            stateNodeState: summarize(fiber.stateNode?.state),
+            stateNodeProps: summarize(fiber.stateNode?.props),
+            stateNodeMethods: Object.getOwnPropertyNames(Object.getPrototypeOf(fiber.stateNode || {}) || {})
+              .filter((key) => typeof fiber.stateNode?.[key] === 'function')
+              .slice(0, 80)
+          });
+        }
+        return { selector, index, tag: node.tagName, id: node.id || '', className: String(node.className || ''), props: summarize(propKey ? node[propKey] : null), fibers };
+      }));
+    const saleAttributeFiberTree = (() => {
+      const root = document.querySelector('#saleAttributesItems');
+      if (!root) return [];
+      const summarizeTree = (object) => Object.fromEntries(Object.entries(object || {}).slice(0, 80).map(([key, value]) => {
+        if (typeof value === 'function') return [key, `function:${String(value).slice(0, 1400)}`];
+        if (value == null || ['string', 'number', 'boolean'].includes(typeof value)) return [key, value];
+        if (Array.isArray(value)) return [key, {
+          type: `array(${value.length})`,
+          values: value.slice(0, 30).map((item) => item && typeof item === 'object'
+            ? Object.fromEntries(Object.entries(item).filter(([, nested]) => nested == null || ['string', 'number', 'boolean'].includes(typeof nested)).slice(0, 40))
+            : item)
+        }];
+        return [key, {
+          constructor: value?.constructor?.name || '',
+          values: Object.fromEntries(Object.entries(value || {})
+            .filter(([, nested]) => nested == null || ['string', 'number', 'boolean', 'function'].includes(typeof nested))
+            .slice(0, 50).map(([nestedKey, nested]) => [nestedKey, typeof nested === 'function' ? `function:${String(nested).slice(0, 1000)}` : nested]))
+        }];
+      }));
+      const fiberKey = Object.getOwnPropertyNames(root).find((key) => key.startsWith('__reactFiber'));
+      let start = fiberKey ? root[fiberKey] : null;
+      for (let depth = 0; start && depth < 10; depth += 1) {
+        if (start.memoizedProps?.id === 'saleAttributesItems' && typeof start.elementType !== 'string') break;
+        start = start.return;
+      }
+      const results = [];
+      const visit = (fiber, path, depth) => {
+        if (!fiber || depth > 16 || results.length >= 160) return;
+        const props = fiber.memoizedProps || {};
+        const stateNode = fiber.stateNode;
+        const type = typeof fiber.elementType === 'string' ? fiber.elementType : (fiber.elementType?.name || fiber.type?.name || '');
+        const hasRelevantProps = ['onChange', 'change', 'changeValue', 'value', 'dataSource', 'id']
+          .some((key) => Object.prototype.hasOwnProperty.call(props, key));
+        if (hasRelevantProps || stateNode?.constructor?.name && !/HTML.*Element/.test(stateNode.constructor.name)) {
+          results.push({
+            path, depth, type,
+            stateNodeConstructor: stateNode?.constructor?.name || '',
+             stateNodeKeys: Object.getOwnPropertyNames(stateNode || {}).slice(0, 80),
+             stateNodeOwnFunctions: Object.fromEntries(Object.getOwnPropertyNames(stateNode || {})
+               .filter((key) => typeof stateNode?.[key] === 'function')
+               .slice(0, 30)
+               .map((key) => [key, String(stateNode[key]).slice(0, 2400)])),
+             stateNodeState: summarizeTree(stateNode?.state),
+            props: summarizeTree(props),
+            methods: Object.getOwnPropertyNames(Object.getPrototypeOf(stateNode || {}) || {})
+              .filter((key) => typeof stateNode?.[key] === 'function').slice(0, 80)
+          });
+        }
+        visit(fiber.child, `${path}.c`, depth + 1);
+        visit(fiber.sibling, `${path}.s`, depth);
+      };
+      visit(start?.child, 'component.c', 0);
+      return results;
+    })();
+    const formEngineDetails = (() => {
+      const root = document.querySelector('#saleAttributesItems');
+      if (!root) return {};
+      const summarizeEngine = (object) => Object.fromEntries(Object.entries(object || {}).slice(0, 100).map(([key, value]) => {
+        if (typeof value === 'function') return [key, `function:${String(value).slice(0, 1400)}`];
+        if (value == null || ['string', 'number', 'boolean'].includes(typeof value)) return [key, value];
+        if (Array.isArray(value)) return [key, { type: `array(${value.length})`, values: value.slice(0, 30).map((item) => item && typeof item === 'object' ? Object.fromEntries(Object.entries(item).filter(([, nested]) => nested == null || ['string', 'number', 'boolean'].includes(typeof nested)).slice(0, 40)) : item) }];
+        return [key, { constructor: value?.constructor?.name || '', keys: Object.keys(value || {}).slice(0, 80) }];
+      }));
+      const fiberKey = Object.getOwnPropertyNames(root).find((key) => key.startsWith('__reactFiber'));
+      let fiber = fiberKey ? root[fiberKey] : null;
+      for (let depth = 0; fiber && depth < 12; depth += 1, fiber = fiber.return) {
+        const props = fiber.memoizedProps || fiber.stateNode?.props;
+        if (props?.id !== 'saleAttributesItems' || typeof props.getEngine !== 'function') continue;
+        const engine = props.getEngine();
+        const componentDetails = (id) => {
+          const component = engine?.getComponent?.(id);
+          const componentProps = component?.getProps?.() || {};
+          return {
+            id,
+            constructor: component?.constructor?.name || '',
+            keys: Object.getOwnPropertyNames(component || {}).slice(0, 120),
+            methods: Object.getOwnPropertyNames(Object.getPrototypeOf(component || {}) || {})
+              .filter((key) => typeof component?.[key] === 'function').slice(0, 100),
+            methodSources: Object.fromEntries(Object.getOwnPropertyNames(component || {})
+              .filter((key) => typeof component?.[key] === 'function')
+              .map((key) => [key, String(component[key]).slice(0, 1600)])),
+            props: summarizeEngine(componentProps)
+          };
+        };
+        return {
+          constructor: engine?.constructor?.name || '',
+          keys: Object.getOwnPropertyNames(engine || {}).slice(0, 150),
+          methods: Object.getOwnPropertyNames(Object.getPrototypeOf(engine || {}) || {})
+            .filter((key) => typeof engine?.[key] === 'function').slice(0, 120),
+          components: ['saleAttributesItems', 'p-191288010', 'p-210218404', 'p-200399262'].map(componentDetails)
+        };
+      }
+      return {};
+    })();
     const textareas = [...document.querySelectorAll('textarea')].map((node) => ({
       id: node.id || '', name: node.name || '', visible: visible(node), valueLength: node.value?.length || 0,
       className: String(node.className || '').slice(0, 250), html: node.outerHTML.slice(0, 2500)
@@ -250,7 +457,9 @@ async function currentFormDiagnostics(page) {
     const editors = [...(window.tinymce?.editors || []), ...(window.tinyMCE?.editors || [])]
       .filter((editor, index, all) => editor && all.indexOf(editor) === index)
       .map((editor) => ({ id: editor.id || '', hidden: Boolean(editor.hidden), contentLength: editor.getContent?.().length || 0 }));
-    return { colorInputs, colorSpecContainers, textareas, iframes, fileInputs, overlays, ordinaryLabels, errors, editors };
+    const saleAttributesHtml = document.querySelector('#saleAttributesItems')?.outerHTML?.slice(0, 30000) || '';
+    const structSaleAttributesHtml = document.querySelector('#struct-saleAttributesItems')?.outerHTML?.slice(0, 30000) || '';
+    return { colorInputs, colorSpecContainers, saleSpecControls, colorValueControls, visibleCheckboxControls, exactColorNodes, keySpecNodes, reactDetails, saleAttributeFiberTree, formEngineDetails, saleAttributesHtml, structSaleAttributesHtml, textareas, iframes, fileInputs, overlays, ordinaryLabels, errors, editors };
   });
   main.frameBodies = [];
   for (const frame of page.frames()) {
@@ -285,7 +494,7 @@ async function waitForActionResult(page, action, mode, originalUrl) {
       const combined = feedback.join(' ');
       const blockingFeedback = /报错反馈|错误项|必填项.*不能为空|请上传相关产品图片|请不要输入如下非英文字符|required|invalid/i.test(combined);
       const succeeded = mode === 'submit'
-        ? /发布成功|提交成功|审核中|successfully\s+(?:submitted|published)|submitted successfully/i.test(combined)
+        ? /发布成功|提交成功|审核中|产品信息已经成功提交|产品已经进入审核流程|successfully\s+(?:submitted|published)|submitted successfully/i.test(combined)
         : /保存成功|草稿.*成功|已保存|successfully\s+saved|saved successfully/i.test(combined);
       if (succeeded && mode === 'submit' && blockingFeedback) {
         // Alibaba can show a generic success-like toast while the quality
@@ -348,6 +557,16 @@ const ATTRIBUTE_NAME_TRANSLATIONS = new Map(Object.entries({
   '运行内存': 'RAM',
   '存储容量': 'Storage Capacity'
 }));
+
+const SOURCE_ATTRIBUTE_LABEL_ALIASES = new Map([
+  ['private mold', ['私模']],
+  ['material', ['材质']],
+  ['feature', ['功能', '特性', '功能/特性']],
+  ['features', ['功能', '特性', '功能/特性']],
+  ['brand name', ['品牌名称']],
+  ['place of origin', ['产地']],
+  ['model number', ['型号']]
+]);
 
 const TEXT_TRANSLATIONS = [
   ['联发科天玑', 'MediaTek Dimensity '], ['联发科', 'MediaTek '],
@@ -623,7 +842,6 @@ async function fillChoice(page, locator, value) {
 async function fillColorSpec(page, values) {
   const colors = [...new Set((values || []).map((value) => englishSpecText(value)).filter(Boolean))];
   if (!colors.length) return false;
-  const colorRows = () => page.locator('.posting-feild-color-item');
   // Do not fall back to generic "please enter or select" inputs here. The
   // publish form contains hidden autocomplete templates and unrelated
   // attribute inputs with the same placeholder; treating those as color
@@ -641,18 +859,6 @@ async function fillColorSpec(page, values) {
   ].join(', ');
   const selectedColors = async () => page.locator('.posting-feild-color-item input[role="colorCombobox"], .posting-feild-color-item-container input[role="colorCombobox"], .posting-field-color-select input[role="colorCombobox"], .posting-feild-color-select input[role="colorCombobox"]').evaluateAll((nodes) => nodes
     .map((node) => String(node.value || '').replace(/\s+/g, ' ').trim()).filter(Boolean)).catch(() => []);
-  const removeEmptyColorRows = async () => {
-    const rows = colorRows();
-    const count = await rows.count().catch(() => 0);
-    for (let index = count - 1; index >= 0; index -= 1) {
-      const row = rows.nth(index);
-      const label = String(await row.locator('.next-sr-only').innerText().catch(() => '')).trim();
-      const inputValue = String(await row.locator('input').inputValue().catch(() => '')).trim();
-      if (label || inputValue) continue;
-      const remove = row.locator('button, [role="button"], [class*="delete"], [class*="remove"]').last();
-      if (await remove.isVisible().catch(() => false)) await remove.click({ force: true }).catch(() => {});
-    }
-  };
   const colorInput = await firstVisible(page, [colorInputSelector]);
   if (!colorInput) return false;
   for (const color of colors) {
@@ -687,12 +893,15 @@ async function fillColorSpec(page, values) {
         return true;
       }, color).catch(() => false);
     }
-    // Always send the keyboard confirmation as well. Alibaba's autocomplete
-    // keeps the typed text in the input when a mouse click hits the label span
-    // instead of the option controller; ArrowDown+Enter commits the value in
-    // that implementation and is idempotent after a successful mouse click.
-    await input.press('ArrowDown').catch(() => {});
-    await input.press('Enter').catch(() => {});
+    // Selecting the exact option is the complete transaction in Alibaba's
+    // current form. There is no second global "Add" confirmation. Clicking a
+    // page-wide Add button here can open the custom compatible-model editor
+    // and cause React to rebuild the color card, discarding the committed
+    // value and its specification image.
+    if (!committed) {
+      await input.press('ArrowDown').catch(() => {});
+      await input.press('Enter').catch(() => {});
+    }
     // Some Alibaba categories render the suggestion as an unlabelled div and
     // Playwright's role/text locators miss the click target. Trigger the same
     // bubbling mouse sequence in the page as a final selection fallback.
@@ -708,26 +917,17 @@ async function fillColorSpec(page, values) {
       }, color).catch(() => false);
       await input.press('Enter').catch(() => {});
     }
-    await page.waitForTimeout(450);
-    const addCandidates = [page.getByText('+ 添加', { exact: true }), page.getByText('添加', { exact: true })];
-    let addClicked = false;
-    for (const candidate of addCandidates) {
-      if (!await candidate.last().isVisible().catch(() => false)) continue;
-      await candidate.last().click({ force: true }).catch(() => {});
-      addClicked = true;
-      break;
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline) {
+      if ((await selectedColors()).some((item) => item.toLowerCase() === color.toLowerCase())) break;
+      await page.waitForTimeout(150);
     }
-    if (!addClicked) await input.press('Enter').catch(() => {});
-    await page.waitForTimeout(500);
   }
-  await removeEmptyColorRows();
   const selected = await selectedColors();
-  // On the current form a committed value remains in the combobox input (the
-  // screen reader span is empty), so the input values are the authoritative
-  // success signal. Require no empty row to remain either.
-  const rows = colorRows();
-  const rowCount = await rows.count().catch(() => 0);
-  return colors.every((color) => selected.some((item) => item.trim().toLowerCase() === color.toLowerCase())) && rowCount >= colors.length;
+  // The final empty .posting-feild-color-item is Alibaba's built-in template
+  // row for another value, not a validation failure. Only committed source
+  // values are authoritative here.
+  return colors.every((color) => selected.some((item) => item.trim().toLowerCase() === color.toLowerCase()));
 }
 
 async function fillVariantSpecs(page, variantGroups) {
@@ -740,100 +940,227 @@ async function fillVariantSpecs(page, variantGroups) {
     if (/^(?:model|型号)$/i.test(normalized)) return ['型号', 'model'];
     return [String(name || '').trim()].filter(Boolean);
   };
-  const addCustomVariantValue = async (aliases, value) => {
-    const result = await page.evaluate(({ aliases: expectedAliases, expectedValue }) => {
-      const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
-      const normalize = (text) => String(text || '').replace(/\s+/g, ' ').trim();
-      const matchesAlias = (node) => expectedAliases.includes(normalize(node.textContent).replace(/^[*＊]\s*/, ''));
-      const headings = [...document.querySelectorAll('label, legend, h1, h2, h3, div, span, p')]
-        .filter((node) => visible(node) && matchesAlias(node));
-      const heading = headings.sort((a, b) => normalize(a.textContent).length - normalize(b.textContent).length)[0];
-      if (!heading) return false;
-      const headingBox = heading.getBoundingClientRect();
-      const candidates = [...document.querySelectorAll('button, [role="button"], a, span, div')]
-        .filter((node) => visible(node) && /^(?:\+\s*)?添加$/.test(normalize(node.textContent)))
-        .map((node) => ({ node, box: node.getBoundingClientRect() }))
-        .filter(({ box }) => box.top >= headingBox.bottom - 8 && box.top - headingBox.bottom < 900)
-        .sort((a, b) => (a.box.top - headingBox.bottom) - (b.box.top - headingBox.bottom));
-      const add = candidates[0]?.node;
-      if (!add) return false;
-      add.click();
-      return true;
-    }, { aliases, expectedValue: value }).catch(() => false);
-    if (!result) return false;
-    await page.waitForTimeout(250);
-    const filled = await page.evaluate(({ aliases: expectedAliases, expectedValue }) => {
-      const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
-      const normalize = (text) => String(text || '').replace(/\s+/g, ' ').trim();
-      const matchesAlias = (node) => expectedAliases.includes(normalize(node.textContent).replace(/^[*＊]\s*/, ''));
-      const heading = [...document.querySelectorAll('label, legend, h1, h2, h3, div, span, p')]
-        .filter((node) => visible(node) && matchesAlias(node))
-        .sort((a, b) => normalize(a.textContent).length - normalize(b.textContent).length)[0];
-      if (!heading) return false;
-      const headingBox = heading.getBoundingClientRect();
-      const input = [...document.querySelectorAll('input')]
-        .filter((node) => visible(node) && !node.value && /输入|enter/i.test(node.placeholder || ''))
-        .map((node) => ({ node, box: node.getBoundingClientRect() }))
-        .filter(({ box }) => box.top >= headingBox.bottom - 8 && box.top - headingBox.bottom < 900)
-        .sort((a, b) => (a.box.top - headingBox.bottom) - (b.box.top - headingBox.bottom))[0]?.node;
-      if (!input) return false;
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-      setter?.call(input, expectedValue);
-      input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: expectedValue }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-      input.dispatchEvent(new Event('blur', { bubbles: true }));
-      const inputBox = input.getBoundingClientRect();
-      const add = [...document.querySelectorAll('button, [role="button"], a, span, div')]
-        .filter((node) => visible(node) && /^(?:\+\s*)?添加$/.test(normalize(node.textContent)))
-        .map((node) => ({ node, box: node.getBoundingClientRect() }))
-        .filter(({ box }) => Math.abs(box.top - inputBox.top) < 80 && box.left > inputBox.right - 120)
-        .sort((a, b) => Math.abs(a.box.top - inputBox.top) - Math.abs(b.box.top - inputBox.top))[0]?.node;
-      if (!add) return false;
-      add.click();
-      return true;
-    }, { aliases, expectedValue: value }).catch(() => false);
-    if (!filled) return false;
-    await page.waitForTimeout(350);
-    return page.evaluate(({ aliases: expectedAliases, expectedValue }) => {
-      const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
-      const normalize = (text) => String(text || '').replace(/\s+/g, ' ').trim();
-      const matchesAlias = (node) => expectedAliases.includes(normalize(node.textContent).replace(/^[*＊]\s*/, ''));
-      const headings = [...document.querySelectorAll('label, legend, h1, h2, h3, div, span, p')]
-        .filter((node) => visible(node) && matchesAlias(node));
-      const heading = headings.sort((a, b) => normalize(a.textContent).length - normalize(b.textContent).length)[0];
-      if (!heading) return false;
-      let container = heading;
-      for (let depth = 0; depth < 8 && container; depth += 1, container = container.parentElement) {
-        if ([...container.querySelectorAll('label, span, div, li')].some((node) => visible(node) && normalize(node.textContent) === expectedValue)) return true;
+  const rowFor = async (aliases) => {
+    const rows = page.locator('#struct-specification [id^="p-"]');
+    const expected = aliases.map((item) => String(item).toLowerCase());
+    const count = await rows.count().catch(() => 0);
+    for (let index = 0; index < count; index += 1) {
+      const row = rows.nth(index);
+      if (!await row.isVisible().catch(() => false)) continue;
+      const matches = await row.evaluate((node, values) => {
+        const normalize = (text) => String(text || '').replace(/\s+/g, ' ').replace(/^[*＊]\s*/, '').trim().toLowerCase();
+        return [...node.querySelectorAll('label, legend, h1, h2, h3, span, div, p')]
+          .some((child) => values.includes(normalize(child.textContent)));
+      }, expected).catch(() => false);
+      if (matches) return row;
+    }
+    return null;
+  };
+  const selectExactValue = async (row, value) => {
+    const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const labels = row.locator('label').filter({ hasText: new RegExp(`^${escaped}$`, 'i') });
+    const count = await labels.count().catch(() => 0);
+    for (let index = 0; index < count; index += 1) {
+      const label = labels.nth(index);
+      if (!await label.isVisible().catch(() => false)) continue;
+      const input = label.locator('input[type="checkbox"], input[type="radio"]').first();
+      if (!await input.count().catch(() => 0)) continue;
+      if (!await input.isChecked().catch(() => false)) {
+        await label.click({ force: true }).catch(() => {});
+        await page.waitForTimeout(160);
       }
-      return false;
-    }, { aliases, expectedValue: value }).catch(() => false);
+      if (await input.isChecked().catch(() => false)) return true;
+    }
+    return false;
+  };
+  const addCustomVariantValue = async (row, value) => {
+    const openControls = row.getByText(/^\+?\s*添加$/, { exact: true });
+    const openCount = await openControls.count().catch(() => 0);
+    let opened = false;
+    for (let index = 0; index < openCount; index += 1) {
+      const control = openControls.nth(index);
+      if (!await control.isVisible().catch(() => false)) continue;
+      await control.click({ force: true }).catch(() => {});
+      opened = true;
+      break;
+    }
+    if (!opened) return false;
+    await page.waitForTimeout(250);
+    const inputs = row.locator('input[placeholder*="输入"], input[placeholder*="enter" i]');
+    const inputCount = await inputs.count().catch(() => 0);
+    let customInput = null;
+    for (let index = inputCount - 1; index >= 0; index -= 1) {
+      const input = inputs.nth(index);
+      if (await input.isVisible().catch(() => false)) { customInput = input; break; }
+    }
+    if (!customInput) return false;
+    await customInput.fill(value);
+    await page.waitForTimeout(100);
+    const confirmControls = row.getByText(/^\+?\s*添加$/, { exact: true });
+    const confirmCount = await confirmControls.count().catch(() => 0);
+    let confirmed = false;
+    for (let index = confirmCount - 1; index >= 0; index -= 1) {
+      const control = confirmControls.nth(index);
+      if (!await control.isVisible().catch(() => false)) continue;
+      await control.click({ force: true }).catch(() => {});
+      confirmed = true;
+      break;
+    }
+    if (!confirmed) return false;
+    await page.waitForTimeout(350);
+    return selectExactValue(row, value);
   };
   for (const group of groups) {
+    const row = await rowFor(aliasesFor(group.name));
     for (const rawValue of [...new Set(group.options || [])]) {
       const value = englishSpecText(rawValue);
       if (!value) continue;
-      const option = await page.locator('label, span, div').filter({ hasText: new RegExp(`^${value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`) }).last();
-      if (!await option.isVisible().catch(() => false)) {
-        const added = await addCustomVariantValue(aliasesFor(group.name), value);
-        if (!added) unmapped.push(`${group.name}: ${value}`);
+      if (!row) {
+        unmapped.push(`${group.name}: ${value}`);
         continue;
       }
-      let checked = await option.evaluate((node) => {
-        const host = node.closest('label') || node.parentElement;
-        const input = host?.querySelector('input[type="checkbox"], input[type="radio"]');
-        if (!input) return false;
-        if (!input.checked) input.click();
-        return true;
-      }).catch(() => false);
-      if (!checked) {
-        await option.click({ force: true }).catch(() => {});
-        checked = true;
+      if (!await selectExactValue(row, value)) {
+        const added = await addCustomVariantValue(row, value);
+        if (!added) unmapped.push(`${group.name}: ${value}`);
       }
-      await page.waitForTimeout(120);
     }
   }
   return { unmapped };
+}
+
+async function visibleColorSpecControl(page) {
+  // Alibaba has used several different container class names for this area.
+  // Resolve the first visible exact color checkbox in document order and
+  // explicitly reject the later light/deep-customization sections.
+  const wrappers = page.locator('label, [role="checkbox"]')
+    .filter({ hasText: /^(?:颜色|colou?r)$/i });
+  const count = await wrappers.count().catch(() => 0);
+  const candidates = [];
+  for (let index = 0; index < count; index += 1) {
+    const wrapper = wrappers.nth(index);
+    if (!await wrapper.isVisible().catch(() => false)) continue;
+    const metadata = await wrapper.evaluate((node) => ({
+      text: String(node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim(),
+      excluded: Boolean(node.closest('[class*="customizedServices"], [class*="CustomizedServices"]')),
+      top: node.getBoundingClientRect().top + window.scrollY
+    })).catch(() => null);
+    if (!metadata || metadata.excluded || !/^(?:颜色|colou?r)$/i.test(metadata.text)) continue;
+    const input = wrapper.locator('input[type="checkbox"]').first();
+    if (!await input.count().catch(() => 0)) continue;
+    candidates.push({ wrapper, input, top: metadata.top });
+  }
+  candidates.sort((left, right) => left.top - right.top);
+  return candidates[0] || null;
+}
+
+async function visibleColorSpecRow(page) {
+  const rows = page.locator('[id="p-191288010"]');
+  const count = await rows.count().catch(() => 0);
+  for (let index = 0; index < count; index += 1) {
+    const row = rows.nth(index);
+    if (await row.isVisible().catch(() => false)) return row;
+  }
+  return null;
+}
+
+async function saleAttributeIsSelected(page, value) {
+  return page.evaluate((expectedValue) => {
+    const root = document.querySelector('#saleAttributesItems');
+    if (!root) return false;
+    const fiberKey = Object.getOwnPropertyNames(root).find((key) => key.startsWith('__reactFiber'));
+    let fiber = fiberKey ? root[fiberKey] : null;
+    for (let depth = 0; fiber && depth < 12; depth += 1, fiber = fiber.return) {
+      const props = fiber.memoizedProps || fiber.stateNode?.props;
+      if (props?.id !== 'saleAttributesItems' || !Array.isArray(props.dataSource)) continue;
+      return (props.value || []).some((item) => String(item?.value) === String(expectedValue));
+    }
+    return false;
+  }, value).catch(() => false);
+}
+
+async function ensureSaleAttributeSelected(page, value) {
+  if (await saleAttributeIsSelected(page, value)) return true;
+  const committed = await page.evaluate((expectedValue) => {
+    const root = document.querySelector('#saleAttributesItems');
+    if (!root) return { ok: false, reason: 'missing-root' };
+    const fiberKey = Object.getOwnPropertyNames(root).find((key) => key.startsWith('__reactFiber'));
+    let fiber = fiberKey ? root[fiberKey] : null;
+    let componentFiber = null;
+    for (let depth = 0; fiber && depth < 12; depth += 1, fiber = fiber.return) {
+      const props = fiber.memoizedProps || fiber.stateNode?.props;
+      if (props?.id !== 'saleAttributesItems' || !Array.isArray(props.value)) continue;
+      componentFiber = fiber;
+      const dataSource = Array.isArray(props.dataSource) ? props.dataSource : [];
+      const current = Array.isArray(props.value) ? props.value : [];
+      if (current.some((item) => String(item?.value) === String(expectedValue))) return { ok: true, already: true };
+      const option = dataSource.find((item) => String(item?.value) === String(expectedValue));
+      if (!option) return { ok: false, reason: 'missing-option', options: dataSource.map((item) => item?.value) };
+      if (current.length >= Number(props.maxItem || 4)) return { ok: false, reason: 'max-items' };
+      const selectedIds = [...current.map((item) => String(item?.value)), String(option.value)];
+      const seen = new Set();
+      const visit = (candidate, depth = 0) => {
+        if (!candidate || depth > 18 || seen.has(candidate)) return null;
+        seen.add(candidate);
+        const instance = candidate.stateNode;
+        if (instance?.constructor?.name === 'SaleAttributesItems' && typeof instance.onChange === 'function') return instance;
+        return visit(candidate.child, depth + 1) || visit(candidate.sibling, depth);
+      };
+      const instance = visit(componentFiber.child);
+      if (instance) {
+        instance.onChange(selectedIds);
+        return { ok: true, method: 'SaleAttributesItems.onChange', selectedIds };
+      }
+      const next = [...current, { ...option }];
+      if (typeof props.changeValue === 'function') {
+        props.changeValue.call(props, next);
+        return { ok: true, method: 'changeValue' };
+      }
+      if (typeof props.change === 'function') {
+        props.change(props.id, { props: { value: next } });
+        return { ok: true, method: 'change' };
+      }
+      return { ok: false, reason: 'missing-change-handler' };
+    }
+    return { ok: false, reason: 'missing-component' };
+  }, value).catch((error) => ({ ok: false, reason: error.message }));
+  if (!committed?.ok) return false;
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    if (await saleAttributeIsSelected(page, value)) return true;
+    await page.waitForTimeout(200);
+  }
+  return false;
+}
+
+async function specControlIsChecked(control) {
+  if (!control) return false;
+  const { wrapper, input } = control;
+  if (await input.isChecked().catch(() => false)) return true;
+  if (await input.getAttribute('aria-checked').catch(() => '') === 'true') return true;
+  if (await wrapper.getAttribute('aria-checked').catch(() => '') === 'true') return true;
+  const className = await wrapper.getAttribute('class').catch(() => '');
+  return /(?:^|\s)(?:checked|is-checked)(?:\s|$)/i.test(className || '');
+}
+
+async function ensureSpecControlChecked(page, resolveControl) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const control = await resolveControl();
+    if (!control) return false;
+    if (await specControlIsChecked(control)) return true;
+    await control.wrapper.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(350);
+    const refreshed = await resolveControl();
+    if (await specControlIsChecked(refreshed)) return true;
+    await control.input.evaluate((input) => {
+      const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked');
+      descriptor?.set?.call(input, true);
+      input.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }).catch(() => {});
+    await page.waitForTimeout(350);
+  }
+  return specControlIsChecked(await resolveControl());
 }
 
 async function enableSpecImageUpload(page, product, colorGroup, downloadImages) {
@@ -841,20 +1168,18 @@ async function enableSpecImageUpload(page, product, colorGroup, downloadImages) 
   const imageUrl = colorValues.map((value) => colorGroup?.optionImages?.[value] || colorGroup?.optionImages?.[colorGroup.options?.find((item) => englishSpecText(item) === value)]).find(Boolean);
   if (!imageUrl) return false;
 
-  // The product-specification selector is separate from the hidden color row.
-  // Enable the source color spec first so Alibaba materializes its combobox
-  // and specification-image switch.
-  const colorToggle = page.locator('label.next-checkbox-wrapper').filter({ hasText: /^Color$/i }).last();
-  if (await colorToggle.isVisible().catch(() => false)) {
-    const input = colorToggle.locator('input[type="checkbox"]').first();
-    if (await input.count().catch(() => 0) && !await input.isChecked().catch(() => false)) {
-      await colorToggle.click({ force: true }).catch(() => {});
-      await page.waitForTimeout(350);
-    }
-  }
+  // Commit through the specification selector's own form-model callback.
+  // Mutating the child row directly creates a visually populated value that
+  // Alibaba rejects because saleAttributesItems still omits the specification.
+  if (!await ensureSaleAttributeSelected(page, '191288010')) return false;
 
-  const row = page.locator('#p-191288010');
-  if (!await row.isVisible().catch(() => false)) return false;
+  const rowDeadline = Date.now() + 5000;
+  let row = await visibleColorSpecRow(page);
+  while (!row && Date.now() < rowDeadline) {
+    await page.waitForTimeout(200);
+    row = await visibleColorSpecRow(page);
+  }
+  if (!row) return false;
   const imageSwitch = row.locator('[role="switch"]').first();
   if (await imageSwitch.isVisible().catch(() => false) && await imageSwitch.getAttribute('aria-checked').catch(() => 'false') !== 'true') {
     await imageSwitch.click({ force: true }).catch(() => {});
@@ -862,11 +1187,52 @@ async function enableSpecImageUpload(page, product, colorGroup, downloadImages) 
   }
   const files = await downloadImages([imageUrl], 'spec', 1);
   if (!files.length) return false;
-  const input = row.locator('input[type="file"]').last();
-  if (!await input.count().catch(() => 0)) return false;
-  await input.setInputFiles(files[0]);
-  await page.waitForTimeout(1800);
-  return true;
+  const expectedColor = colorValues[0];
+  const items = row.locator('.posting-feild-color-item');
+  let item = null;
+  for (let index = 0; index < await items.count().catch(() => 0); index += 1) {
+    const candidate = items.nth(index);
+    const inputValue = await candidate.locator('input[role="colorCombobox"]').inputValue().catch(() => '');
+    if (String(inputValue).trim().toLowerCase() === expectedColor.toLowerCase()) {
+      item = candidate;
+      break;
+    }
+  }
+  if (!item) return false;
+
+  const uploadBox = item.locator('.custom-upload-image').first();
+  await uploadBox.hover({ force: true }).catch(() => {});
+  await page.waitForTimeout(150);
+  const uploadButton = item.getByRole('button', { name: /本地选取|本地上传|local/i }).last();
+  let chooserUsed = false;
+  if (await uploadButton.isVisible().catch(() => false)) {
+    const chooserPromise = page.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null);
+    await uploadButton.click({ force: true }).catch(() => {});
+    const chooser = await chooserPromise;
+    if (chooser) {
+      await chooser.setFiles(files[0]);
+      chooserUsed = true;
+    }
+  }
+  if (!chooserUsed) {
+    const input = item.locator('input[type="file"]').last();
+    if (!await input.count().catch(() => 0)) return false;
+    await input.setInputFiles(files[0]);
+  }
+
+  const preview = item.locator([
+    '.value-preview.uploaded img[src]',
+    '.value-preview img[src]',
+    '.value-preview [style*="background-image"]'
+  ].join(', '));
+  const uploadDeadline = Date.now() + 60000;
+  while (!await preview.count().catch(() => 0) && Date.now() < uploadDeadline) {
+    const feedback = (await visibleFeedback(page)).join(' ');
+    if (/上传失败|图片.*不符合|upload failed/i.test(feedback)) return false;
+    await page.waitForTimeout(350);
+  }
+  if (!await preview.count().catch(() => 0)) return false;
+  return saleAttributeIsSelected(page, '191288010');
 }
 
 async function switchToLegacyDetails(page) {
@@ -1523,99 +1889,55 @@ export class SellerPublisher {
     const urls = product.mainImages?.length ? product.mainImages : [product.mainImage, ...(product.images || [])];
     const images = await this.downloadImageSet(product, urls, 'main', 6);
     if (images.length < 4) throw new Error(`主图资料不足：仅下载到 ${images.length} 张，至少需要 4 张`);
-    // Alibaba keeps the six main-image file inputs hidden inside each
-    // `.image-upload-list-item`; Playwright can still assign files to these
-    // controls directly. Looking only for visible file inputs caused the
-    // browser file picker fallback to hit the photo-bank menu and left all
-    // main-image slots empty.
-    const mainInput = page.locator('.image-upload-list-item input[type="file"][accept*="image"], .image-upload-list-item input[type="file"]').first();
-    if (await mainInput.count().catch(() => 0)) {
-      await mainInput.setInputFiles(images);
-      return await this.waitForMainImageUploads(page, images.length);
-    }
-    const directInput = page.locator('input[type="file"][accept*="image"], input[type="file"]').first();
-    if (await directInput.count().catch(() => 0)) {
-      await directInput.setInputFiles(images);
-      return await this.waitForMainImageUploads(page, images.length);
-    }
-    const triggerSelectors = [
-      '.image-upload-list-item #image-placeholder-span',
-      '.image-upload-list-item #image-placeholder-icon',
-      '.image-upload-list-item #image-placeholder-span',
-      '.image-upload-list-item #image-placeholder-icon'
-    ];
-    let chooser = null;
-    for (let attempt = 0; attempt < 12; attempt += 1) {
-      const selector = triggerSelectors[attempt % triggerSelectors.length];
-      const trigger = page.locator(selector).first();
-      if (!await trigger.isVisible().catch(() => false)) continue;
-
+    const placeholders = () => page.locator('.image-uploader .image-upload-list-item #image-placeholder-span');
+    for (const [index, image] of images.entries()) {
+      const before = await placeholders().count().catch(() => 0);
+      const trigger = placeholders().first();
+      if (!before || !await trigger.isVisible().catch(() => false)) {
+        throw new Error(`国际站主图第 ${index + 1} 个上传槽位不存在`);
+      }
       await trigger.hover().catch(() => {});
-      await page.waitForTimeout(500);
-      let popupFileInput = page.locator('input[type="file"][accept*="image"]');
-      let popupFileInputCount = await popupFileInput.count().catch(() => 0);
-      if (popupFileInputCount) {
-        await popupFileInput.nth(popupFileInputCount - 1).setInputFiles(images);
-        await page.waitForTimeout(1000);
-        return await this.waitForMainImageUploads(page, images.length);
+      await page.waitForTimeout(350);
+      let localUpload = await firstVisibleByText(page, '本地上传', false);
+      if (!localUpload) {
+        await trigger.click({ force: true }).catch(() => {});
+        await page.waitForTimeout(350);
+        localUpload = await firstVisibleByText(page, '本地上传', false);
+      }
+      if (!localUpload) {
+        const menuText = compactText(await page.locator('[class*="menu"], [class*="popup"], [class*="overlay"]').allInnerTexts().catch(() => []), 500);
+        throw new Error(`国际站主图第 ${index + 1} 个槽位未出现“本地上传”${menuText ? `，当前弹层：${menuText}` : ''}`);
       }
 
-      const chooserPromise = page.waitForEvent('filechooser', { timeout: 1800 }).catch(() => null);
-      await trigger.click({ force: true }).catch(() => {});
-      chooser = await chooserPromise;
-      if (chooser) break;
-
-      popupFileInput = page.locator('input[type="file"][accept*="image"]');
-      const popupDeadline = Date.now() + 5000;
-      while (Date.now() < popupDeadline && !await popupFileInput.count().catch(() => 0)) {
-        await page.waitForTimeout(250);
-      }
-      popupFileInputCount = await popupFileInput.count().catch(() => 0);
-      if (popupFileInputCount) {
-        await popupFileInput.nth(popupFileInputCount - 1).setInputFiles(images);
-        await page.waitForTimeout(1000);
-        return await this.waitForMainImageUploads(page, images.length);
-      }
-
-      const localUpload = await firstVisibleByText(page, '本地上传', false);
-      if (localUpload) {
-        const localChooserPromise = page.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null);
-        const uploadControl = localUpload.locator('xpath=ancestor-or-self::*[@role="upload"][1]');
-        if (await uploadControl.count().catch(() => 0)) await uploadControl.click({ force: true });
-        else await localUpload.click();
-        chooser = await localChooserPromise;
-        if (chooser) break;
-        const fileInputs = page.locator('input[type="file"]');
-        const fileInputCount = await fileInputs.count().catch(() => 0);
-        if (fileInputCount) {
-          const input = fileInputs.nth(fileInputCount - 1);
-          await input.setInputFiles(images);
-          await page.waitForTimeout(5000);
-          return images.length;
+      const chooserPromise = page.waitForEvent('filechooser', { timeout: 4000 }).catch(() => null);
+      await localUpload.click({ force: true }).catch(() => {});
+      const chooser = await chooserPromise;
+      if (chooser) {
+        await chooser.setFiles([image]);
+      } else {
+        const uploadHost = localUpload.locator('xpath=ancestor-or-self::*[.//input[@type="file"]][1]');
+        const scopedInput = uploadHost.locator('input[type="file"]').last();
+        if (!await scopedInput.count().catch(() => 0)) {
+          throw new Error(`国际站主图第 ${index + 1} 个槽位未打开文件选择窗口`);
         }
+        await scopedInput.setInputFiles([image]);
       }
-      await page.keyboard.press('Escape').catch(() => {});
-      const close = page.getByRole('button', { name: /关闭|close/i }).last();
-      if (await close.isVisible().catch(() => false)) await close.click().catch(() => {});
-      await page.waitForTimeout(300);
-    }
-    if (!chooser) {
-      const menuText = compactText(await page.locator('[class*="menu"], [class*="popup"], [class*="overlay"]').allInnerTexts().catch(() => []), 500);
-      throw new Error(`国际站主图上传器未打开文件选择窗口${menuText ? `，当前弹层：${menuText}` : ''}`);
-    }
-    await chooser.setFiles(chooser.isMultiple() ? images : [images[0]]);
-    await page.waitForTimeout(5000);
-    if (!chooser.isMultiple()) {
-      for (const image of images.slice(1)) {
-        const nextTrigger = page.locator('.image-upload-list-item #image-placeholder-span').first();
-        const nextChooserPromise = page.waitForEvent('filechooser', { timeout: 5000 });
-        await nextTrigger.click();
-        const nextChooser = await nextChooserPromise;
-        await nextChooser.setFiles([image]);
-        await page.waitForTimeout(1200);
+
+      const deadline = Date.now() + 30000;
+      while (Date.now() < deadline) {
+        const remaining = await placeholders().count().catch(() => before);
+        const feedback = (await visibleFeedback(page)).join(' ');
+        if (/上传失败|文件.*过大|图片.*不符合|upload failed/i.test(feedback)) {
+          throw new Error(`国际站主图第 ${index + 1} 张上传失败：${compactText(feedback, 300)}`);
+        }
+        if (remaining < before) break;
+        await page.waitForTimeout(400);
+      }
+      if (await placeholders().count().catch(() => before) >= before) {
+        throw new Error(`国际站主图第 ${index + 1} 张上传超过 30 秒仍未完成`);
       }
     }
-    return images.length;
+    return this.waitForMainImageUploads(page, images.length);
   }
 
   async downloadProductVideo(product) {
@@ -1700,35 +2022,74 @@ export class SellerPublisher {
     const categoryPath = sanitizeCategoryPath(product.sourceCategoryPath || product.categoryPath);
     const productTypeCandidate = [product.productType, ...categoryPath.slice().reverse()].find((value) => value && !isPromotionalText(value));
     const productType = englishSpecText(productTypeCandidate, 'Other');
-    await fillChoice(page, await fieldByLabel(page, '产品类型'), productType || 'Other');
-    await fillChoice(page, await fieldByLabel(page, '产地'), product.origin || 'China');
-    await fillFirst(page, ['input[name="p-3"]'], product.model || attributeValue(product, '型号', 'Model Number'));
-    await fillFirst(page, ['input[name="p-2"]'], product.brand || attributeValue(product, '品牌名称', 'Brand Name'));
-    await fillFirst(page, ['input[name="p-373265001"]'], englishSpecText(attributeValue(product, '功能/特性', 'Feature')));
-    await fillFirst(page, ['input[name="p-390873113"]'], englishSpecText(attributeValue(product, '材料', 'Material')));
+    const attributeItems = [...(product.attributes || []), ...(product.customAttributes || [])]
+      .filter((item) => item?.name && item?.value);
+    const mappedAttributes = new Set();
+    const unmappedAttributes = new Set();
+    const normalizedName = (value) => String(value || '').trim().toLowerCase();
+    const sourceItemsByName = (...names) => {
+      const wanted = new Set(names.map(normalizedName));
+      return attributeItems.filter((item) => wanted.has(normalizedName(item.name)));
+    };
+    const markSourceAttributes = (names, filled) => {
+      for (const item of sourceItemsByName(...names)) {
+        (filled ? mappedAttributes : unmappedAttributes).add(item.name);
+        if (filled) unmappedAttributes.delete(item.name);
+      }
+    };
 
-    const reserved = /^(?:型号|model(?: number)?|品牌名称|brand(?: name)?|功能\/特性|feature|材料|material|颜色|colou?r|产地|place of origin|产品类型|product type)$/i;
-    const mappedAttributes = [];
-    const unmappedAttributes = [];
-    for (const [index, item] of [...(product.attributes || []), ...(product.customAttributes || [])].entries()) {
-      if (!item?.name || !item?.value || reserved.test(String(item.name).trim())) continue;
-      const labels = [String(item.name).trim(), englishAttributeName(item.name, index)];
+    const productTypeFilled = await fillChoice(page, await fieldByLabel(page, '产品类型'), productType || 'Other');
+    markSourceAttributes(['产品类型', 'product type'], productTypeFilled);
+
+    const originValue = product.origin || attributeValue(product, '产地', 'Place of Origin') || 'China';
+    const originFilled = await fillChoice(page, await fieldByAnyLabel(page, ['产地', 'Place of Origin']), originValue);
+    markSourceAttributes(['产地', 'place of origin'], originFilled);
+
+    const modelValue = product.model || attributeValue(product, '型号', 'Model Number');
+    const modelFilled = await fillFirst(page, ['input[name="p-3"]'], modelValue)
+      || await fillChoice(page, await fieldByAnyLabel(page, ['型号', 'Model Number']), modelValue);
+    markSourceAttributes(['型号', 'model', 'model number'], modelFilled);
+
+    const brandValue = product.brand || attributeValue(product, '品牌名称', 'Brand Name');
+    const brandFilled = await fillFirst(page, ['input[name="p-2"]'], brandValue)
+      || await fillChoice(page, await fieldByAnyLabel(page, ['品牌名称', 'Brand Name']), brandValue);
+    markSourceAttributes(['品牌名称', 'brand', 'brand name'], brandFilled);
+
+    const featureValue = attributeValue(product, '功能/特性', 'Feature', 'Features');
+    const featureFilled = await fillFirst(page, ['input[name="p-373265001"]'], featureValue)
+      || await fillChoice(page, await fieldByAnyLabel(page, ['功能/特性', '功能', '特性', 'Feature', 'Features']), featureValue);
+    markSourceAttributes(['功能/特性', '功能', '特性', 'feature', 'features'], featureFilled);
+
+    const materialValue = attributeValue(product, '材料', '材质', 'Material');
+    const materialFilled = await fillFirst(page, ['input[name="p-390873113"]'], materialValue)
+      || await fillChoice(page, await fieldByAnyLabel(page, ['材料', '材质', 'Material']), materialValue);
+    markSourceAttributes(['材料', '材质', 'material'], materialFilled);
+
+    const reserved = /^(?:型号|model(?: number)?|品牌名称|brand(?: name)?|功能\/特性|功能|特性|features?|材料|材质|material|颜色|colou?r|产地|place of origin|产品类型|product type|销售单位|selling units?|单个包装尺寸|single package size|单个产品毛重|single gross weight)$/i;
+    for (const [index, item] of attributeItems.entries()) {
+      if (reserved.test(String(item.name).trim())) continue;
+      const aliases = SOURCE_ATTRIBUTE_LABEL_ALIASES.get(normalizedName(item.name)) || [];
+      const labels = [String(item.name).trim(), englishAttributeName(item.name, index), ...aliases];
       const field = await fieldByAnyLabel(page, [...new Set(labels)]);
-      if (!field) { unmappedAttributes.push(item.name); continue; }
-      const value = englishSpecText(item.value, 'Other');
-      const filled = await fillChoice(page, field, value).catch(() => false);
-      if (filled) mappedAttributes.push(item.name);
-      else unmappedAttributes.push(item.name);
+      if (!field) { unmappedAttributes.add(item.name); continue; }
+      const filled = await fillChoice(page, field, item.value).catch(() => false);
+      (filled ? mappedAttributes : unmappedAttributes).add(item.name);
     }
 
     const colorGroup = (product.variantGroups || []).find((group) => /颜色|colou?r/i.test(group.name));
     const colorValues = colorGroup?.options?.length ? colorGroup.options : ['Black'];
-    await enableSpecImageUpload(
-      page,
-      product,
-      colorGroup,
-      (urls, prefix, limit) => this.downloadImageSet(product, urls, prefix, limit)
-    );
+    const sourceHasSpecImage = Boolean(colorGroup?.options?.some((value) => colorGroup.optionImages?.[value]));
+    // Select color through Alibaba's own form model first. Uploading into the
+    // initial empty color row is lossy: committing Black rebuilds that row and
+    // discards its image. The source image is therefore uploaded only after
+    // the exact source color has been committed below.
+    if (sourceHasSpecImage && !await ensureSaleAttributeSelected(page, '191288010')) {
+      throw new Error('国际站商品规格区的颜色规格未能启用');
+    }
+    const colorSpecRow = await visibleColorSpecRow(page);
+    if (sourceHasSpecImage && !colorSpecRow) {
+      throw new Error('国际站商品规格区的颜色规格未能启用');
+    }
     const variantResult = await fillVariantSpecs(page, product.variantGroups);
     const colorControlSelector = [
       '.posting-field-color-select input[role="colorCombobox"]',
@@ -1749,15 +2110,40 @@ export class SellerPublisher {
     if (colorControl && !colorFilled) {
       throw new Error('国际站颜色规格未成功添加，请检查颜色输入框和“添加”按钮');
     }
+    if (colorControl && colorGroup?.options?.length) {
+      const specImageUploaded = await enableSpecImageUpload(
+        page,
+        product,
+        colorGroup,
+        (urls, prefix, limit) => this.downloadImageSet(product, urls, prefix, limit)
+      );
+      if (sourceHasSpecImage && !specImageUploaded) {
+        throw new Error('国际站颜色规格图片未能上传');
+      }
+    }
+    markSourceAttributes(['颜色', 'color', 'colour'], colorFilled);
 
     const packaging = product.packaging || {};
-    await fillFirst(page, ['input[name="pkgWeight"]'], packaging.weight);
+    const weightFilled = await fillFirst(page, ['input[name="pkgWeight"]'], packaging.weight);
+    markSourceAttributes(['单个产品毛重', 'single gross weight'], weightFilled);
     const packageFields = [
       ['长(CM/Piece)', packaging.length], ['宽(CM/Piece)', packaging.width], ['高(CM/Piece)', packaging.height]
     ];
+    let dimensionsFilled = Boolean(packaging.length && packaging.width && packaging.height);
     for (const [label, value] of packageFields) {
       const field = await fieldByLabel(page, label);
       if (field && value) await fillAndVerify(field, value, label);
+      else if (value) dimensionsFilled = false;
+    }
+    markSourceAttributes(['单个包装尺寸', 'single package size'], dimensionsFilled);
+
+    const sellingUnitItems = sourceItemsByName('销售单位', 'selling unit', 'selling units');
+    if (sellingUnitItems.length) {
+      const bodyText = await page.locator('body').innerText().catch(() => '');
+      const sourceUnit = String(sellingUnitItems[0].value || '');
+      const sellingUnitFilled = /single\s*item/i.test(sourceUnit)
+        && /(?:按件卖|Piece\/Pieces|Single item)/i.test(bodyText);
+      markSourceAttributes(['销售单位', 'selling unit', 'selling units'], sellingUnitFilled);
     }
 
     await page.waitForTimeout(500);
@@ -1778,7 +2164,10 @@ export class SellerPublisher {
         await fillAndVerify(daysInput, tier.leadDays, '交期天数').catch(() => {});
       }
     }
-    return { mappedAttributes, unmappedAttributes: [...unmappedAttributes, ...variantResult.unmapped] };
+    return {
+      mappedAttributes: [...mappedAttributes],
+      unmappedAttributes: [...new Set([...unmappedAttributes, ...variantResult.unmapped])]
+    };
   }
 
   async fillPriceFields(page, product) {
@@ -1904,49 +2293,104 @@ export class SellerPublisher {
       throw new Error('未识别到普通编辑器的本地图片上传按钮');
     }
 
-    const uploadBatch = async (paths) => {
-      const chooserPromise = page.waitForEvent('filechooser', { timeout: 8000 }).catch(() => null);
-      await uploadButton.click({ force: true });
-      const chooser = await chooserPromise;
-      if (chooser) {
-        await chooser.setFiles(chooser.isMultiple() ? paths : [paths[0]]);
-        return chooser.isMultiple();
-      }
-      const inputs = page.locator('input[type="file"][accept*="image"]');
-      const count = await inputs.count().catch(() => 0);
-      if (count) {
-        const input = inputs.nth(count - 1);
-        const supportsMultiple = await input.getAttribute('multiple') !== null;
-        await input.setInputFiles(supportsMultiple ? paths : [paths[0]]);
-        return supportsMultiple;
-      }
+    const chooserPromise = page.waitForEvent('filechooser', { timeout: 8000 }).catch(() => null);
+    await uploadButton.click({ force: true });
+    const chooser = await chooserPromise;
+    const chooserMultiple = Boolean(chooser?.isMultiple());
+    if (chooser) {
+      await chooser.setFiles(chooserMultiple ? imagePaths : [imagePaths[0]]);
+    }
 
-      const frameDeadline = Date.now() + 10000;
-      let uploaderFrame = null;
-      while (Date.now() < frameDeadline) {
-        uploaderFrame = page.frames().find((frame) => /photobank\.alibaba\.com\/uploader\.htm/i.test(frame.url()));
-        if (uploaderFrame) break;
+    const frameDeadline = Date.now() + 12000;
+    let uploaderFrame = null;
+    while (Date.now() < frameDeadline) {
+      uploaderFrame = page.frames().find((frame) => /photobank\.alibaba\.com\/uploader\.htm/i.test(frame.url()));
+      if (uploaderFrame) break;
+      await page.waitForTimeout(250);
+    }
+    if (!uploaderFrame) throw new Error('普通编辑器图片上传弹窗未加载完成');
+
+    const frameInputs = uploaderFrame.locator('input[type="file"]');
+    const frameInputCount = await frameInputs.count().catch(() => 0);
+    if (!frameInputCount) {
+      const frameText = compactText(await uploaderFrame.locator('body').innerText().catch(() => ''), 500);
+      throw new Error(`图片银行上传器没有文件输入框${frameText ? `：${frameText}` : ''}`);
+    }
+    const frameInput = frameInputs.nth(frameInputCount - 1);
+    const inputMultiple = await frameInput.getAttribute('multiple') !== null;
+    const queuedCount = async () => {
+      const text = await uploaderFrame.locator('body').innerText().catch(() => '');
+      const match = text.match(/确认上传\s*[（(]\s*(\d+)\s*\/\s*30\s*[）)]/);
+      return match ? Number(match[1]) : 0;
+    };
+    const waitForQueuedCount = async (minimum, timeout = 12000) => {
+      const deadline = Date.now() + timeout;
+      let count = 0;
+      while (Date.now() < deadline) {
+        count = await queuedCount();
+        if (count >= minimum) return count;
         await page.waitForTimeout(250);
       }
-      if (!uploaderFrame) throw new Error('普通编辑器图片上传弹窗未加载完成');
-      const frameInputs = uploaderFrame.locator('input[type="file"]');
-      const frameInputCount = await frameInputs.count().catch(() => 0);
-      if (!frameInputCount) {
-        const frameText = compactText(await uploaderFrame.locator('body').innerText().catch(() => ''), 500);
-        throw new Error(`图片银行上传器没有文件输入框${frameText ? `：${frameText}` : ''}`);
-      }
-      const frameInput = frameInputs.nth(frameInputCount - 1);
-      const supportsMultiple = await frameInput.getAttribute('multiple') !== null;
-      await frameInput.setInputFiles(supportsMultiple ? paths : [paths[0]]);
-      return supportsMultiple;
+      return count;
     };
 
-    const multiple = await uploadBatch(imagePaths);
-    if (!multiple) {
-      for (const imagePath of imagePaths.slice(1)) {
-        await page.waitForTimeout(600);
-        await uploadBatch([imagePath]);
+    let queued = await waitForQueuedCount(chooserMultiple ? imagePaths.length : chooser ? 1 : 0, chooser ? 12000 : 500);
+    if (!chooser || (chooserMultiple && queued < imagePaths.length)) {
+      await frameInput.setInputFiles(inputMultiple ? imagePaths : [imagePaths[0]]);
+      queued = await waitForQueuedCount(inputMultiple ? imagePaths.length : 1);
+    }
+    while (queued < imagePaths.length) {
+      const before = queued;
+      await frameInput.setInputFiles([imagePaths[queued]]);
+      queued = await waitForQueuedCount(before + 1);
+      if (queued <= before) {
+        const frameText = compactText(await uploaderFrame.locator('body').innerText().catch(() => ''), 800);
+        throw new Error(`国际站详情图未加入上传队列（${before}/${imagePaths.length}）：${frameText}`);
       }
+    }
+
+    const confirmUpload = uploaderFrame.locator('button.next-btn-primary').filter({ hasText: /^确认上传/ }).last();
+    if (!await confirmUpload.isVisible().catch(() => false)) {
+      throw new Error(`国际站详情图已进入队列（${queued}/${imagePaths.length}），但没有找到“确认上传”按钮`);
+    }
+    const confirmTextBefore = compactText(await uploaderFrame.locator('body').innerText().catch(() => ''), 2000);
+    await confirmUpload.scrollIntoViewIfNeeded().catch(() => {});
+    let physicalClickSucceeded = true;
+    await confirmUpload.click({ force: true }).catch(() => { physicalClickSucceeded = false; });
+    await page.waitForTimeout(physicalClickSucceeded ? 1800 : 100);
+    const confirmStillVisible = await confirmUpload.isVisible().catch(() => false);
+    const confirmStillEnabled = confirmStillVisible && !await confirmUpload.isDisabled().catch(() => false);
+    const confirmTextAfter = compactText(await uploaderFrame.locator('body').innerText().catch(() => ''), 2000);
+    if (!physicalClickSucceeded || (confirmStillEnabled && confirmTextAfter === confirmTextBefore)) {
+      const invoked = await confirmUpload.evaluate((node) => {
+        const event = {
+          type: 'click', target: node, currentTarget: node,
+          preventDefault() {}, stopPropagation() {}, persist() {}
+        };
+        for (const key of Object.getOwnPropertyNames(node)) {
+          if (!/^__react(?:Props|EventHandlers)\$/.test(key)) continue;
+          const handler = node[key]?.onClick;
+          if (typeof handler === 'function') {
+            handler(event);
+            return `props:${key}`;
+          }
+        }
+        for (const key of Object.getOwnPropertyNames(node)) {
+          if (!/^__reactFiber\$/.test(key)) continue;
+          let fiber = node[key];
+          for (let depth = 0; fiber && depth < 8; depth += 1, fiber = fiber.return) {
+            const handler = fiber.memoizedProps?.onClick || fiber.pendingProps?.onClick;
+            if (typeof handler === 'function') {
+              handler(event);
+              return `fiber:${depth}`;
+            }
+          }
+        }
+        node.click();
+        return 'native';
+      }).catch(() => 'failed');
+      if (invoked === 'failed') throw new Error('国际站详情图“确认上传”按钮触发失败');
+      await page.waitForTimeout(1200);
     }
 
     const deadline = Date.now() + 90000;
@@ -1997,7 +2441,6 @@ export class SellerPublisher {
           const disabled = await target.isDisabled().catch(() => false);
           if (disabled || (uploaderAction === key && Date.now() - uploaderActionAt < 2500)) continue;
           await target.click({ force: true }).catch(() => {});
-          await target.evaluate((node) => node.click()).catch(() => {});
           uploaderAction = key;
           uploaderActionAt = Date.now();
           await page.waitForTimeout(1200);
@@ -2010,14 +2453,14 @@ export class SellerPublisher {
       }
       await page.waitForTimeout(700);
     }
-    const uploaderFrame = page.frames().find((frame) => /photobank\.alibaba\.com\/uploader\.htm/i.test(frame.url()));
-    const buttons = uploaderFrame ? await uploaderFrame.locator('button, [role="button"], input[type="button"], input[type="submit"]').evaluateAll((nodes) => nodes.map((node) => ({
+    const finalUploaderFrame = page.frames().find((frame) => /photobank\.alibaba\.com\/uploader\.htm/i.test(frame.url()));
+    const buttons = finalUploaderFrame ? await finalUploaderFrame.locator('button, [role="button"], input[type="button"], input[type="submit"]').evaluateAll((nodes) => nodes.map((node) => ({
       text: String(node.innerText || node.value || node.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim(),
       disabled: Boolean(node.disabled || node.getAttribute('aria-disabled') === 'true'),
       visible: Boolean(node.offsetWidth || node.offsetHeight || node.getClientRects().length),
       className: String(node.className || '').slice(0, 120)
     })).filter((item) => item.visible)) : [];
-    const uploaderText = uploaderFrame ? compactText(await uploaderFrame.locator('body').innerText().catch(() => ''), 1200) : '';
+    const uploaderText = finalUploaderFrame ? compactText(await finalUploaderFrame.locator('body').innerText().catch(() => ''), 1200) : '';
     throw new Error(`国际站详情图上传超过 90 秒仍未完成（共 ${imagePaths.length} 张；上传器按钮 ${JSON.stringify(buttons)}；${uploaderText}）`);
   }
 
@@ -2110,6 +2553,34 @@ export class SellerPublisher {
       await page.waitForTimeout(500);
     }
     await this.fillLegacyDescription(page, product);
+
+    // Main/detail uploaders can re-render the specification card and restore
+    // its top-level checkbox from stale form state. Recommit the complete
+    // source color transaction immediately before submit: selected spec,
+    // exact source value, and its uploaded source image must all be present.
+    const finalColorGroup = (product.variantGroups || []).find((group) => /颜色|colou?r/i.test(group.name));
+    const finalColorValues = [...new Set(finalColorGroup?.options || [])].map((value) => englishSpecText(value)).filter(Boolean);
+    const finalHasColorImage = finalColorValues.some((value) => Boolean(
+      finalColorGroup?.optionImages?.[value]
+      || finalColorGroup?.optionImages?.[finalColorGroup.options?.find((item) => englishSpecText(item) === value)]
+    ));
+    if (finalHasColorImage) {
+      const colorFilled = await fillColorSpec(page, finalColorValues);
+      const colorImageUploaded = colorFilled && await enableSpecImageUpload(
+        page,
+        product,
+        finalColorGroup,
+        (urls, prefix, limit) => this.downloadImageSet(product, urls, prefix, limit)
+      );
+      const finalColorRow = await visibleColorSpecRow(page);
+      const finalColorSelected = await saleAttributeIsSelected(page, '191288010');
+      const finalColorPreview = finalColorRow
+        ? await finalColorRow.locator('.value-preview.uploaded img[src]').count().catch(() => 0)
+        : 0;
+      if (!colorFilled || !colorImageUploaded || !finalColorSelected || !finalColorPreview) {
+        throw new Error('国际站颜色规格提交前复核失败：颜色、Black 规格值或来源规格图片未保留');
+      }
+    }
 
     const agreementText = page.getByText(/请再次检查并确认提交的信息真实、合法和有效/).last();
     if (await agreementText.isVisible().catch(() => false)) {
