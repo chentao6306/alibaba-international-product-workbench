@@ -3,6 +3,7 @@ import path from 'node:path';
 import sharp from 'sharp';
 import { load } from 'cheerio';
 import { hidePage, launchPersistent, revealPage, settlePage, waitForHumanVerification } from './browser-runtime.js';
+import { extractAlibabaSourceData, parseAlibabaDetailDataScript } from './alibaba-source-data.js';
 import { SOURCE_LANGUAGE_HEADERS, withSourceLocale } from './source-locale.js';
 
 const WORKBENCH_URL = 'https://i.alibaba.com/';
@@ -691,7 +692,12 @@ export function validateProductData(product) {
   if (!String(product.origin || '').trim()) errors.push('缺少产地');
   if (!product.packaging || numericValue(product.packaging.weight) <= 0) errors.push('缺少包装重量');
   if ((product.variantGroups || []).length && !(product.skus || []).length) errors.push('存在产品规格但缺少 SKU 明细');
-  if ((product.skus || []).some((sku) => numericValue(sku.price) <= 0 || numericValue(sku.stock) < 0)) errors.push('SKU 价格或库存无效');
+  const sourceRange = product.sourcePriceRange || {};
+  const hasSourceRange = numericValue(sourceRange.minPrice) > 0
+    && numericValue(sourceRange.maxPrice) >= numericValue(sourceRange.minPrice);
+  if ((product.skus || []).some((sku) => sku.price != null && sku.price !== '' && numericValue(sku.price) <= 0)) errors.push('SKU 价格无效');
+  if ((product.skus || []).some((sku) => sku.stock != null && numericValue(sku.stock) < 0)) errors.push('SKU 库存无效');
+  if (!hasSourceRange && (product.skus || []).some((sku) => sku.price == null || sku.price === '')) errors.push('SKU 缺少价格');
   if (!String(product.description || product.descriptionHtml || '').trim()) errors.push('缺少商品详情');
   const tiers = canonicalizePriceTiers(product.priceTiers || []);
   if (product.priceTiers) product.priceTiers = tiers;
@@ -1605,6 +1611,10 @@ export class SellerPublisher {
     }
     await page.locator('iframe[src*="descIframe"]')?.first().waitFor({ state: 'attached', timeout: 8000 }).catch(() => {});
     await page.waitForTimeout(1200);
+    const detailDataScript = await page.evaluate(() => [...document.scripts]
+      .map((script) => script.textContent || '')
+      .find((text) => /(?:window\.)?detailData\s*=\s*\{/.test(text)) || '').catch(() => '');
+    const structuredSource = extractAlibabaSourceData(parseAlibabaDetailDataScript(detailDataScript));
     let detailFrame = page.frames().find((frame) => /descIframe\.html/i.test(frame.url()));
     // Alibaba serves the rich-text description through different iframe URLs
     // depending on the product template. If the canonical descIframe is not
@@ -1809,9 +1819,20 @@ export class SellerPublisher {
     if (detail.mainImages.length < 4 || detail.attributes.length < 2) {
       throw new Error(`商品详情读取不完整：${base.title}（主图 ${detail.mainImages.length}，属性 ${detail.attributes.length}）`);
     }
-    const sourcePriceTiers = parsePriceTiers(detail.priceText);
+    const sourcePriceTiers = structuredSource
+      ? structuredSource.sourcePriceTiers
+      : parsePriceTiers(detail.priceText);
     const priceTiers = normalizePriceTiers(sourcePriceTiers, base.price, base.currencySymbol || '$');
-    const skus = buildSkuCombinations(detail.variantGroups, base.price, base.stock || 100);
+    const variantGroups = structuredSource?.variantGroups?.length ? structuredSource.variantGroups : detail.variantGroups;
+    const skus = structuredSource?.skus?.length
+      ? structuredSource.skus
+      : buildSkuCombinations(variantGroups, base.price, base.stock || 100);
+    const sourcePriceRange = structuredSource?.sourcePriceRange || null;
+    const stock = structuredSource
+      ? (structuredSource.sourceTradeAvailability?.exactSkuStockPublished
+          ? skus.reduce((total, sku) => total + Number(sku.stock || 0), 0)
+          : null)
+      : base.stock;
     return {
       ...sanitizeCollectedProduct({
       ...base,
@@ -1824,16 +1845,25 @@ export class SellerPublisher {
       mainImages: detail.mainImages,
       detailImages: detail.detailImages,
       attributes: detail.attributes,
-      variantGroups: detail.variantGroups,
+      variantGroups,
       skus,
-      sourcePriceText: detail.priceText,
+      price: structuredSource?.price ?? base.price,
+      sourcePrice: structuredSource?.price ?? base.sourcePrice ?? base.price,
+      maxPrice: structuredSource?.maxPrice ?? base.maxPrice ?? null,
+      stock,
+      currencySymbol: structuredSource?.currencySymbol || base.currencySymbol || '$',
+      sourcePriceText: structuredSource?.sourcePriceText || detail.priceText,
+      sourcePriceRange,
       sourcePriceTiers,
       priceTiers,
+      priceMode: structuredSource?.priceMode || (priceTiers.length ? 'quantity-tier' : base.priceMode || ''),
+      sourceTradeAvailability: structuredSource?.sourceTradeAvailability || null,
+      sourceStructuredEvidence: structuredSource?.evidence || null,
       deliveryTime: detail.leadTime,
       packaging: detail.packaging,
       subtitle: detail.subtitle,
       keywords: detail.keywords,
-      salesUnit: detail.salesUnit,
+      salesUnit: structuredSource?.salesUnit || detail.salesUnit,
       paymentMethod: detail.paymentMethod,
       shipping: detail.shippingText,
       services: detail.services,
@@ -1846,7 +1876,15 @@ export class SellerPublisher {
       sourceCategoryPath: detail.categoryPath,
       description: detail.description,
       videoUrl: detail.videoUrl,
-      dataCompleteness: detail.dataCompleteness,
+      dataCompleteness: {
+        ...detail.dataCompleteness,
+        structuredDetailData: Boolean(structuredSource),
+        structuredPriceRange: Boolean(sourcePriceRange),
+        structuredVariantGroups: structuredSource?.variantGroups?.length || 0,
+        structuredSkus: structuredSource?.skus?.length || 0,
+        exactSkuPricesPublished: structuredSource?.sourceTradeAvailability?.exactSkuPricesPublished ?? null,
+        exactSkuStockPublished: structuredSource?.sourceTradeAvailability?.exactSkuStockPublished ?? null
+      },
       collectedDetailAt: new Date().toISOString()
       })
     };

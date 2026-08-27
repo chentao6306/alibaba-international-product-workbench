@@ -22,6 +22,7 @@ import {
   validateProductData
 } from '../server/publisher.js';
 import { auditProduct, recordProductMutation, sourceSnapshotFingerprint, syncProductModel, verifySourceIntegrity } from '../server/product-model.js';
+import { extractAlibabaSourceData, parseAlibabaDetailDataScript } from '../server/alibaba-source-data.js';
 import { deleteWorkspaceEntities, JsonStore } from '../server/store.js';
 
 test('normalizes a 1688 shop home page to its product list', () => {
@@ -157,6 +158,103 @@ test('builds SKU combinations as a Cartesian product', () => {
   assert.deepEqual(skus[3].attributes, { Color: 'Orange', Storage: '512GB' });
 });
 
+test('extracts Alibaba source price ranges and real SKU identities without inventing prices', () => {
+  const script = `window.detailData = ${JSON.stringify({
+    globalData: {
+      global: { productPriceCurrencySimpleName: 'US $' },
+      product: {
+        price: {
+          productRangePrices: {
+            dollarPriceRangeLow: 1.5,
+            dollarPriceRangeHigh: 7,
+            priceRangeText: '$1.50-7'
+          },
+          unit: 'piece'
+        },
+        sku: {
+          firstSkuId: 106742567791,
+          skuAttrs: [
+            { id: 191, name: 'color', values: [{ id: 1, name: 'Black', originImage: 'https://example.com/black.jpg' }] },
+            { id: 210, name: 'compatible model', values: [{ id: 2, name: 'For T40 T20P' }] },
+            { id: 3, name: 'model number', values: [{ id: 3, name: 'T20/T16' }] },
+            { id: 200, name: 'type', values: [{ id: 4, name: 'Centrifugal Spray bar' }] }
+          ],
+          skuInfoMap: {
+            '191:1;210:2;3:3;200:4;': { id: 106742567791 }
+          }
+        },
+        tradeAvailable: false,
+        sourcingTradeAvailable: false
+      }
+    }
+  })};`;
+  const detailData = parseAlibabaDetailDataScript(script);
+  const source = extractAlibabaSourceData(detailData);
+
+  assert.deepEqual(source.sourcePriceRange, {
+    minPrice: '1.50', maxPrice: '7.00', currencySymbol: '$',
+    formattedText: '$1.50-7', unit: 'piece', source: 'detailData.productRangePrices'
+  });
+  assert.equal(source.priceMode, 'source-range');
+  assert.equal(source.sourcePriceTiers.length, 0);
+  assert.equal(source.variantGroups.length, 4);
+  assert.equal(source.skus[0].id, '106742567791');
+  assert.deepEqual(source.skus[0].attributes, {
+    color: 'Black', 'compatible model': 'For T40 T20P', 'model number': 'T20/T16', type: 'Centrifugal Spray bar'
+  });
+  assert.equal(Object.hasOwn(source.skus[0], 'price'), false);
+  assert.equal(Object.hasOwn(source.skus[0], 'stock'), false);
+  assert.equal(source.sourceTradeAvailability.exactSkuPricesPublished, false);
+  assert.equal(source.sourceTradeAvailability.exactSkuStockPublished, false);
+});
+
+test('keeps Alibaba quantity ladder pricing distinct from source range pricing', () => {
+  const source = extractAlibabaSourceData({
+    globalData: {
+      global: { productPriceCurrencySimpleName: 'US $' },
+      product: {
+        price: {
+          productRangePrices: { dollarPriceRangeLow: 4.5, dollarPriceRangeHigh: 5.5 },
+          productLadderPrices: [
+            { dollarPrice: 5.5, minQuantity: 20, maxQuantity: 99 },
+            { dollarPrice: 5, minQuantity: 100, maxQuantity: 499 },
+            { dollarPrice: 4.5, minQuantity: 500 }
+          ],
+          unit: 'piece'
+        }
+      }
+    }
+  });
+
+  assert.equal(source.priceMode, 'quantity-tier');
+  assert.deepEqual(source.sourcePriceTiers.map((tier) => [tier.minQuantity, tier.maxQuantity, tier.price]), [
+    [20, 99, '5.50'], [100, 499, '5.00'], [500, null, '4.50']
+  ]);
+});
+
+test('does not block products when Alibaba publishes a source range but no per-SKU price', () => {
+  const product = syncProductModel({
+    id: 'range-only', sourceId: '1601455081878', title: 'Centrifugal Spray bar',
+    sourceCategoryPath: ['Consumer Electronics', 'Camera, Photo & Accessories', 'Drones Accessories'],
+    sourcePriceRange: { minPrice: '1.50', maxPrice: '7.00', formattedText: '$1.50-7', currencySymbol: '$', unit: 'piece' },
+    price: 1.5, maxPrice: 7, priceMode: 'source-range', salesUnit: 'piece',
+    mainImages: ['1', '2', '3', '4'], detailImages: ['detail'],
+    attributes: [{ name: 'Material', value: 'Rubber' }, { name: 'Place of Origin', value: 'China' }],
+    origin: 'China', packaging: { weight: 1, length: 30, width: 20, height: 10 },
+    variantGroups: [{ name: 'color', options: ['Black'] }],
+    skus: [{ id: '106742567791', attributes: { color: 'Black' }, source: 'detailData.skuInfoMap', derived: false }],
+    description: 'Agriculture sprayer drone spare part', descriptionHtml: '<p>Agriculture sprayer drone spare part</p>',
+    deliveryTime: [{ range: '1-10', leadDays: '7' }], keywords: ['sprayer drone']
+  }, { captureSource: true });
+  const audit = auditProduct(product);
+
+  assert.equal(audit.errors, 0);
+  assert.equal(audit.status, 'review');
+  assert.equal(audit.issues.some((issue) => issue.code === 'trade.tiers.missing'), false);
+  assert.equal(audit.issues.some((issue) => issue.code === 'sku.price.missing'), false);
+  assert.equal(audit.issues.some((issue) => issue.code === 'sku.price.not-published'), true);
+});
+
 test('reports incomplete product data before draft or publishing', () => {
   assert.deepEqual(validateProductData({ title: '', price: 0 }), [
     '缺少商品标题', '销售价格无效', '主图不足 4 张（当前 0 张）', '缺少详情图片',
@@ -206,7 +304,7 @@ test('keeps source-language metadata and legitimate source text unchanged', () =
 
 test('audits and records product source versus working changes', () => {
   const product = syncProductModel({ id: 'p1', sourceId: '1601', title: 'Demo', mainImages: ['1', '2', '3', '4'], detailImages: ['d'], attributes: [{ name: 'Material', value: 'Steel' }, { name: 'Origin', value: 'China' }], origin: 'China', price: 10, priceTiers: [{ minQuantity: 1, price: 10 }], packaging: { weight: 1 }, description: 'Demo' }, { captureSource: true });
-  assert.equal(product.schemaVersion, 3);
+  assert.equal(product.schemaVersion, 4);
   assert.equal(product.source.snapshot.title, 'Demo');
   recordProductMutation(product, { title: 'Edited' }, { action: 'test-edit' });
   assert.equal(product.source.snapshot.title, 'Demo');

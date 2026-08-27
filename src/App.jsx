@@ -208,22 +208,24 @@ function productCompleteness(product) {
   const detail = (product.detailImages || []).length;
   const attributes = (product.attributes || []).length;
   const tiers = (product.priceTiers || []).length;
+  const priceRange = product.sourcePriceRange;
+  const hasPriceRange = Number(priceRange?.minPrice) > 0 && Number(priceRange?.maxPrice) >= Number(priceRange?.minPrice);
   const variants = (product.variantGroups || []).length;
   const missing = [];
   if (main < 4) missing.push('主图');
   if (!detail) missing.push('详情图');
   if (attributes < 2) missing.push('属性');
-  if (!tiers) missing.push('阶梯价');
+  if (!tiers && !hasPriceRange) missing.push('价格资料');
   if (!product.origin) missing.push('产地');
   if (!(Number(product.packaging?.weight) > 0)) missing.push('包装重量');
   if (!product.description && !product.descriptionHtml) missing.push('商品详情');
   const quality = product.quality;
   if (quality?.issues?.length) {
     const qualityMissing = quality.issues.filter((item) => item.severity === 'error').map((item) => item.message);
-    return { main, detail, attributes, tiers, variants, skus: (product.skus || []).length, missing: qualityMissing, complete: quality.status !== 'blocked', score: quality.score, warnings: quality.warnings, issues: quality.issues };
+    return { main, detail, attributes, tiers, hasPriceRange, variants, skus: (product.skus || []).length, missing: qualityMissing, complete: quality.status !== 'blocked', review: quality.status === 'review', score: quality.score, warnings: quality.warnings, issues: quality.issues };
   }
   const complete = missing.length === 0;
-  return { main, detail, attributes, tiers, variants, skus: (product.skus || []).length, missing, complete, score: complete ? 100 : Math.max(0, 100 - missing.length * 12), warnings: 0, issues: [] };
+  return { main, detail, attributes, tiers, hasPriceRange, variants, skus: (product.skus || []).length, missing, complete, review: false, score: complete ? 100 : Math.max(0, 100 - missing.length * 12), warnings: 0, issues: [] };
 }
 
 function hasCategoryMismatch(product, category) {
@@ -308,8 +310,8 @@ function ProductsView({ state, refresh, notify, onMenu }) {
         <tbody>{pagedProducts.map((product) => { const completeness = productCompleteness(product); return <tr key={product.id} className={product.selected ? 'selected-row' : ''}>
           <td className="check-cell"><input type="checkbox" checked={Boolean(product.selected)} onChange={(event) => select([product.id], event.target.checked)} /></td>
           <td><div className="product-main"><div className="thumb">{product.mainImage ? <img src={product.mainImage} alt="" /> : <Boxes size={20} />}</div><div><strong>{product.title || '未命名商品'}</strong><small>ID {product.sourceId}</small></div></div></td>
-          <td><span className={`data-status ${completeness.complete ? 'complete' : ''}`} title={completeness.missing.length ? `阻断项：${completeness.missing.join('、')}` : '可进入发布检查'}>{completeness.complete ? `可发布 ${completeness.score}` : `资料阻断 ${completeness.score}`}</span><small className="data-counts">主 {completeness.main} · 详 {completeness.detail} · 属 {completeness.attributes} · SKU {completeness.skus} · 价 {completeness.tiers}</small>{completeness.warnings > 0 && <small className="data-warning">另有 {completeness.warnings} 项待确认</small>}{!completeness.complete && <small className="data-missing">{completeness.missing.join('；')}</small>}</td>
-          <td><b className="price">{product.currencySymbol || '¥'}{product.price || '-'}</b></td><td>{product.stock ?? '-'}</td><td><StatusBadge status={product.status} message={product.publishResult?.message} /></td>
+          <td><span className={`data-status ${completeness.complete ? 'complete' : ''}`} title={completeness.missing.length ? `阻断项：${completeness.missing.join('、')}` : completeness.review ? '来源未公开部分逐SKU数据，需要发布前确认' : '可进入发布检查'}>{!completeness.complete ? `资料阻断 ${completeness.score}` : completeness.review ? `资料待确认 ${completeness.score}` : `可发布 ${completeness.score}`}</span><small className="data-counts">主 {completeness.main} · 详 {completeness.detail} · 属 {completeness.attributes} · SKU {completeness.skus} · 价 {completeness.hasPriceRange ? '区间' : completeness.tiers}</small>{completeness.warnings > 0 && <small className="data-warning">另有 {completeness.warnings} 项待确认</small>}{!completeness.complete && <small className="data-missing">{completeness.missing.join('；')}</small>}</td>
+          <td><b className="price">{product.sourcePriceRange?.formattedText || `${product.currencySymbol || '¥'}${product.price || '-'}`}</b></td><td>{product.stock ?? '-'}</td><td><StatusBadge status={product.status} message={product.publishResult?.message} /></td>
           <td className="action-cell"><button className="icon-button" disabled={refreshingId === product.id} onClick={() => refreshDetail(product)} title="重新采集完整资料">{refreshingId === product.id ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}</button><button className="icon-button" onClick={() => setEditing(product)} title="编辑完整资料"><Pencil size={17} /></button><button className="icon-button danger" onClick={() => remove(product)} title="删除商品"><Trash2 size={17} /></button></td>
         </tr>; })}</tbody>
       </table></div>}
@@ -468,7 +470,7 @@ function ProductEditor({ product, onClose, onSaved, notify }) {
     <form onSubmit={save} className="edit-form">
       <div className="editor-tabs">{[['basic', '基础信息'], ['media', '图片与视频'], ['attributes', '商品属性'], ['custom', '自定义属性'], ['specs', '规格与SKU'], ['trade', '交易信息'], ['logistics', '物流信息'], ['service', '服务与证书'], ['description', '商品描述'], ['regional', '国家/地区定价'], ['audit', '来源与审计']].map(([value, label]) => <button type="button" key={value} className={tab === value ? 'active' : ''} onClick={() => setTab(value)}>{label}</button>)}</div>
       <div className={`editor-tab-pane ${tab === 'basic' ? '' : 'hidden'}`}>
-      <div className={`completeness-strip ${productCompleteness({ ...product, ...form, packaging: form.packaging }).complete ? 'complete' : ''}`}><CircleCheck size={17} /><span>主图 {form.mainImages.length} · 详情图 {form.detailImages.length} · 属性 {form.attributes.length} · 规格 {form.variantGroups.length} · 阶梯价 {form.priceTiers.length}</span></div>
+      <div className={`completeness-strip ${productCompleteness({ ...product, ...form, packaging: form.packaging }).complete ? 'complete' : ''}`}><CircleCheck size={17} /><span>主图 {form.mainImages.length} · 详情图 {form.detailImages.length} · 属性 {form.attributes.length} · 规格 {form.variantGroups.length} · 价格 {product.sourcePriceRange?.formattedText || `${form.priceTiers.length} 档`}</span></div>
       <h3 className="edit-section-title">基础信息</h3>
       <label><span>商品标题</span><textarea rows="3" value={form.title} onChange={update('title')} maxLength="120" required /><small>{form.title.length}/120</small></label>
       <label><span>副标题</span><input value={form.subtitle} onChange={update('subtitle')} maxLength="128" /></label>
@@ -502,11 +504,12 @@ function ProductEditor({ product, onClose, onSaved, notify }) {
       </div>
       <div className={`editor-tab-pane ${tab === 'trade' ? '' : 'hidden'}`}>
       <h3 className="edit-section-title">阶梯价格</h3>
+      {product.sourcePriceRange && <div className="sku-warning"><CircleAlert size={16} />来源页面公开价格区间：{product.sourcePriceRange.formattedText} / {product.sourcePriceRange.unit || form.salesUnit}。来源未公开的逐 SKU 价格不会由系统推测或改写。</div>}
       <div className="tier-header"><span>起订量</span><span>结束量</span><span>单价 {product.currencySymbol || '$'}</span><i /></div>
       <div className="repeat-list">{form.priceTiers.map((tier, index) => <div className="tier-row" key={`tier-${index}`}><input type="number" min="1" value={tier.minQuantity || ''} onChange={(event) => updateArray('priceTiers', index, { ...tier, minQuantity: Number(event.target.value) })} /><input type="number" min="1" value={tier.maxQuantity ?? ''} placeholder="不限" onChange={(event) => updateArray('priceTiers', index, { ...tier, maxQuantity: event.target.value ? Number(event.target.value) : null })} /><input type="number" min="0" step="0.01" value={tier.price || ''} onChange={(event) => updateArray('priceTiers', index, { ...tier, price: event.target.value, currencySymbol: product.currencySymbol || '$' })} /><button type="button" className="icon-button danger" onClick={() => removeArray('priceTiers', index)} title="删除价格档"><X size={15} /></button></div>)}</div>
       <button type="button" className="secondary-button add-row-button" onClick={() => setForm((value) => ({ ...value, priceTiers: [...value.priceTiers, { minQuantity: 1, maxQuantity: null, price: value.price, currencySymbol: product.currencySymbol || '$' }] }))}><Plus size={15} />添加价格档</button>
       <div className="form-grid"><label><span>销售单位</span><input value={form.salesUnit || ''} onChange={update('salesUnit')} placeholder="Piece" /></label><label><span>付款方式</span><input value={form.paymentMethod || ''} onChange={update('paymentMethod')} /></label></div>
-      <label><span>定价模式</span><select value={form.priceMode} onChange={update('priceMode')}><option value="quantity-tier">按数量阶梯价</option><option value="sku">按SKU定价</option><option value="fob-range">FOB区间价</option></select></label>
+      <label><span>定价模式</span><select value={form.priceMode} onChange={update('priceMode')}><option value="quantity-tier">按数量阶梯价</option><option value="sku">按SKU定价</option><option value="fob-range">FOB区间价</option><option value="source-range">来源公开区间价</option></select></label>
       </div>
       <div className={`editor-tab-pane ${tab === 'logistics' ? '' : 'hidden'}`}>
       <h3 className="edit-section-title">产品与包装</h3>

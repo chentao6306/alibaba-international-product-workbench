@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 
-export const PRODUCT_SCHEMA_VERSION = 3;
+export const PRODUCT_SCHEMA_VERSION = 4;
 
 const nowIso = () => new Date().toISOString();
 const list = (value) => Array.isArray(value) ? value : [];
@@ -12,7 +12,9 @@ function snapshotFields(product) {
     sourceId: product.sourceId || '', sourceUrl: product.sourceUrl || '', sourceTitle: product.sourceTitle || '',
     sourceOriginalTitle: product.sourceOriginalTitle || '', sourceLanguage: product.sourceLanguage || '',
     sourceCaptureLocale: product.sourceCaptureLocale || '', sourceLanguageEvidence: product.sourceLanguageEvidence || null,
-    sourcePrice: product.sourcePrice ?? '', currencySymbol: product.currencySymbol || '', sourcePriceText: product.sourcePriceText || '',
+    sourcePrice: product.sourcePrice ?? '', maxPrice: product.maxPrice ?? null, currencySymbol: product.currencySymbol || '', sourcePriceText: product.sourcePriceText || '',
+    sourcePriceRange: product.sourcePriceRange || null, sourceTradeAvailability: product.sourceTradeAvailability || null,
+    sourceStructuredEvidence: product.sourceStructuredEvidence || null,
     collectedDetailAt: product.collectedDetailAt || '', dataCompleteness: product.dataCompleteness || null,
     title: product.title || '', subtitle: product.subtitle || '', keywords: list(product.keywords),
     categoryPath: list(product.categoryPath || product.sourceCategoryPath), categoryId: product.categoryId || '',
@@ -56,6 +58,10 @@ export function auditProduct(product) {
   const groups = list(product.variantGroups);
   const skus = list(product.skus);
   const tiers = list(product.priceTiers);
+  const sourcePriceRange = product.sourcePriceRange || null;
+  const hasValidSourceRange = positive(sourcePriceRange?.minPrice)
+    && positive(sourcePriceRange?.maxPrice)
+    && Number(sourcePriceRange.maxPrice) >= Number(sourcePriceRange.minPrice);
   const packaging = product.packaging || {};
   const sourceLanguage = text(product.sourceLanguage).toLowerCase();
   const sourceIntegrity = verifySourceIntegrity(product);
@@ -77,9 +83,13 @@ export function auditProduct(product) {
   if (groups.length && skus.length && expectedSkuCount !== skus.length) add('sku.rows.incomplete', 'variants', 'error', 'skus', `SKU组合不完整（应有${expectedSkuCount}行，当前${skus.length}行）`);
   if (groups.length && skus.length && skus.every((sku) => sku.derived || sku.source === 'derived')) add('sku.derived.only', 'variants', 'warning', 'skus', 'SKU由规格组合推导，不是来源页面真实SKU');
   if (skus.some((sku) => !text(sku.code || sku.skuCode))) add('sku.code.missing', 'variants', 'info', 'skus', '部分SKU缺少商品编码');
-  if (skus.some((sku) => !positive(sku.price) || Number(sku.stock) < 0)) add('sku.values.invalid', 'variants', 'error', 'skus', '部分SKU价格或库存无效');
-  if (!positive(product.price) && !tiers.some((tier) => positive(tier.price))) add('trade.price.invalid', 'trade', 'error', 'price', '缺少有效销售价格');
-  if (!tiers.length) add('trade.tiers.missing', 'trade', 'error', 'priceTiers', '缺少阶梯价格');
+  if (skus.some((sku) => sku.price != null && sku.price !== '' && !positive(sku.price))) add('sku.price.invalid', 'variants', 'error', 'skus', '部分SKU价格无效');
+  if (skus.some((sku) => sku.stock != null && Number(sku.stock) < 0)) add('sku.stock.invalid', 'variants', 'error', 'skus', '部分SKU库存无效');
+  const skusWithoutPublishedPrice = skus.filter((sku) => sku.price == null || sku.price === '');
+  if (skusWithoutPublishedPrice.length && !hasValidSourceRange) add('sku.price.missing', 'variants', 'error', 'skus', '部分SKU缺少价格且来源没有有效价格区间');
+  if (skusWithoutPublishedPrice.length && hasValidSourceRange) add('sku.price.not-published', 'variants', 'warning', 'skus', `来源仅公开${sourcePriceRange.formattedText || '价格区间'}，未公开逐SKU价格`);
+  if (!positive(product.price) && !tiers.some((tier) => positive(tier.price)) && !hasValidSourceRange) add('trade.price.invalid', 'trade', 'error', 'price', '缺少有效销售价格');
+  if (!tiers.length && product.priceMode === 'quantity-tier') add('trade.tiers.missing', 'trade', 'error', 'priceTiers', '来源采用数量阶梯定价，但缺少阶梯价格');
   if (tiers.some((tier, index) => index > 0 && Number(tier.minQuantity) <= Number(tiers[index - 1].minQuantity))) add('trade.tiers.order', 'trade', 'error', 'priceTiers', '阶梯价起订量必须严格递增');
   if (!text(product.salesUnit)) add('trade.unit.missing', 'trade', 'warning', 'salesUnit', '缺少计量单位');
   if (!positive(packaging.weight)) add('logistics.weight.missing', 'logistics', 'error', 'packaging.weight', '缺少包装重量');
@@ -97,12 +107,13 @@ export function auditProduct(product) {
   return {
     status: errors ? 'blocked' : warnings ? 'review' : 'complete', score, errors, warnings,
     issues, checkedAt: nowIso(),
-    counts: { mainImages: mainImages.length, detailImages: detailImages.length, attributes: attributes.length, variantGroups: groups.length, skus: skus.length, expectedSkus: expectedSkuCount, priceTiers: tiers.length },
+    counts: { mainImages: mainImages.length, detailImages: detailImages.length, attributes: attributes.length, variantGroups: groups.length, skus: skus.length, expectedSkus: expectedSkuCount, priceTiers: tiers.length, sourcePriceRange: hasValidSourceRange ? 1 : 0 },
     sourceIntegrity
   };
 }
 
 export function syncProductModel(product, options = {}) {
+  const previousSchemaVersion = Number(product.schemaVersion || 0);
   product.schemaVersion = PRODUCT_SCHEMA_VERSION;
   product.source = product.source || {
     platform: /1688\.com/i.test(product.sourceUrl || '') ? '1688' : 'alibaba.com',
@@ -118,6 +129,11 @@ export function syncProductModel(product, options = {}) {
     product.source.snapshot = snapshotFields(options.sourceSnapshot || product);
     product.source.snapshotHash = sourceSnapshotFingerprint(product.source.snapshot);
   } else if (!product.source.snapshotHash) {
+    product.source.snapshotHash = sourceSnapshotFingerprint(product.source.snapshot);
+  }
+  // Schema v4 extends the immutable snapshot with structured pricing fields.
+  // Re-hash once during the model migration; later changes are still detected.
+  if (product.source.snapshot && previousSchemaVersion > 0 && previousSchemaVersion < PRODUCT_SCHEMA_VERSION) {
     product.source.snapshotHash = sourceSnapshotFingerprint(product.source.snapshot);
   }
   product.working = snapshotFields(product);
