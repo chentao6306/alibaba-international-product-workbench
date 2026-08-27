@@ -203,6 +203,51 @@ async function visibleFeedback(page) {
   return messages;
 }
 
+const SUBMIT_SUCCESS_TEXT = /(?:发布成功|提交成功|已提交发布|审核中|产品信息已经成功提交|产品已经进入审核流程|您的产品信息已经成功提交|您的产品已经进入审核流程|successfully\s+(?:submitted|published)|submitted successfully)/i;
+const DRAFT_SUCCESS_TEXT = /(?:保存成功|草稿.*成功|已保存|successfully\s+saved|saved successfully)/i;
+const BLOCKING_FEEDBACK_TEXT = /(?:报错反馈|错误项|必填项.*不能为空|请上传相关产品图片|请不要输入如下非英文字符|required|invalid)/i;
+
+export function classifyAlibabaActionResult({ mode = 'draft', url = '', originalUrl = '', feedback = [], bodyText = '' } = {}) {
+  const messages = Array.isArray(feedback) ? feedback.filter(Boolean) : [];
+  const feedbackText = messages.join(' ');
+  const combinedText = `${feedbackText} ${String(bodyText || '')}`;
+  let currentUrl = null;
+  let initialUrl = null;
+  try { currentUrl = new URL(url); } catch {}
+  try { initialUrl = new URL(originalUrl); } catch {}
+
+  const explicitSuccessUrl = Boolean(
+    currentUrl
+    && /(^|\.)alibaba\.com$/i.test(currentUrl.hostname)
+    && (
+      /\/product\/success\.htm$/i.test(currentUrl.pathname)
+      || currentUrl.searchParams.get('isSuccess')?.toLowerCase() === 'true'
+    )
+  );
+  if (explicitSuccessUrl) {
+    return { succeeded: true, verifiedBy: 'success-url', blockingFeedback: false };
+  }
+
+  const blockingFeedback = BLOCKING_FEEDBACK_TEXT.test(feedbackText);
+  const successText = mode === 'submit' ? SUBMIT_SUCCESS_TEXT : DRAFT_SUCCESS_TEXT;
+  if (successText.test(combinedText) && !(mode === 'submit' && blockingFeedback)) {
+    return {
+      succeeded: true,
+      verifiedBy: successText.test(feedbackText) ? 'feedback' : 'page-content',
+      blockingFeedback
+    };
+  }
+
+  const navigatedAway = Boolean(
+    currentUrl
+    && initialUrl
+    && currentUrl.href !== initialUrl.href
+    && !/\/product\/publish\.htm$/i.test(currentUrl.pathname)
+  );
+  if (navigatedAway) return { succeeded: true, verifiedBy: 'navigation', blockingFeedback };
+  return { succeeded: false, verifiedBy: '', blockingFeedback };
+}
+
 async function currentFormDiagnostics(page) {
   const main = await page.evaluate(() => {
     const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
@@ -492,27 +537,26 @@ async function waitForActionResult(page, action, mode, originalUrl) {
       await page.waitForTimeout(400);
       const url = page.url();
       const feedback = await visibleFeedback(page);
-      const combined = feedback.join(' ');
-      const blockingFeedback = /报错反馈|错误项|必填项.*不能为空|请上传相关产品图片|请不要输入如下非英文字符|required|invalid/i.test(combined);
-      const succeeded = mode === 'submit'
-        ? /发布成功|提交成功|审核中|产品信息已经成功提交|产品已经进入审核流程|successfully\s+(?:submitted|published)|submitted successfully/i.test(combined)
-        : /保存成功|草稿.*成功|已保存|successfully\s+saved|saved successfully/i.test(combined);
-      if (succeeded && mode === 'submit' && blockingFeedback) {
-        // Alibaba can show a generic success-like toast while the quality
-        // panel still contains blocking errors. Never report a public publish
-        // as successful in that state.
-        continue;
-      }
-      if (succeeded) return { verifiedBy: 'feedback', feedback, responses };
-      if (url !== originalUrl && !/\/product\/publish\.htm/i.test(new URL(url).pathname)) {
-        return { verifiedBy: 'navigation', feedback, responses };
-      }
+      const result = classifyAlibabaActionResult({ mode, url, originalUrl, feedback });
+      if (result.succeeded) return { verifiedBy: result.verifiedBy, feedback, responses };
     }
     const feedback = await visibleFeedback(page);
+    const bodyText = await page.locator('body').innerText().catch(() => '');
+    // The success page can render immediately after the polling deadline. The
+    // final snapshot must be classified before it is used to build an error.
+    const finalResult = classifyAlibabaActionResult({
+      mode,
+      url: page.url(),
+      originalUrl,
+      feedback,
+      bodyText
+    });
+    if (finalResult.succeeded) {
+      return { verifiedBy: finalResult.verifiedBy, feedback, responses };
+    }
     const relevant = feedback
       .filter((text) => /必填|不能为空|请填写|请上传|请不要输入|非英文|至少|错误|失败|error|required/i.test(text))
       .sort((left, right) => left.length - right.length);
-    const bodyText = await page.locator('body').innerText().catch(() => '');
     const errorPanel = bodyText.match(/报错反馈[\s\S]{0,1200}/)?.[0]
       ?.split(/商品质量助手|基本信息|当前商品类型/)[0]
       ?.replace(/\s+/g, ' ')
@@ -2388,30 +2432,43 @@ export class SellerPublisher {
       }
     }
 
-    const confirmUpload = uploaderFrame.locator('button.next-btn-primary').filter({ hasText: /^确认上传/ }).last();
-    if (!await confirmUpload.isVisible().catch(() => false)) {
-      throw new Error(`国际站详情图已进入队列（${queued}/${imagePaths.length}），但没有找到“确认上传”按钮`);
-    }
-    const confirmTextBefore = compactText(await uploaderFrame.locator('body').innerText().catch(() => ''), 2000);
-    await confirmUpload.scrollIntoViewIfNeeded().catch(() => {});
-    let physicalClickSucceeded = true;
-    await confirmUpload.click({ force: true }).catch(() => { physicalClickSucceeded = false; });
-    await page.waitForTimeout(physicalClickSucceeded ? 1800 : 100);
-    const confirmStillVisible = await confirmUpload.isVisible().catch(() => false);
-    const confirmStillEnabled = confirmStillVisible && !await confirmUpload.isDisabled().catch(() => false);
-    const confirmTextAfter = compactText(await uploaderFrame.locator('body').innerText().catch(() => ''), 2000);
-    if (!physicalClickSucceeded || (confirmStillEnabled && confirmTextAfter === confirmTextBefore)) {
-      const invoked = await confirmUpload.evaluate((node) => {
-        const event = {
-          type: 'click', target: node, currentTarget: node,
-          preventDefault() {}, stopPropagation() {}, persist() {}
-        };
-        for (const key of Object.getOwnPropertyNames(node)) {
-          if (!/^__react(?:Props|EventHandlers)\$/.test(key)) continue;
-          const handler = node[key]?.onClick;
-          if (typeof handler === 'function') {
-            handler(event);
-            return `props:${key}`;
+    const uploaderButtonState = async (frame, target) => ({
+      text: compactText(await frame.locator('body').innerText().catch(() => ''), 2000),
+      visible: await target.isVisible().catch(() => false),
+      disabled: await target.isDisabled().catch(() => false)
+    });
+    const clickUploaderAction = async (frame, target) => {
+      const before = await uploaderButtonState(frame, target);
+      await target.scrollIntoViewIfNeeded().catch(() => {});
+      let clicked = false;
+      const box = await target.boundingBox().catch(() => null);
+      if (box && box.width > 0 && box.height > 0) {
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2).catch(() => {});
+        clicked = true;
+        await page.waitForTimeout(900);
+      }
+      let after = await uploaderButtonState(frame, target);
+      if (!after.visible || after.disabled || after.text !== before.text) return { changed: true, method: 'mouse' };
+      const locatorClick = await target.click({ force: true, timeout: 3000 }).then(() => true).catch(() => false);
+      clicked = clicked || locatorClick;
+      await page.waitForTimeout(900);
+      after = await uploaderButtonState(frame, target);
+      if (!after.visible || after.disabled || after.text !== before.text) return { changed: true, method: 'locator' };
+      const dispatched = await target.evaluate((node) => {
+        const eventInit = { bubbles: true, cancelable: true, view: window, button: 0, buttons: 1 };
+        for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+          const EventCtor = type.startsWith('pointer') && typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
+          node.dispatchEvent(new EventCtor(type, eventInit));
+        }
+        let current = node;
+        for (let level = 0; current && level < 5; level += 1, current = current.parentElement) {
+          for (const key of Reflect.ownKeys(current)) {
+            if (typeof key !== 'string' || !/^__react(?:Props|EventHandlers)\$/.test(key)) continue;
+            const handler = current[key]?.onClick;
+            if (typeof handler === 'function') {
+              handler({ type: 'click', target: node, currentTarget: current, preventDefault() {}, stopPropagation() {}, persist() {} });
+              return `react:${key}`;
+            }
           }
         }
         for (const key of Object.getOwnPropertyNames(node)) {
@@ -2420,7 +2477,7 @@ export class SellerPublisher {
           for (let depth = 0; fiber && depth < 8; depth += 1, fiber = fiber.return) {
             const handler = fiber.memoizedProps?.onClick || fiber.pendingProps?.onClick;
             if (typeof handler === 'function') {
-              handler(event);
+              handler({ type: 'click', target: node, currentTarget: node, preventDefault() {}, stopPropagation() {}, persist() {} });
               return `fiber:${depth}`;
             }
           }
@@ -2428,13 +2485,23 @@ export class SellerPublisher {
         node.click();
         return 'native';
       }).catch(() => 'failed');
-      if (invoked === 'failed') throw new Error('国际站详情图“确认上传”按钮触发失败');
       await page.waitForTimeout(1200);
+      after = await uploaderButtonState(frame, target);
+      return {
+        changed: !after.visible || after.disabled || after.text !== before.text,
+        method: dispatched === 'failed' ? (clicked ? 'click' : 'none') : dispatched
+      };
+    };
+
+    const confirmUpload = uploaderFrame.locator('button.next-btn-primary').filter({ hasText: /^确认上传/ }).last();
+    if (!await confirmUpload.isVisible().catch(() => false)) {
+      throw new Error(`国际站详情图已进入队列（${queued}/${imagePaths.length}），但没有找到“确认上传”按钮`);
     }
 
     const deadline = Date.now() + 90000;
     let uploaderAction = '';
     let uploaderActionAt = 0;
+    let confirmAttempts = 0;
     while (Date.now() < deadline) {
       let editorImages = 0;
       for (const frame of page.frames()) {
@@ -2472,14 +2539,25 @@ export class SellerPublisher {
           { key: '插入', pattern: /^插入$/ },
           { key: '确认', pattern: /^确认$/ }
         ];
+        const confirm = uploaderFrame.locator('button.next-btn-primary').filter({ hasText: /^确认上传/ }).last();
+        if (await confirm.isVisible().catch(() => false) && !await confirm.isDisabled().catch(() => false)
+          && confirmAttempts < 4 && Date.now() - uploaderActionAt >= 2200) {
+          const result = await clickUploaderAction(uploaderFrame, confirm);
+          confirmAttempts += 1;
+          uploaderAction = '确认上传';
+          uploaderActionAt = Date.now();
+          if (result.changed) await page.waitForTimeout(500);
+          continue;
+        }
         for (const { key, pattern } of actionNames) {
+          if (key === '确认上传' && confirmAttempts >= 4) continue;
           const action = uploaderFrame.getByRole('button', { name: pattern }).last();
           const textAction = uploaderFrame.getByText(pattern).last();
           const target = await action.isVisible().catch(() => false) ? action : textAction;
           if (!await target.isVisible().catch(() => false)) continue;
           const disabled = await target.isDisabled().catch(() => false);
           if (disabled || (uploaderAction === key && Date.now() - uploaderActionAt < 2500)) continue;
-          await target.click({ force: true }).catch(() => {});
+          await clickUploaderAction(uploaderFrame, target);
           uploaderAction = key;
           uploaderActionAt = Date.now();
           await page.waitForTimeout(1200);

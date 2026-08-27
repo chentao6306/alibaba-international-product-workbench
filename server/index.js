@@ -4,7 +4,13 @@ import express from 'express';
 import { fileURLToPath } from 'node:url';
 import { deleteWorkspaceEntities, findWorkspaceJobs, JsonStore, newId } from './store.js';
 import { ShopCollector } from './collector.js';
-import { canonicalizePriceTiers, hasCompleteSourceData, sanitizeCollectedProduct, SellerPublisher } from './publisher.js';
+import {
+  canonicalizePriceTiers,
+  classifyAlibabaActionResult,
+  hasCompleteSourceData,
+  sanitizeCollectedProduct,
+  SellerPublisher
+} from './publisher.js';
 import { createPublishSnapshot, recordProductMutation, syncProductModel } from './product-model.js';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -83,6 +89,58 @@ store.update((state) => {
     product.status = 'ready';
     delete product.publishResult;
     product.updatedAt = new Date().toISOString();
+  }
+  const recoveredPublishedIds = new Set();
+  for (const product of state.products) {
+    // A successful result is authoritative even if an earlier process crashed
+    // before it copied the result status onto the product itself.
+    if (product.publishResult?.status === 'published' && product.status !== 'published') {
+      product.status = 'published';
+      product.selected = false;
+      product.updatedAt = new Date().toISOString();
+      recoveredPublishedIds.add(product.id);
+    }
+    if (product.status !== 'publish_failed') continue;
+    const failedResult = product.publishResult || {};
+    const message = String(failedResult.message || '');
+    const classified = classifyAlibabaActionResult({
+      mode: 'submit',
+      url: failedResult.currentUrl || '',
+      feedback: [message],
+      bodyText: message
+    });
+    if (!classified.succeeded) continue;
+    const result = {
+      ...failedResult,
+      status: 'published',
+      message: '已成功提交，正在阿里巴巴国际站审核',
+      verifiedBy: `recovered-${classified.verifiedBy || 'success-feedback'}`
+    };
+    product.status = 'published';
+    product.publishResult = result;
+    product.selected = false;
+    product.updatedAt = new Date().toISOString();
+    const failedHistory = (product.publishHistory || []).find((entry) => entry?.result?.status === 'failed' && entry?.result?.message === message);
+    if (failedHistory) failedHistory.result = result;
+    recoveredPublishedIds.add(product.id);
+  }
+  if (recoveredPublishedIds.size) {
+    for (const job of state.jobs) {
+      if (job.type !== 'publish' || job.metadata?.mode !== 'submit') continue;
+      const productIds = job.metadata?.productIds || [];
+      if (!productIds.some((id) => recoveredPublishedIds.has(id))) continue;
+      const existingProducts = productIds.map((id) => state.products.find((item) => item.id === id)).filter(Boolean);
+      const failedCount = existingProducts.filter((item) => item.status === 'publish_failed').length;
+      const publishedCount = existingProducts.filter((item) => item.status === 'published').length;
+      if (!failedCount && publishedCount === existingProducts.length) {
+        job.status = 'completed';
+        job.progress = job.total || productIds.length;
+        job.message = `上架任务完成，共成功提交 ${publishedCount} 件，商品正在国际站审核`;
+      } else {
+        job.message = `上架任务完成，成功 ${publishedCount} 件，失败 ${failedCount} 件（已校正国际站成功反馈）`;
+      }
+      job.updatedAt = new Date().toISOString();
+    }
   }
   if (invalidCategoryBinding) {
     for (const product of state.products) {
@@ -427,10 +485,19 @@ app.post('/api/products/:id/refresh-detail', async (request, response, next) => 
 });
 
 app.post('/api/products/select', (request, response) => {
-  const ids = new Set(request.body.ids || []);
-  const selected = Boolean(request.body.selected);
-  store.update((state) => state.products.forEach((item) => { if (ids.has(item.id)) item.selected = selected; }));
-  response.json({ ok: true });
+  const selected = Boolean(request.body?.selected);
+  const selectAll = request.body?.all === true;
+  const ids = selectAll ? null : new Set(Array.isArray(request.body?.ids) ? request.body.ids : []);
+  const count = store.update((state) => {
+    let changed = 0;
+    for (const item of state.products) {
+      if (!selectAll && !ids.has(item.id)) continue;
+      if (item.selected !== selected) changed += 1;
+      item.selected = selected;
+    }
+    return changed;
+  });
+  response.json({ ok: true, selected, all: selectAll, changed: count });
 });
 
 app.delete('/api/products/:id', (request, response, next) => {

@@ -8,6 +8,7 @@ import {
   buildLegacyDescriptionHtml,
   buildSkuCombinations,
   canonicalizePriceTiers,
+  classifyAlibabaActionResult,
   categoryMismatchMessage,
   canonicalCategoryLeaf,
   parseDeliveryTiers,
@@ -66,6 +67,49 @@ test('accepts only Alibaba.com international product-posting pages for publishin
   assert.equal(isProductPostingUrl('https://post.alibaba.com/product/category.htm'), true);
   assert.equal(isProductPostingUrl('https://work.1688.com/'), false);
   assert.equal(isProductPostingUrl('https://www.alibaba.com/product-detail/example_12345678.html'), false);
+});
+
+test('recognizes Alibaba review confirmation text after submit', () => {
+  const result = classifyAlibabaActionResult({
+    mode: 'submit',
+    url: 'https://post.alibaba.com/product/publish.htm?catId=201346401',
+    originalUrl: 'https://post.alibaba.com/product/publish.htm?catId=201346401',
+    bodyText: '您的产品信息已经成功提交！ 您的产品已经进入审核流程，您可以在1个工作日之后查询审核结果。'
+  });
+  assert.equal(result.succeeded, true);
+  assert.equal(result.verifiedBy, 'page-content');
+});
+
+test('recognizes the Alibaba product success URL even when only notices are visible', () => {
+  const result = classifyAlibabaActionResult({
+    mode: 'submit',
+    url: 'https://post.alibaba.com/product/success.htm?language=zh_CN&isSuccess=true&primaryId=1601935092104',
+    originalUrl: 'https://post.alibaba.com/product/publish.htm?catId=201346401',
+    feedback: ['【通知】AI创意生图功能全新发布']
+  });
+  assert.equal(result.succeeded, true);
+  assert.equal(result.verifiedBy, 'success-url');
+});
+
+test('does not treat Alibaba feature notices as a publish result', () => {
+  const result = classifyAlibabaActionResult({
+    mode: 'submit',
+    url: 'https://post.alibaba.com/product/publish.htm?catId=201346401',
+    originalUrl: 'https://post.alibaba.com/product/publish.htm?catId=201346401',
+    feedback: ['【通知】AI创意生图功能全新发布，生图稳定性提高200%']
+  });
+  assert.equal(result.succeeded, false);
+});
+
+test('keeps visible posting errors blocking on the publish form', () => {
+  const result = classifyAlibabaActionResult({
+    mode: 'submit',
+    url: 'https://post.alibaba.com/product/publish.htm?catId=201346401',
+    originalUrl: 'https://post.alibaba.com/product/publish.htm?catId=201346401',
+    feedback: ['报错反馈 1 错误项 商品图片必填项不能为空', '提交成功']
+  });
+  assert.equal(result.succeeded, false);
+  assert.equal(result.blockingFeedback, true);
 });
 
 test('blocks obvious phone-to-business-service category mismatches', () => {

@@ -267,6 +267,7 @@ function ProductsView({ state, refresh, notify, onMenu }) {
   const pageCount = Math.max(1, Math.ceil(products.length / pageSize));
   const pagedProducts = products.slice((page - 1) * pageSize, page * pageSize);
   const allChecked = pagedProducts.length > 0 && pagedProducts.every((item) => item.selected);
+  const allProductsSelected = state.products.length > 0 && state.products.every((item) => item.selected);
   const selectedProducts = state.products.filter((item) => item.selected);
 
   useEffect(() => { setPage(1); }, [query, filter, pageSize]);
@@ -274,7 +275,16 @@ function ProductsView({ state, refresh, notify, onMenu }) {
 
   async function select(ids, selected) {
     await api('/api/products/select', { method: 'POST', body: JSON.stringify({ ids, selected }) });
-    refresh();
+    await refresh();
+  }
+
+  async function selectAllProducts(selected) {
+    if (!state.products.length) return;
+    try {
+      await api('/api/products/select', { method: 'POST', body: JSON.stringify({ all: true, selected }) });
+      await refresh();
+      notify(selected ? `已全选全部 ${state.products.length} 件商品` : '已取消全部商品选择');
+    } catch (error) { notify(error.message, 'error'); }
   }
 
   async function remove(product) {
@@ -307,6 +317,7 @@ function ProductsView({ state, refresh, notify, onMenu }) {
     <div className="toolbar">
       <div className="input-with-icon search-box"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索标题或商品 ID" /></div>
       <div className="segmented">{[['all', '全部'], ['selected', '已选择'], ['incomplete', '资料待补'], ['ready', '待上架'], ['drafted', '已存草稿']].map(([value, label]) => <button key={value} className={filter === value ? 'active' : ''} onClick={() => setFilter(value)}>{label}</button>)}</div>
+      <button className="secondary-button" disabled={!state.products.length} onClick={() => selectAllProducts(!allProductsSelected)} title={allProductsSelected ? '取消全部商品的选择' : '选择商品资料库中的全部商品'}><Check size={15} />{allProductsSelected ? '取消全选' : `全选全部商品 ${state.products.length}`}</button>
       {selectedProducts.length > 0 && <button className="primary-button" onClick={() => setBatchEditing(true)}><Pencil size={15} />批量修改 {selectedProducts.length}</button>}
       {selectedProducts.length > 0 && <button className="secondary-button danger-button" onClick={removeSelected}><Trash2 size={15} />删除已勾选 {selectedProducts.length}</button>}
       <label className="page-size"><span>每页</span><select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}><option value="10">10</option><option value="20">20</option><option value="50">50</option></select></label>
