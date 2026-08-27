@@ -72,17 +72,29 @@ function structuredPrice(detailData) {
   const ladderSource = Array.isArray(price.productLadderPrices) ? price.productLadderPrices : [];
   const tiers = ladderSource.map((tier) => {
     const tierPrice = priceValue(tier, 'dollarPrice', 'price', 'unitPrice', 'minPrice');
-    const minQuantity = priceValue(tier, 'minQuantity', 'startQuantity', 'minimumQuantity', 'minOrderQuantity', 'beginAmount');
-    const maxQuantity = priceValue(tier, 'maxQuantity', 'endQuantity', 'maximumQuantity', 'endAmount');
+    const minQuantity = priceValue(tier, 'minQuantity', 'startQuantity', 'minimumQuantity', 'minOrderQuantity', 'beginAmount', 'min', 'localMin');
+    const parsedMaximum = priceValue(tier, 'maxQuantity', 'endQuantity', 'maximumQuantity', 'endAmount', 'max', 'localMax');
+    const maxQuantity = parsedMaximum != null && parsedMaximum > 0 ? parsedMaximum : null;
     if (!(tierPrice > 0) || !(minQuantity > 0)) return null;
     return { price: tierPrice.toFixed(2), minQuantity, maxQuantity, currencySymbol: symbol, source: 'detailData' };
   }).filter(Boolean).sort((left, right) => left.minQuantity - right.minQuantity);
-  const sourcePriceRange = minimum != null && maximum != null ? {
-    minPrice: minimum.toFixed(2), maxPrice: maximum.toFixed(2), currencySymbol: symbol,
-    formattedText: formattedText || `${symbol}${minimum.toFixed(2)}-${maximum.toFixed(2)}`,
-    unit, source: 'detailData.productRangePrices'
+  const tierPrices = tiers.map((tier) => Number(tier.price)).filter((value) => value > 0);
+  const effectiveMinimum = minimum ?? (tierPrices.length ? Math.min(...tierPrices) : null);
+  const effectiveMaximum = maximum ?? (tierPrices.length ? Math.max(...tierPrices) : null);
+  const stableAmount = (value) => Number.isInteger(value) ? value.toFixed(0) : value.toFixed(2);
+  const stableLadderText = effectiveMinimum != null && effectiveMaximum != null
+    ? `${symbol}${stableAmount(effectiveMinimum)}${effectiveMaximum !== effectiveMinimum ? `-${stableAmount(effectiveMaximum)}` : ''}`
+    : '';
+  const sourcePriceRange = effectiveMinimum != null && effectiveMaximum != null ? {
+    minPrice: effectiveMinimum.toFixed(2), maxPrice: effectiveMaximum.toFixed(2), currencySymbol: symbol,
+    formattedText: (minimum != null && maximum != null ? formattedText : stableLadderText)
+      || `${symbol}${effectiveMinimum.toFixed(2)}-${effectiveMaximum.toFixed(2)}`,
+    unit, source: minimum != null && maximum != null ? 'detailData.productRangePrices' : 'detailData.productLadderPrices'
   } : null;
-  return { price, sourcePriceRange, tiers, minimum, maximum, symbol, unit, formattedText };
+  return {
+    price, sourcePriceRange, tiers, minimum: effectiveMinimum, maximum: effectiveMaximum,
+    symbol, unit, formattedText: sourcePriceRange?.formattedText || formattedText
+  };
 }
 
 function structuredVariants(detailData) {

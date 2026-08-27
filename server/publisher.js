@@ -1856,6 +1856,7 @@ export class SellerPublisher {
       sourcePriceRange,
       sourcePriceTiers,
       priceTiers,
+      minOrder: sourcePriceTiers[0]?.minQuantity ?? base.minOrder ?? base.moq ?? null,
       priceMode: structuredSource?.priceMode || (priceTiers.length ? 'quantity-tier' : base.priceMode || ''),
       sourceTradeAvailability: structuredSource?.sourceTradeAvailability || null,
       sourceStructuredEvidence: structuredSource?.evidence || null,

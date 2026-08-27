@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
 import { fileURLToPath } from 'node:url';
-import { deleteWorkspaceEntities, JsonStore, newId } from './store.js';
+import { deleteWorkspaceEntities, findWorkspaceJobs, JsonStore, newId } from './store.js';
 import { ShopCollector } from './collector.js';
 import { canonicalizePriceTiers, hasCompleteSourceData, sanitizeCollectedProduct, SellerPublisher } from './publisher.js';
 import { createPublishSnapshot, recordProductMutation, syncProductModel } from './product-model.js';
@@ -56,6 +56,14 @@ store.update((state) => {
     job.updatedAt = new Date().toISOString();
   }
   for (const job of state.jobs) {
+    if (job.type !== 'collect' || job.status !== 'paused') continue;
+    const group = state.groups.find((item) => item.id === job.metadata?.groupId);
+    if (group?.activeJobId === job.id || group?.status === 'collecting') {
+      group.status = 'ready';
+      group.activeJobId = '';
+    }
+  }
+  for (const job of state.jobs) {
     if (job.type !== 'publish' || job.status !== 'failed' || !/net::ERR_ABORTED/.test(job.message || '')) continue;
     const interruptedIndex = Math.max(0, Number(job.progress || 1) - 1);
     job.status = 'paused';
@@ -105,13 +113,21 @@ app.get('/api/state', (_request, response) => response.json(publicState()));
 function deleteEntities(selection) {
   const snapshot = structuredClone(store.read());
   const targets = deleteWorkspaceEntities(snapshot, selection);
-  const activeJob = snapshot.jobs.find((job) => {
-    if (!['queued', 'running', 'pause_requested', 'paused'].includes(job.status)) return false;
-    if (job.type === 'collect') return targets.groupIds.includes(job.metadata?.groupId);
-    return (job.metadata?.productIds || []).some((id) => targets.productIds.includes(id));
+  const activeJob = findWorkspaceJobs(snapshot, targets, ['queued', 'running', 'pause_requested'])[0];
+  if (activeJob) throw Object.assign(new Error('关联数据正在执行采集或上架任务，请先暂停任务，待当前商品处理完成后再删除'), { status: 409 });
+  return store.update((state) => {
+    const deleted = deleteWorkspaceEntities(state, selection);
+    const now = new Date().toISOString();
+    const cancelledJobs = findWorkspaceJobs(state, deleted, ['paused']);
+    for (const job of cancelledJobs) {
+      Object.assign(job, {
+        status: 'cancelled',
+        message: '关联店铺或分组已删除，暂停任务已取消',
+        updatedAt: now
+      });
+    }
+    return { ...deleted, cancelledJobs: cancelledJobs.length };
   });
-  if (activeJob) throw Object.assign(new Error('关联数据正在执行采集或上架任务，请先完成或取消任务后再删除'), { status: 409 });
-  return store.update((state) => deleteWorkspaceEntities(state, selection));
 }
 
 app.delete('/api/shops/:id', (request, response, next) => {
@@ -200,7 +216,7 @@ async function startCollectJob(jobId) {
   const initial = store.read();
   const job = initial.jobs.find((item) => item.id === jobId && item.type === 'collect');
   const group = initial.groups.find((item) => item.id === job?.metadata?.groupId);
-  if (!job || !group) return;
+  if (!job || !group || job.status === 'cancelled') return;
   // A queued job can be paused before setImmediate() gets a chance to start
   // it. Do not turn that explicit pause back into a running job.
   if (job.status === 'paused') {
@@ -213,18 +229,18 @@ async function startCollectJob(jobId) {
     });
     return;
   }
-  const options = { ...(job.metadata?.options || {}), shouldStop: () => ['pause_requested', 'paused'].includes(store.read().jobs.find((item) => item.id === jobId)?.status) };
+  const options = { ...(job.metadata?.options || {}), shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read().jobs.find((item) => item.id === jobId)?.status) };
   store.patchJob(jobId, { status: 'running', message: `开始读取“${group.name}”，已保存的商品会保留` });
   try {
     const products = await collector.collectGroup(group.url, (progress) => {
       if (progress.product) saveCollectedProduct(group.id, progress.product, options);
       const currentStatus = store.read().jobs.find((item) => item.id === jobId)?.status;
-      const pauseStatus = ['pause_requested', 'paused'].includes(currentStatus) ? currentStatus : 'running';
+      const preservedStatus = ['pause_requested', 'paused', 'cancelled'].includes(currentStatus) ? currentStatus : 'running';
       store.patchJob(jobId, {
         // Do not overwrite a pause request while the current detail finishes.
         // The old unconditional `running` update made the stop request vanish
         // before the callback checked shouldStop(), so collection continued.
-        status: pauseStatus,
+        status: preservedStatus,
         progress: progress.current || progress.found || 0,
         total: progress.total || 0,
         message: progress.stage === 'listing' ? `正在读取第 ${progress.page} 页（${options.startPage}-${options.endPage}），已发现 ${progress.found} 件` : `正在读取详情 ${progress.current}/${progress.total}，已保存 ${progress.current} 件`
@@ -232,6 +248,7 @@ async function startCollectJob(jobId) {
       return !options.shouldStop();
     }, options);
     for (const raw of products) saveCollectedProduct(group.id, raw, options);
+    if (store.read().jobs.find((item) => item.id === jobId)?.status === 'cancelled') return;
     const count = store.read().products.filter((item) => item.groupId === group.id).length;
     store.update((draft) => {
       const target = draft.groups.find((item) => item.id === group.id);
@@ -240,7 +257,16 @@ async function startCollectJob(jobId) {
       if (completeJob) Object.assign(completeJob, { status: 'completed', progress: products.length, total: products.length, message: `读取完成，共保存 ${count} 件`, updatedAt: new Date().toISOString() });
     });
   } catch (error) {
-    const paused = error.code === 'COLLECT_PAUSED' || ['pause_requested', 'paused'].includes(store.read().jobs.find((item) => item.id === jobId)?.status);
+    const currentStatus = store.read().jobs.find((item) => item.id === jobId)?.status;
+    if (currentStatus === 'cancelled') {
+      const count = store.read().products.filter((item) => item.groupId === group.id).length;
+      store.update((draft) => {
+        const target = draft.groups.find((item) => item.id === group.id);
+        if (target?.activeJobId === jobId) Object.assign(target, { status: 'ready', collectedCount: count, activeJobId: '' });
+      });
+      return;
+    }
+    const paused = error.code === 'COLLECT_PAUSED' || ['pause_requested', 'paused'].includes(currentStatus);
     if (paused) {
       const count = store.read().products.filter((item) => item.groupId === group.id).length;
       store.update((draft) => {
@@ -260,6 +286,8 @@ app.post('/api/groups/:id/collect', (request, response, next) => {
   const state = store.read();
   const group = state.groups.find((item) => item.id === request.params.id);
   if (!group) return next(Object.assign(new Error('没有找到该分组'), { status: 404 }));
+  const unfinished = state.jobs.find((item) => item.type === 'collect' && item.metadata?.groupId === group.id && ['queued', 'running', 'pause_requested', 'paused'].includes(item.status));
+  if (unfinished) return next(Object.assign(new Error('该分组已有未完成的采集任务，请先继续或取消该任务'), { status: 409 }));
   const options = { startPage: Math.max(1, Number(request.body.startPage || 1)), endPage: Math.max(1, Number(request.body.endPage || 100)), delaySeconds: Math.max(0, Number(request.body.delaySeconds || 0)), destinationCountry: String(request.body.destinationCountry || ''), sort: String(request.body.sort || 'default') };
   if (options.endPage < options.startPage) options.endPage = options.startPage;
   const job = store.createJob('collect', { groupId: group.id, groupName: group.name, options });
@@ -595,12 +623,35 @@ app.post('/api/jobs/:id/resume', (request, response, next) => {
   const state = store.read();
   const job = state.jobs.find((item) => item.id === request.params.id && ['publish', 'collect'].includes(item.type));
   if (!job) return next(Object.assign(new Error('没有找到该上架任务'), { status: 404 }));
-  if (!['paused', 'pause_requested'].includes(job.status)) {
+  if (job.status !== 'paused') {
     return next(Object.assign(new Error('当前任务不能继续'), { status: 409 }));
   }
   const updated = store.patchJob(job.id, { status: 'queued', message: `等待继续，已处理 ${job.progress}/${job.total} 件` });
   response.json(updated);
   setImmediate(() => job.type === 'collect' ? startCollectJob(job.id) : runPublishJob(job.id));
+});
+
+app.post('/api/jobs/:id/cancel', (request, response, next) => {
+  const state = store.read();
+  const job = state.jobs.find((item) => item.id === request.params.id && ['publish', 'collect'].includes(item.type));
+  if (!job) return next(Object.assign(new Error('没有找到该任务'), { status: 404 }));
+  if (job.status !== 'paused') {
+    return next(Object.assign(new Error('请先暂停任务并等待当前商品处理完成，再取消任务'), { status: 409 }));
+  }
+  const updated = store.patchJob(job.id, {
+    status: 'cancelled',
+    message: `任务已取消，已完成 ${job.progress}/${job.total || 0} 件，已保存数据不受影响`
+  });
+  if (job.type === 'collect') {
+    store.update((draft) => {
+      const group = draft.groups.find((item) => item.id === job.metadata?.groupId);
+      if (group?.activeJobId === job.id || group?.status === 'collecting') {
+        group.status = 'ready';
+        group.activeJobId = '';
+      }
+    });
+  }
+  response.json(updated);
 });
 
 app.use((error, _request, response, _next) => {

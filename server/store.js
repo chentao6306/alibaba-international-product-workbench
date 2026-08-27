@@ -99,3 +99,15 @@ export function deleteWorkspaceEntities(state, selection = {}) {
   state.products = state.products.filter((item) => !productIds.has(item.id));
   return { ...deleted, shopIds: [...shopIds], groupIds: [...groupIds], productIds: [...productIds] };
 }
+
+export function findWorkspaceJobs(state, targets, statuses = []) {
+  const allowedStatuses = new Set(statuses);
+  const groupIds = new Set(targets.groupIds || []);
+  const productIds = new Set(targets.productIds || []);
+  return (state.jobs || []).filter((job) => {
+    if (allowedStatuses.size && !allowedStatuses.has(job.status)) return false;
+    if (job.type === 'collect') return groupIds.has(job.metadata?.groupId);
+    if (job.type === 'publish') return (job.metadata?.productIds || []).some((id) => productIds.has(id));
+    return false;
+  });
+}

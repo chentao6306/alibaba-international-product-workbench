@@ -67,7 +67,7 @@ function SourceView({ state, refresh, notify, onMenu }) {
   const groupPageSize = 8;
   const shopPageCount = Math.max(1, Math.ceil(state.shops.length / shopPageSize));
   const visibleShops = state.shops.slice((shopPage - 1) * shopPageSize, shopPage * shopPageSize);
-  const activeCollect = state.jobs.find((job) => job.type === 'collect' && ['queued', 'running', 'pause_requested', 'paused'].includes(job.status));
+  const collectJobs = state.jobs.filter((job) => job.type === 'collect' && ['queued', 'running', 'pause_requested', 'paused'].includes(job.status));
 
   useEffect(() => { if (shopPage > shopPageCount) setShopPage(shopPageCount); }, [shopPage, shopPageCount]);
 
@@ -109,7 +109,7 @@ function SourceView({ state, refresh, notify, onMenu }) {
   async function deleteShop(shop) {
     const groupCount = state.groups.filter((group) => group.shopId === shop.id).length;
     const productCount = state.products.filter((product) => product.shopId === shop.id).length;
-    if (!window.confirm(`确定删除店铺“${shop.name}”吗？\n将同时删除 ${groupCount} 个分组和 ${productCount} 件已采集商品。`)) return;
+    if (!window.confirm(`确定删除店铺“${shop.name}”吗？\n将同时删除 ${groupCount} 个分组和 ${productCount} 件已采集商品；关联的已暂停任务会自动取消。`)) return;
     try {
       await api(`/api/shops/${shop.id}`, { method: 'DELETE' });
       setSelectedShops((current) => current.filter((id) => id !== shop.id));
@@ -119,7 +119,7 @@ function SourceView({ state, refresh, notify, onMenu }) {
 
   async function deleteSelectedShops() {
     const productCount = state.products.filter((product) => selectedShops.includes(product.shopId)).length;
-    if (!selectedShops.length || !window.confirm(`确定删除已选择的 ${selectedShops.length} 个店铺吗？\n将同时删除这些店铺的分组和 ${productCount} 件商品。`)) return;
+    if (!selectedShops.length || !window.confirm(`确定删除已选择的 ${selectedShops.length} 个店铺吗？\n将同时删除这些店铺的分组和 ${productCount} 件商品；关联的已暂停任务会自动取消。`)) return;
     try {
       await api('/api/shops/delete', { method: 'POST', body: JSON.stringify({ ids: selectedShops }) });
       setSelectedShops([]); setSelectedGroups([]); await refresh(); notify('已批量删除店铺及关联数据');
@@ -128,7 +128,7 @@ function SourceView({ state, refresh, notify, onMenu }) {
 
   async function deleteGroup(group) {
     const productCount = state.products.filter((product) => product.groupId === group.id).length;
-    if (!window.confirm(`确定删除分组“${group.name}”吗？\n将同时删除该分组的 ${productCount} 件商品。`)) return;
+    if (!window.confirm(`确定删除分组“${group.name}”吗？\n将同时删除该分组的 ${productCount} 件商品；关联的已暂停任务会自动取消。`)) return;
     try {
       await api(`/api/groups/${group.id}`, { method: 'DELETE' });
       setSelectedGroups((current) => current.filter((id) => id !== group.id));
@@ -138,10 +138,18 @@ function SourceView({ state, refresh, notify, onMenu }) {
 
   async function deleteSelectedGroups() {
     const productCount = state.products.filter((product) => selectedGroups.includes(product.groupId)).length;
-    if (!selectedGroups.length || !window.confirm(`确定删除已选择的 ${selectedGroups.length} 个分组吗？\n将同时删除这些分组的 ${productCount} 件商品。`)) return;
+    if (!selectedGroups.length || !window.confirm(`确定删除已选择的 ${selectedGroups.length} 个分组吗？\n将同时删除这些分组的 ${productCount} 件商品；关联的已暂停任务会自动取消。`)) return;
     try {
       await api('/api/groups/delete', { method: 'POST', body: JSON.stringify({ ids: selectedGroups }) });
       setSelectedGroups([]); await refresh(); notify('已批量删除分组及关联商品');
+    } catch (error) { notify(error.message, 'error'); }
+  }
+
+  async function controlCollect(job, action) {
+    try {
+      await api(`/api/jobs/${job.id}/${action}`, { method: 'POST' });
+      await refresh();
+      notify(action === 'cancel' ? '采集任务已取消，已经保存的商品会保留' : '采集任务已继续');
     } catch (error) { notify(error.message, 'error'); }
   }
 
@@ -168,7 +176,7 @@ function SourceView({ state, refresh, notify, onMenu }) {
         <label><span>排序</span><select value={collectConfig.sort} onChange={(event) => setCollectConfig((v) => ({ ...v, sort: event.target.value }))}><option value="default">默认排序</option><option value="priceAsc">价格从低到高</option><option value="priceDesc">价格从高到低</option><option value="newest">最新商品</option></select></label>
       </div>
     </section>
-    {activeCollect && <div className="job-banner"><LoaderCircle className={activeCollect.status === 'paused' ? '' : 'spin'} size={18} /><div><strong>{activeCollect.message}</strong><div className="progress"><i style={{ width: activeCollect.total ? `${activeCollect.progress / activeCollect.total * 100}%` : '32%' }} /></div></div><div className="job-banner-actions">{['queued', 'running'].includes(activeCollect.status) && <button className="icon-button" onClick={() => api(`/api/jobs/${activeCollect.id}/pause`, { method: 'POST' }).then(refresh)} title="暂停采集"><Pause size={16} /></button>}{activeCollect.status === 'pause_requested' && <button className="icon-button" disabled title="正在暂停"><LoaderCircle className="spin" size={16} /></button>}{activeCollect.status === 'paused' && <button className="icon-button" onClick={() => api(`/api/jobs/${activeCollect.id}/resume`, { method: 'POST' }).then(refresh)} title="继续采集"><Play size={16} /></button>}</div></div>}
+    {collectJobs.map((job) => <div className="job-banner" key={job.id}><LoaderCircle className={job.status === 'paused' ? '' : 'spin'} size={18} /><div><strong>{job.metadata?.groupName ? `${job.metadata.groupName}：` : ''}{job.message}</strong><div className="progress"><i style={{ width: job.total ? `${job.progress / job.total * 100}%` : '32%' }} /></div></div><div className="job-banner-actions">{['queued', 'running'].includes(job.status) && <button className="icon-button" onClick={() => api(`/api/jobs/${job.id}/pause`, { method: 'POST' }).then(refresh).catch((error) => notify(error.message, 'error'))} title="暂停采集"><Pause size={16} /></button>}{job.status === 'pause_requested' && <button className="icon-button" disabled title="正在暂停"><LoaderCircle className="spin" size={16} /></button>}{job.status === 'paused' && <><button className="icon-button" onClick={() => controlCollect(job, 'resume')} title="继续采集"><Play size={16} /></button><button className="icon-button danger" onClick={() => controlCollect(job, 'cancel')} title="取消任务并保留已采集商品"><X size={16} /></button></>}</div></div>)}
     <section className="panel shop-list">
       <div className="section-title"><div><h2>店铺与分组</h2><p>{state.groups.length ? '展开店铺后选择分组读取商品' : '读取店铺后，分组将显示在这里'}</p></div><div className="section-actions">{selectedGroups.length > 0 && <><button className="secondary-button" onClick={() => collectMany(state.groups.filter((group) => selectedGroups.includes(group.id)))}><RefreshCw size={15} />读取已选分组 {selectedGroups.length}</button><button className="secondary-button danger-button" onClick={deleteSelectedGroups}><Trash2 size={15} />删除分组 {selectedGroups.length}</button></>}{state.groups.length > 0 && <button className="secondary-button" onClick={() => collectMany(state.groups)}><RefreshCw size={15} />读取全部分组</button>}{selectedShops.length > 0 && <button className="secondary-button danger-button" onClick={deleteSelectedShops}><Trash2 size={15} />删除店铺 {selectedShops.length}</button>}</div></div>
       {!state.shops.length ? <EmptyState icon={Store} title="还没有同行店铺" text="输入店铺链接开始读取分组" /> : visibleShops.map((shop) => {
@@ -310,7 +318,7 @@ function ProductsView({ state, refresh, notify, onMenu }) {
         <tbody>{pagedProducts.map((product) => { const completeness = productCompleteness(product); return <tr key={product.id} className={product.selected ? 'selected-row' : ''}>
           <td className="check-cell"><input type="checkbox" checked={Boolean(product.selected)} onChange={(event) => select([product.id], event.target.checked)} /></td>
           <td><div className="product-main"><div className="thumb">{product.mainImage ? <img src={product.mainImage} alt="" /> : <Boxes size={20} />}</div><div><strong>{product.title || '未命名商品'}</strong><small>ID {product.sourceId}</small></div></div></td>
-          <td><span className={`data-status ${completeness.complete ? 'complete' : ''}`} title={completeness.missing.length ? `阻断项：${completeness.missing.join('、')}` : completeness.review ? '来源未公开部分逐SKU数据，需要发布前确认' : '可进入发布检查'}>{!completeness.complete ? `资料阻断 ${completeness.score}` : completeness.review ? `资料待确认 ${completeness.score}` : `可发布 ${completeness.score}`}</span><small className="data-counts">主 {completeness.main} · 详 {completeness.detail} · 属 {completeness.attributes} · SKU {completeness.skus} · 价 {completeness.hasPriceRange ? '区间' : completeness.tiers}</small>{completeness.warnings > 0 && <small className="data-warning">另有 {completeness.warnings} 项待确认</small>}{!completeness.complete && <small className="data-missing">{completeness.missing.join('；')}</small>}</td>
+          <td><span className={`data-status ${completeness.complete ? 'complete' : ''}`} title={completeness.missing.length ? `阻断项：${completeness.missing.join('、')}` : completeness.review ? '来源未公开部分逐SKU数据，需要发布前确认' : '可进入发布检查'}>{!completeness.complete ? `资料阻断 ${completeness.score}` : completeness.review ? `资料待确认 ${completeness.score}` : `可发布 ${completeness.score}`}</span><small className="data-counts">主 {completeness.main} · 详 {completeness.detail} · 属 {completeness.attributes} · SKU {completeness.skus} · 价 {completeness.tiers || (completeness.hasPriceRange ? '区间' : 0)}</small>{completeness.warnings > 0 && <small className="data-warning">另有 {completeness.warnings} 项待确认</small>}{!completeness.complete && <small className="data-missing">{completeness.missing.join('；')}</small>}</td>
           <td><b className="price">{product.sourcePriceRange?.formattedText || `${product.currencySymbol || '¥'}${product.price || '-'}`}</b></td><td>{product.stock ?? '-'}</td><td><StatusBadge status={product.status} message={product.publishResult?.message} /></td>
           <td className="action-cell"><button className="icon-button" disabled={refreshingId === product.id} onClick={() => refreshDetail(product)} title="重新采集完整资料">{refreshingId === product.id ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}</button><button className="icon-button" onClick={() => setEditing(product)} title="编辑完整资料"><Pencil size={17} /></button><button className="icon-button danger" onClick={() => remove(product)} title="删除商品"><Trash2 size={17} /></button></td>
         </tr>; })}</tbody>
@@ -557,6 +565,9 @@ function PublishView({ state, refresh, notify, onMenu }) {
   function resume(job) {
     run(() => api(`/api/jobs/${job.id}/resume`, { method: 'POST' }), '任务已继续执行');
   }
+  function cancel(job) {
+    run(() => api(`/api/jobs/${job.id}/cancel`, { method: 'POST' }), '任务已取消，已完成数据会保留');
+  }
   return <>
     <Header title="上架任务" subtitle="连接 My Alibaba 并处理已选择商品" onMenu={onMenu} />
     <div className="publish-layout">
@@ -574,7 +585,7 @@ function PublishView({ state, refresh, notify, onMenu }) {
       <aside className="publish-side"><section className="panel launch-panel"><h2>执行方式</h2><div className="mode-picker"><button className={mode === 'draft' ? 'active' : ''} onClick={() => setMode('draft')}><ClipboardList size={18} /><span><strong>保存草稿</strong><small>逐条填充并保存</small></span>{mode === 'draft' && <Check size={17} />}</button><button className={mode === 'submit' ? 'active warning' : ''} onClick={() => setMode('submit')}><CloudUpload size={18} /><span><strong>直接提交</strong><small>填充后自动发布</small></span>{mode === 'submit' && <Check size={17} />}</button></div>
           <dl><div><dt>已选择</dt><dd>{selected.length} 件</dd></div><div><dt>发布页</dt><dd>{state.settings.publishPageUrl ? '已绑定' : '未绑定'}</dd></div><div><dt>执行模式</dt><dd>{mode === 'draft' ? '保存草稿' : '直接提交'}</dd></div></dl>
           {pausedJob
-            ? <button className="primary-button publish-button" disabled={busy} onClick={() => resume(pausedJob)}><Play size={18} />继续处理剩余 {Math.max(0, pausedJob.total - pausedJob.progress)} 件</button>
+            ? <><button className="primary-button publish-button" disabled={busy} onClick={() => resume(pausedJob)}><Play size={18} />继续处理剩余 {Math.max(0, pausedJob.total - pausedJob.progress)} 件</button><button className="secondary-button pause-button" disabled={busy} onClick={() => cancel(pausedJob)}><X size={17} />取消任务</button></>
             : <button className="primary-button publish-button" disabled={!selected.length || !state.settings.publishPageUrl || categoryMismatch || Boolean(publishing)} onClick={publish}>{publishing ? <LoaderCircle className="spin" size={18} /> : <CloudUpload size={18} />}{publishing ? '任务执行中' : `开始处理 ${selected.length} 件`}</button>}
           {publishing && <button className="secondary-button pause-button" disabled={busy || publishing.status === 'pause_requested'} onClick={() => pause(publishing)}><Pause size={17} />{publishing.status === 'pause_requested' ? '正在暂停' : '暂停任务'}</button>}
           {currentJob && <div className="compact-progress"><div><span>{currentJob.message}</span><b>{currentJob.progress}/{currentJob.total}</b></div><div className="progress"><i style={{ width: currentJob.total ? `${currentJob.progress / currentJob.total * 100}%` : '10%' }} /></div></div>}
@@ -589,10 +600,10 @@ function JobHistory({ jobs, refresh, notify }) {
     try {
       await api(`/api/jobs/${job.id}/${action}`, { method: 'POST' });
       await refresh();
-      notify(action === 'pause' ? '暂停请求已发送' : '任务已继续执行');
+      notify(action === 'pause' ? '暂停请求已发送' : action === 'cancel' ? '任务已取消，已完成数据会保留' : '任务已继续执行');
     } catch (error) { notify(error.message, 'error'); }
   }
-  return <section className="panel history-panel"><div className="section-title"><div><h2>最近任务</h2><p>上架执行结果与异常记录</p></div></div>{!jobs.length ? <div className="muted-row">暂无上架任务</div> : jobs.slice(0, 8).map((job) => <div className="history-row" key={job.id}><div className={`history-icon ${job.status}`}>{job.status === 'completed' ? <Check size={16} /> : job.status === 'failed' ? <CircleAlert size={16} /> : job.status === 'paused' ? <Pause size={16} /> : <LoaderCircle className="spin" size={16} />}</div><div><strong>{job.metadata.mode === 'submit' ? '批量直接发布' : '批量保存草稿'}</strong><small>{new Date(job.createdAt).toLocaleString('zh-CN')}</small></div><span>{job.message}</span><b>{job.progress}/{job.total || '-'}</b><div className="history-action">{['queued', 'running'].includes(job.status) && <button className="icon-button" onClick={() => control(job, 'pause')} title="暂停任务"><Pause size={16} /></button>}{job.status === 'pause_requested' && <button className="icon-button" disabled title="正在暂停"><LoaderCircle className="spin" size={16} /></button>}{job.status === 'paused' && <button className="icon-button" onClick={() => control(job, 'resume')} title="继续任务"><Play size={16} /></button>}</div></div>)}</section>;
+  return <section className="panel history-panel"><div className="section-title"><div><h2>最近任务</h2><p>上架执行结果与异常记录</p></div></div>{!jobs.length ? <div className="muted-row">暂无上架任务</div> : jobs.slice(0, 8).map((job) => <div className="history-row" key={job.id}><div className={`history-icon ${job.status}`}>{job.status === 'completed' ? <Check size={16} /> : job.status === 'failed' ? <CircleAlert size={16} /> : job.status === 'paused' ? <Pause size={16} /> : <LoaderCircle className="spin" size={16} />}</div><div><strong>{job.metadata.mode === 'submit' ? '批量直接发布' : '批量保存草稿'}</strong><small>{new Date(job.createdAt).toLocaleString('zh-CN')}</small></div><span>{job.message}</span><b>{job.progress}/{job.total || '-'}</b><div className="history-action">{['queued', 'running'].includes(job.status) && <button className="icon-button" onClick={() => control(job, 'pause')} title="暂停任务"><Pause size={16} /></button>}{job.status === 'pause_requested' && <button className="icon-button" disabled title="正在暂停"><LoaderCircle className="spin" size={16} /></button>}{job.status === 'paused' && <><button className="icon-button" onClick={() => control(job, 'resume')} title="继续任务"><Play size={16} /></button><button className="icon-button danger" onClick={() => control(job, 'cancel')} title="取消任务"><X size={16} /></button></>}</div></div>)}</section>;
 }
 
 function SettingsView({ state, refresh, notify, onMenu }) {

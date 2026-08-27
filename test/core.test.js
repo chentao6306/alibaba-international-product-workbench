@@ -23,7 +23,7 @@ import {
 } from '../server/publisher.js';
 import { auditProduct, recordProductMutation, sourceSnapshotFingerprint, syncProductModel, verifySourceIntegrity } from '../server/product-model.js';
 import { extractAlibabaSourceData, parseAlibabaDetailDataScript } from '../server/alibaba-source-data.js';
-import { deleteWorkspaceEntities, JsonStore } from '../server/store.js';
+import { deleteWorkspaceEntities, findWorkspaceJobs, JsonStore } from '../server/store.js';
 
 test('normalizes a 1688 shop home page to its product list', () => {
   assert.equal(
@@ -232,6 +232,36 @@ test('keeps Alibaba quantity ladder pricing distinct from source range pricing',
   ]);
 });
 
+test('parses Alibaba min/max ladder fields and derives the public price range', () => {
+  const source = extractAlibabaSourceData({
+    globalData: {
+      global: { productPriceCurrencySimpleName: 'US $' },
+      product: {
+        customPrice: {
+          formatLadderPrice: '$104-114.40',
+          productLadderPrices: [
+            { dollarPrice: 114.4, min: 1, max: 49, localMin: '1', localMax: '49' },
+            { dollarPrice: 110.5, min: 50, max: 99, localMin: '50', localMax: '99' },
+            { dollarPrice: 104, min: 100, max: -1, localMin: '100', localMax: '-1' }
+          ],
+          unit: 'piece'
+        }
+      }
+    }
+  });
+
+  assert.equal(source.priceMode, 'quantity-tier');
+  assert.equal(source.price, 104);
+  assert.equal(source.maxPrice, 114.4);
+  assert.deepEqual(source.sourcePriceRange, {
+    minPrice: '104.00', maxPrice: '114.40', currencySymbol: '$',
+    formattedText: '$104-114.40', unit: 'piece', source: 'detailData.productLadderPrices'
+  });
+  assert.deepEqual(source.sourcePriceTiers.map((tier) => [tier.minQuantity, tier.maxQuantity, tier.price]), [
+    [1, 49, '114.40'], [50, 99, '110.50'], [100, null, '104.00']
+  ]);
+});
+
 test('does not block products when Alibaba publishes a source range but no per-SKU price', () => {
   const product = syncProductModel({
     id: 'range-only', sourceId: '1601455081878', title: 'Centrifugal Spray bar',
@@ -386,4 +416,22 @@ test('deletes shops and groups with their dependent products', () => {
     shops: [{ id: 's2' }], groups: [{ id: 'g2', shopId: 's2' }],
     products: [{ id: 'p2', shopId: 's2', groupId: 'g2' }]
   });
+});
+
+test('distinguishes running jobs from paused jobs related to deleted workspace data', () => {
+  const state = {
+    shops: [{ id: 's1' }, { id: 's2' }],
+    groups: [{ id: 'g1', shopId: 's1' }, { id: 'g2', shopId: 's2' }],
+    products: [{ id: 'p1', shopId: 's1', groupId: 'g1' }],
+    jobs: [
+      { id: 'paused-collect', type: 'collect', status: 'paused', metadata: { groupId: 'g1' } },
+      { id: 'running-other-shop', type: 'collect', status: 'running', metadata: { groupId: 'g2' } },
+      { id: 'paused-publish', type: 'publish', status: 'paused', metadata: { productIds: ['p1'] } }
+    ]
+  };
+  const snapshot = structuredClone(state);
+  const targets = deleteWorkspaceEntities(snapshot, { shopIds: ['s1'] });
+
+  assert.deepEqual(findWorkspaceJobs(snapshot, targets, ['running']).map((job) => job.id), []);
+  assert.deepEqual(findWorkspaceJobs(snapshot, targets, ['paused']).map((job) => job.id), ['paused-collect', 'paused-publish']);
 });
