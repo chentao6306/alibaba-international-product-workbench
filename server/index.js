@@ -14,7 +14,9 @@ import {
 import { createPublishSnapshot, recordProductMutation, syncProductModel } from './product-model.js';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const dataDir = path.join(rootDir, '.data');
+// Desktop builds keep mutable data in the OS user-data directory. The local
+// development default remains .data so existing workflows are unchanged.
+const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(rootDir, '.data');
 fs.mkdirSync(dataDir, { recursive: true });
 
 const store = new JsonStore(path.join(dataDir, 'workspace.json'));

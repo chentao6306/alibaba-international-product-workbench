@@ -575,3 +575,60 @@ git ls-files .data
 ---
 
 系统设计目标是让采集、人工整理、资料校验、草稿检查和批量发布形成可追踪闭环。生产使用时，数据一致性和可审计性优先于“强行发布成功”；遇到来源不完整、目标类目不兼容或 Alibaba 风控时，系统应明确阻断并要求人工确认，而不是静默篡改数据。
+
+## 17. Windows 桌面版（跨易铺 1.0.0）
+
+本分支提供 Electron 桌面启动骨架。桌面窗口加载与网页端相同的 `dist` 前端和 Express 服务，因此采集、商品工作台、批量修改、草稿和发布逻辑仍使用同一套代码。桌面服务的数据目录不再写入安装目录，而是写入 Windows 用户数据目录，升级软件不会覆盖业务数据。
+
+### 首次开发启动
+
+环境要求：Windows 10/11 64 位、Node.js 20 LTS 或更高的偶数版本、npm 10+。自动化采集还需要 Microsoft Edge 或 Google Chrome；若要制作安装包，构建机需要可访问 npm 和 GitHub Release 下载地址。
+
+```powershell
+npm install
+npm run build
+npm run desktop:dev
+```
+
+### 日常启动
+
+网页开发模式：
+
+```powershell
+npm run dev
+```
+
+桌面模式：
+
+```powershell
+npm run desktop:dev
+```
+
+桌面模式会先构建前端，再启动本机随机可用端口的服务并打开 Electron 窗口。服务异常时，日志位于 `%APPDATA%\\跨易铺\\logs\\server.log`；业务数据位于 `%APPDATA%\\跨易铺\\.data\\workspace.json`。请定期备份 `.data`，不要把它提交到代码仓库。
+
+### 生成安装版和便携版
+
+```powershell
+npm run desktop:pack
+```
+
+产物写入 `release/`，包括 NSIS 安装程序和 portable 便携版。当前配置的产品名为“跨易铺”，版本号为 `1.0.0`，图标源文件为 `build/icon.svg`，打包使用 `build/icon.png`。安装包不会包含任何卖家 Cookie、账号密码、`.data` 数据或日志。
+
+### 浏览器自动化资源
+
+Electron 自带 Chromium 只负责显示桌面窗口；采集和国际站发布仍由 Playwright 驱动独立浏览器。桌面运行时会优先查找打包资源中的 Chromium，其次查找 `CHROME_PATH`、Edge、Chrome 和 Playwright 缓存。生产打包时应将经过许可的 Chromium 放在 `resources/chromium/chrome-win/chrome.exe`，或在启动环境设置 `CHROME_PATH`。没有可用浏览器时，系统会显示明确错误，不会静默跳过采集或发布。
+
+### 授权与账号边界
+
+本桌面启动器已完成服务进程隔离和数据目录隔离；联网授权服务器、管理员账号体系、Alibaba 账号登录门禁和自动更新服务仍需要部署端点及签名密钥后接入。未配置授权服务时，不应把软件作为正式商业发行版使用，也不应通过本地开关绕过授权。账号密码不得写入日志或工作区文件，验证码和二次验证必须由用户在显示的 Alibaba 浏览器中完成。
+
+### 分支与发布约定
+
+桌面版开发使用独立分支，例如 `codex/desktop-release-1-0`。提交和推送前确认当前分支：
+
+```powershell
+git branch --show-current
+git status --short
+```
+
+不要直接向 `main` 或已有生产修复分支强制推送；发布前通过 Pull Request 审核并在干净环境执行 `npm test`、`npm run build` 和一件商品的草稿回归。

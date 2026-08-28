@@ -9,8 +9,12 @@ function existing(paths) {
 
 export function findChromium() {
   const local = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+  const packagedRoot = process.resourcesPath && path.dirname(process.resourcesPath);
   const direct = existing([
     process.env.CHROME_PATH,
+    packagedRoot && path.join(process.resourcesPath, 'chromium', 'chrome-win', 'chrome.exe'),
+    packagedRoot && path.join(process.resourcesPath, 'chromium', 'chrome-win64', 'chrome.exe'),
+    packagedRoot && path.join(packagedRoot, 'chromium', 'chrome-win', 'chrome.exe'),
     path.join(local, 'Google', 'Chrome', 'Application', 'chrome.exe'),
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
     'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
