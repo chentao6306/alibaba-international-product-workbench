@@ -11,6 +11,7 @@ const EMPTY = { shops: [], groups: [], products: [], jobs: [], settings: {}, bro
 async function api(url, options = {}) {
   const response = await fetch(url, {
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+    credentials: 'include',
     ...options
   });
   if (!response.ok) {
@@ -48,6 +49,30 @@ function Header({ title, subtitle, onMenu }) {
       <div><h1>{title}</h1><p>{subtitle}</p></div>
     </header>
   );
+}
+
+function LoginScreen({ onAuthenticated }) {
+  const [account, setAccount] = useState('');
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  async function submit(event) {
+    event.preventDefault();
+    if (!account.trim() || !password) { setError('请输入阿里巴巴国际站账号和密码'); return; }
+    setBusy(true); setError('');
+    try {
+      if (!window.crossEasyShop?.alibabaLogin) throw new Error('请使用跨易铺 EXE 启动，浏览器模式不支持登录');
+      const result = await window.crossEasyShop.alibabaLogin({ account: account.trim(), password });
+      const deviceKey = 'cross-easyshop-device-id';
+      let deviceId = localStorage.getItem(deviceKey);
+      if (!deviceId) { deviceId = crypto.randomUUID(); localStorage.setItem(deviceKey, deviceId); }
+      await api('/api/auth/establish-session', { method: 'POST', body: JSON.stringify({ account: result.account, bridgeToken: result.bridgeToken, deviceId }) });
+      onAuthenticated();
+    } catch (cause) {
+      setError(cause.message || '登录失败，请检查账号密码并完成验证码');
+    } finally { setBusy(false); }
+  }
+  return <div className="auth-gate"><div className="login-card"><div className="login-brand"><div><Boxes size={22} /></div><span><strong>跨易铺</strong><small>阿里巴巴国际站商品工作台</small></span></div><h1>登录后继续</h1><p className="login-intro">请输入阿里巴巴国际站账号和密码。跨易铺会在内置浏览器中完成登录，并在线验证授权有效期。</p><form onSubmit={submit}><label>国际站账号<input value={account} onChange={(event) => setAccount(event.target.value)} autoComplete="username" placeholder="请输入账号" disabled={busy} /></label><label>密码<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" placeholder="请输入密码" disabled={busy} /></label>{error && <div className="login-error"><CircleAlert size={16} />{error}</div>}<button className="primary-button login-submit" disabled={busy}>{busy ? <><LoaderCircle size={17} className="spin" />正在验证...</> : <><CloudUpload size={17} />登录并验证授权</>}</button></form><button className="secondary-button login-quit" onClick={() => window.crossEasyShop?.quit?.()} disabled={busy}>退出</button><small className="login-footnote">仅支持账号密码登录。首次登录需要保持网络连接。</small></div></div>;
 }
 
 function Metric({ icon: Icon, label, value, detail, tone }) {
@@ -639,15 +664,21 @@ export default function App() {
   const [view, setView] = useState('source');
   const [notice, setNotice] = useState(null);
   const [menuOpen, setMenuOpen] = useState(false);
-  async function refresh() { try { setState(await api('/api/state')); } catch (error) { setNotice({ text: error.message, type: 'error' }); } }
-  useEffect(() => { refresh(); const timer = setInterval(refresh, 2000); return () => clearInterval(timer); }, []);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authenticated, setAuthenticated] = useState(false);
+  async function refresh() { try { setState(await api('/api/state')); } catch (error) { if (error.message.includes('(401)')) setAuthenticated(false); else setNotice({ text: error.message, type: 'error' }); } }
+  useEffect(() => { api('/api/auth/me').then((session) => { setAuthenticated(Boolean(session.authenticated)); }).catch(() => {}).finally(() => setAuthChecked(true)); }, []);
+  useEffect(() => { if (!authenticated) return undefined; refresh(); const timer = setInterval(refresh, 2000); return () => clearInterval(timer); }, [authenticated]);
   function notify(text, type = 'success') { setNotice({ text, type }); setTimeout(() => setNotice(null), 4200); }
   function navigate(id) { setView(id); setMenuOpen(false); }
+  async function logout() { await api('/api/auth/logout', { method: 'POST' }).catch(() => {}); setAuthenticated(false); setState(EMPTY); }
+  if (!authChecked) return <div className="auth-loading"><LoaderCircle size={22} className="spin" />正在启动跨易铺...</div>;
+  if (!authenticated) return <LoginScreen onAuthenticated={() => setAuthenticated(true)} />;
   const props = { state, refresh, notify, onMenu: () => setMenuOpen(true) };
   return <div className="app-shell">
     <aside className={`sidebar ${menuOpen ? 'open' : ''}`}><div className="brand"><div><Boxes size={20} /></div><span><strong>Alibaba.com</strong><small>国际站商品工作台</small></span><button className="icon-button close-nav" onClick={() => setMenuOpen(false)}><X size={18} /></button></div><nav>{NAV.map(({ id, label, icon: Icon }) => <button key={id} className={view === id ? 'active' : ''} onClick={() => navigate(id)}><Icon size={19} /><span>{label}</span>{id === 'products' && state.products.length > 0 && <b>{state.products.length}</b>}{id === 'publish' && state.products.some((item) => item.selected) && <b>{state.products.filter((item) => item.selected).length}</b>}<ChevronRight size={15} /></button>)}</nav><div className="sidebar-foot"><span className={`system-dot ${state.browser.browserOpen ? 'online' : ''}`} /><div><strong>本地服务</strong><small>{state.browser.browserOpen ? '卖家浏览器已连接' : '运行正常'}</small></div></div></aside>
     {menuOpen && <button className="nav-backdrop" onClick={() => setMenuOpen(false)} />}
-    <main>{view === 'source' && <SourceView {...props} />}{view === 'products' && <ProductsView {...props} />}{view === 'publish' && <PublishView {...props} />}{view === 'settings' && <SettingsView {...props} />}</main>
+    <main><div className="account-bar"><span><strong>{state.auth?.account || '国际站账号'}</strong><small>授权到期：{state.auth?.license?.expiresAtChina || '校验中'}</small></span><button className="secondary-button" onClick={logout}>退出登录</button></div>{view === 'source' && <SourceView {...props} />}{view === 'products' && <ProductsView {...props} />}{view === 'publish' && <PublishView {...props} />}{view === 'settings' && <SettingsView {...props} />}</main>
     <Notice notice={notice} onClose={() => setNotice(null)} />
   </div>;
 }

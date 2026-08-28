@@ -12,6 +12,7 @@ import {
   SellerPublisher
 } from './publisher.js';
 import { createPublishSnapshot, recordProductMutation, syncProductModel } from './product-model.js';
+import { ADMIN_COOKIE, SESSION_COOKIE, LicenseManager, clearCookie, setCookie } from './auth.js';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // Desktop builds keep mutable data in the OS user-data directory. The local
@@ -22,6 +23,7 @@ fs.mkdirSync(dataDir, { recursive: true });
 const store = new JsonStore(path.join(dataDir, 'workspace.json'));
 const publisher = new SellerPublisher(dataDir);
 const collector = new ShopCollector(dataDir, (products, onProgress) => publisher.enrichSourceProducts(products, onProgress));
+const licenseManager = new LicenseManager(dataDir);
 store.update((state) => {
   state.version = 3;
   if (state.settings.publishPageUrl && /^https?:\/\/(?:[^/]+\.)?1688\.com(?:\/|$)/i.test(state.settings.publishPageUrl)) {
@@ -163,12 +165,92 @@ const app = express();
 app.use(express.json({ limit: '2mb' }));
 const activePublishJobs = new Set();
 
-function publicState() {
+function publicState(request) {
   const state = store.read();
-  return { ...state, browser: publisher.status(), collectorBrowser: collector.status() };
+  const session = licenseManager.session(request);
+  return {
+    ...state,
+    auth: session ? { authenticated: true, account: session.account, license: session.license } : { authenticated: false },
+    browser: publisher.status(),
+    collectorBrowser: collector.status()
+  };
 }
 
-app.get('/api/state', (_request, response) => response.json(publicState()));
+app.get('/api/health', (_request, response) => response.json({ ok: true, service: 'cross-easyshop', time: new Date().toISOString() }));
+app.get('/api/auth/config', (_request, response) => response.json({ requiresAlibabaLogin: true, passwordRequired: true, remoteLicenseServer: Boolean(process.env.LICENSE_SERVER_URL) }));
+app.get('/api/auth/me', (request, response) => {
+  const session = licenseManager.session(request);
+  if (!session) return response.status(401).json({ authenticated: false, error: '请先登录阿里巴巴国际站并确认授权' });
+  response.json({ authenticated: true, account: session.account, license: session.license });
+});
+app.post('/api/auth/preflight', (request, response) => {
+  const record = licenseManager.find(request.body?.account);
+  response.json({ authorized: licenseManager.isActive(record), license: licenseManager.publicLicense(record) });
+});
+app.post('/api/auth/establish-session', (request, response) => {
+  const result = licenseManager.establish({ account: request.body?.account, deviceId: request.body?.deviceId, bridgeToken: request.body?.bridgeToken });
+  if (!result.ok) return response.status(403).json({ error: result.error });
+  setCookie(response, SESSION_COOKIE, result.sessionId);
+  response.json({ authenticated: true, account: request.body.account, license: result.license });
+});
+app.post('/api/auth/logout', (_request, response) => { clearCookie(response, SESSION_COOKIE); response.json({ ok: true }); });
+
+function requireAdmin(request, response, next) {
+  if (!licenseManager.adminSession(request)) return response.status(401).json({ error: '管理员未登录' });
+  next();
+}
+
+function termExpiresAt(term, startsAt = new Date()) {
+  const date = new Date(startsAt);
+  const value = String(term || '1d').toLowerCase();
+  if (value === '1m' || value === 'month') date.setMonth(date.getMonth() + 1);
+  else if (value === 'quarter' || value === '3m') date.setMonth(date.getMonth() + 3);
+  else if (value === 'half-year' || value === '6m') date.setMonth(date.getMonth() + 6);
+  else if (value === 'year' || value === '1y') date.setFullYear(date.getFullYear() + 1);
+  else if (/^\d+$/.test(value)) date.setDate(date.getDate() + Number(value));
+  else date.setDate(date.getDate() + 1);
+  return date.toISOString();
+}
+
+app.post('/api/admin/login', (request, response) => {
+  const sessionId = licenseManager.adminLogin(request.body?.user, request.body?.password);
+  if (!sessionId) return response.status(401).json({ error: '管理员账号或密码错误' });
+  setCookie(response, ADMIN_COOKIE, sessionId);
+  response.json({ authenticated: true, user: request.body.user });
+});
+app.post('/api/admin/logout', (_request, response) => { clearCookie(response, ADMIN_COOKIE); response.json({ ok: true }); });
+app.get('/api/admin/me', requireAdmin, (request, response) => response.json({ authenticated: true, user: licenseManager.adminSession(request).user }));
+app.get('/api/admin/licenses', requireAdmin, (_request, response) => response.json({ licenses: licenseManager.list() }));
+app.get('/api/admin/history', requireAdmin, (_request, response) => response.json({ history: licenseManager.history() }));
+app.get('/api/admin/stats', requireAdmin, (_request, response) => response.json(licenseManager.stats()));
+app.post('/api/admin/licenses', requireAdmin, (request, response, next) => {
+  try {
+    const startsAt = request.body?.startsAt ? new Date(request.body.startsAt).toISOString() : new Date().toISOString();
+    const expiresAt = request.body?.expiresAt || termExpiresAt(request.body?.term || '1d', startsAt);
+    response.json({ license: licenseManager.upsert({ ...request.body, startsAt, expiresAt, action: 'admin_create' }, licenseManager.adminSession(request).user) });
+  } catch (error) { next(error); }
+});
+app.patch('/api/admin/licenses/:account', requireAdmin, (request, response, next) => {
+  try {
+    const patch = { ...request.body };
+    if (patch.term) patch.expiresAt = termExpiresAt(patch.term, patch.startsAt || new Date());
+    delete patch.term;
+    response.json({ license: licenseManager.update(request.params.account, patch, licenseManager.adminSession(request).user) });
+  } catch (error) { next(error); }
+});
+app.delete('/api/admin/licenses/:account', requireAdmin, (request, response, next) => {
+  try { response.json({ license: licenseManager.update(request.params.account, { status: 'revoked', action: 'admin_revoke' }, licenseManager.adminSession(request).user) }); } catch (error) { next(error); }
+});
+
+app.get('/api/state', (request, response) => response.json(publicState(request)));
+
+// Every business endpoint is license-gated. Auth, admin, health and state are
+// intentionally excluded so the desktop shell can render the login screen.
+app.use('/api', (request, response, next) => {
+  if (request.path.startsWith('/auth') || request.path.startsWith('/admin') || request.path === '/health' || request.path === '/state') return next();
+  if (!licenseManager.session(request)) return response.status(401).json({ error: '登录已失效或授权已过期，请重新登录' });
+  next();
+});
 
 function deleteEntities(selection) {
   const snapshot = structuredClone(store.read());
@@ -730,6 +812,7 @@ app.use((error, _request, response, _next) => {
 
 if (fs.existsSync(path.join(rootDir, 'dist'))) {
   app.use(express.static(path.join(rootDir, 'dist')));
+      app.get(['/admin', '/admin/'], (_request, response) => response.sendFile(path.join(rootDir, 'dist', 'admin', 'index.html')));
   app.get('/{*splat}', (_request, response) => response.sendFile(path.join(rootDir, 'dist', 'index.html')));
 }
 
