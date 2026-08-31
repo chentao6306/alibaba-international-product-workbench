@@ -13,8 +13,20 @@ import {
 } from './publisher.js';
 import { createPublishSnapshot, recordProductMutation, syncProductModel } from './product-model.js';
 
-const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const dataDir = path.join(rootDir, '.data');
+// In the packaged desktop build the server module is unpacked while the
+// frontend remains inside app.asar. APP_ROOT_DIR keeps both layouts working.
+const rootDir = process.env.APP_ROOT_DIR
+  ? path.resolve(process.env.APP_ROOT_DIR)
+  : path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const staticCandidates = [
+  process.env.KUA_YIPU_DIST_DIR ? path.resolve(process.env.KUA_YIPU_DIST_DIR) : '',
+  path.join(rootDir, 'dist'),
+  path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist'),
+  process.resourcesPath ? path.join(process.resourcesPath, 'app.asar', 'dist') : '',
+  process.resourcesPath ? path.join(process.resourcesPath, 'app.asar.unpacked', 'dist') : ''
+].filter(Boolean);
+const staticDir = staticCandidates.find((candidate) => fs.existsSync(candidate));
+const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(rootDir, '.data');
 fs.mkdirSync(dataDir, { recursive: true });
 
 const store = new JsonStore(path.join(dataDir, 'workspace.json'));
@@ -159,6 +171,14 @@ store.update((state) => {
 });
 const app = express();
 app.use(express.json({ limit: '2mb' }));
+if (process.env.KUA_YIPU_DESKTOP === '1') {
+  app.use('/api', (request, response, next) => {
+    if (!process.env.KUA_YIPU_LOCAL_GATE || request.headers['x-kua-yipu-gate'] !== process.env.KUA_YIPU_LOCAL_GATE) {
+      return response.status(401).json({ error: '请从跨易铺登录后进入工作台' });
+    }
+    next();
+  });
+}
 const activePublishJobs = new Set();
 
 function publicState() {
@@ -308,11 +328,18 @@ async function startCollectJob(jobId) {
     for (const raw of products) saveCollectedProduct(group.id, raw, options);
     if (store.read().jobs.find((item) => item.id === jobId)?.status === 'cancelled') return;
     const count = store.read().products.filter((item) => item.groupId === group.id).length;
+    const warningCount = products.filter((item) => item?.collectWarning).length;
     store.update((draft) => {
       const target = draft.groups.find((item) => item.id === group.id);
       if (target) Object.assign(target, { status: 'done', collectedCount: count, lastCollectedAt: new Date().toISOString(), activeJobId: '' });
       const completeJob = draft.jobs.find((item) => item.id === jobId);
-      if (completeJob) Object.assign(completeJob, { status: 'completed', progress: products.length, total: products.length, message: `读取完成，共保存 ${count} 件`, updatedAt: new Date().toISOString() });
+      if (completeJob) Object.assign(completeJob, {
+        status: 'completed',
+        progress: products.length,
+        total: products.length,
+        message: warningCount ? `读取完成，共保存 ${count} 件，其中 ${warningCount} 件详情待补全` : `读取完成，共保存 ${count} 件`,
+        updatedAt: new Date().toISOString()
+      });
     });
   } catch (error) {
     const currentStatus = store.read().jobs.find((item) => item.id === jobId)?.status;
@@ -331,7 +358,11 @@ async function startCollectJob(jobId) {
         const target = draft.groups.find((item) => item.id === group.id);
         if (target) Object.assign(target, { status: 'ready', collectedCount: count, activeJobId: '' });
         const pausedJob = draft.jobs.find((item) => item.id === jobId);
-        if (pausedJob) Object.assign(pausedJob, { status: 'paused', progress: count, message: `已暂停，已保存 ${count} 件商品，可继续采集`, updatedAt: new Date().toISOString() });
+        if (pausedJob) Object.assign(pausedJob, {
+          status: 'paused', progress: count,
+          message: error.message && error.message !== 'COLLECT_PAUSED' ? error.message : `已暂停，已保存 ${count} 件商品，可继续采集`,
+          updatedAt: new Date().toISOString()
+        });
       });
       return;
     }
@@ -472,12 +503,26 @@ app.post('/api/products/:id/refresh-detail', async (request, response, next) => 
     const state = store.read();
     const product = state.products.find((item) => item.id === request.params.id);
     if (!product) return next(Object.assign(new Error('没有找到该商品'), { status: 404 }));
-    const [enriched] = await publisher.enrichSourceProducts([product]);
+    const [enriched] = await Promise.race([
+      publisher.enrichSourceProducts([product]),
+      // A real Alibaba CAPTCHA is shown to the user and may reasonably take
+      // several minutes. Keep the API request alive through that interaction.
+      new Promise((_, reject) => setTimeout(() => reject(new Error('重新采集详情超时，请完成验证码后重试')), 330000))
+    ]);
     const updated = store.update((draft) => {
       const target = draft.products.find((item) => item.id === product.id);
-      Object.assign(target, enriched, { status: 'ready', updatedAt: new Date().toISOString() });
+      // A public listing can be readable while Alibaba blocks an individual
+      // detail page. Keep the existing complete fields in that case instead of
+      // replacing them with an incomplete warning record.
+      const hasWarning = Boolean(enriched?.collectWarning);
+      if (hasWarning) Object.assign(target, { collectWarning: enriched.collectWarning });
+      else {
+        Object.assign(target, enriched);
+        delete target.collectWarning;
+      }
+      Object.assign(target, { status: 'ready', updatedAt: new Date().toISOString() });
       delete target.publishResult;
-      syncProductModel(target, { captureSource: true, sourceSnapshot: enriched });
+      if (!hasWarning) syncProductModel(target, { captureSource: true, sourceSnapshot: enriched });
       return target;
     });
     response.json(updated);
@@ -600,7 +645,9 @@ async function runPublishJob(jobId) {
         const settings = store.read().settings;
         const publishSnapshot = createPublishSnapshot(product, { mode, category: settings.publishCategory });
         const result = await publisher.publishProduct(product, settings.publishPageUrl, mode, settings.publishCategory);
-        if (result.status !== 'needs_review') await publisher.hide();
+        // Keep the real publishing page visible for inspection. The user
+        // explicitly requested to see the browser while an item is being
+        // uploaded and submitted; collection still uses the hidden context.
         store.update((draft) => {
           const target = draft.products.find((item) => item.id === product.id);
           if (target) Object.assign(target, {
@@ -619,7 +666,9 @@ async function runPublishJob(jobId) {
       } catch (error) {
         const message = String(error.message || '');
         const requiresHuman = /captcha|verify|人机验证|安全验证|滑块|登录失效|人工验证/i.test(message);
-        if (!requiresHuman) await publisher.hide().catch(() => {});
+        // Preserve the visible publishing page on both success and failure so
+        // the user can inspect Alibaba's exact validation state. It can be
+        // hidden later through the normal seller-browser lifecycle.
         store.update((draft) => {
           const target = draft.products.find((item) => item.id === product.id);
           if (target) {
@@ -723,13 +772,21 @@ app.post('/api/jobs/:id/cancel', (request, response, next) => {
 
 app.use((error, _request, response, _next) => {
   console.error(error);
-  response.status(error.status || 500).json({ error: error.message || '服务器错误' });
+  const raw = String(error?.message || '');
+  const safeMessage = raw || '操作失败，请稍后重试';
+  response.status(error.status || 500).json({ error: safeMessage });
 });
 
-if (fs.existsSync(path.join(rootDir, 'dist'))) {
-  app.use(express.static(path.join(rootDir, 'dist')));
-  app.get('/{*splat}', (_request, response) => response.sendFile(path.join(rootDir, 'dist', 'index.html')));
+if (staticDir && fs.existsSync(path.join(staticDir, 'index.html'))) {
+  app.use(express.static(staticDir));
+  app.get('/{*splat}', (_request, response) => response.sendFile(path.join(staticDir, 'index.html')));
 }
 
 const port = Number(process.env.PORT || 8787);
-app.listen(port, '127.0.0.1', () => console.log(`Alibaba.com workbench API: http://127.0.0.1:${port}`));
+export const serverReady = new Promise((resolve, reject) => {
+  const listener = app.listen(port, '127.0.0.1', () => {
+    console.log(`Alibaba.com workbench API: http://127.0.0.1:${port}`);
+    resolve(listener);
+  });
+  listener.once('error', reject);
+});

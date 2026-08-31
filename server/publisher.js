@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import sharp from 'sharp';
 import { load } from 'cheerio';
-import { hidePage, launchPersistent, revealPage, settlePage, waitForHumanVerification } from './browser-runtime.js';
+import { hidePage, launchPersistent, revealPage, settlePage, syncAlibabaCookies, waitForHumanVerification } from './browser-runtime.js';
 import { extractAlibabaSourceData, parseAlibabaDetailDataScript } from './alibaba-source-data.js';
 import { SOURCE_LANGUAGE_HEADERS, withSourceLocale } from './source-locale.js';
 
@@ -874,6 +874,289 @@ async function fieldByAnyLabel(page, labels) {
   return null;
 }
 
+export function mainImageSlotsComplete(initialSlotCount, remainingSlotCount, expectedCount) {
+  const initial = Math.max(0, Number(initialSlotCount) || 0);
+  const remaining = Math.max(0, Number(remainingSlotCount) || 0);
+  const expected = Math.max(0, Number(expectedCount) || 0);
+  return remaining <= Math.max(0, initial - expected);
+}
+
+export function distinctAlibabaImageUrls(urls = []) {
+  const seen = new Set();
+  const result = [];
+  for (const value of urls.filter(Boolean)) {
+    let key = String(value).trim().toLowerCase();
+    try {
+      const parsed = new URL(value);
+      const file = decodeURIComponent(parsed.pathname.split('/').pop() || '');
+      // CDN derivatives append transformations after the original extension,
+      // for example Hxxx.jpg_960x960q80.jpg. They are the same source asset.
+      key = file.replace(/\.(?:jpe?g|png|webp)_[^./]+\.(?:jpe?g|png|webp)$/i, (match) => match.split('_')[0]).toLowerCase() || key;
+    } catch {}
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(value);
+  }
+  return result;
+}
+
+export function findBlockingUnmappedVariant(product, unmappedAttributes = []) {
+  const required = new Set();
+  for (const group of product?.variantGroups || []) {
+    if (!group?.name || /颜色|colou?r/i.test(group.name)) continue;
+    const options = [...new Set((group.options || []).map((value) => englishSpecText(value)).filter(Boolean))];
+    // A single descriptive value (for example "compatible model: General")
+    // does not create a SKU choice. It remains in the source snapshot and the
+    // published description table, but must not masquerade as a required sale
+    // specification and block the whole listing.
+    if (options.length < 2) continue;
+    for (const option of options) required.add(`${group.name}: ${option}`.toLowerCase());
+  }
+  return (unmappedAttributes || []).find((item) => required.has(String(item || '').trim().toLowerCase())) || '';
+}
+
+export function needsColorSaleSpecification(colorGroup) {
+  const values = [...new Set((colorGroup?.options || [])
+    .map((value) => englishSpecText(value))
+    .filter(Boolean))];
+  // Alibaba's target category treats Color as a required sales specification
+  // even when the source has one SKU. Keep the source's single value instead
+  // of clearing the control and triggering the generic required-field error.
+  return values.length > 0;
+}
+
+const LOGISTICS_FIELD_LABELS = {
+  weight: ['单个产品毛重', 'single gross weight', 'gross weight', 'product weight'],
+  length: ['长(CM/Piece)', '包装长度', 'package length', 'length(cm/piece)', 'length'],
+  width: ['宽(CM/Piece)', '包装宽度', 'package width', 'width(cm/piece)', 'width'],
+  height: ['高(CM/Piece)', '包装高度', 'package height', 'height(cm/piece)', 'height']
+};
+
+const LOGISTICS_FIELD_SELECTORS = {
+  weight: [
+    'input[name="pkgWeight"]', 'input[name*="pkgWeight" i]',
+    'input[name*="grossWeight" i]', 'input[placeholder*="重量"]',
+    'input[placeholder*="weight" i]'
+  ],
+  length: [
+    'input[name="pkgLength"]', 'input[name*="pkgLength" i]',
+    'input[name*="packageLength" i]', 'input[placeholder*="长(CM/Piece)" i]',
+    'input[placeholder*="length" i]'
+  ],
+  width: [
+    'input[name="pkgWidth"]', 'input[name*="pkgWidth" i]',
+    'input[name*="packageWidth" i]', 'input[placeholder*="宽(CM/Piece)" i]',
+    'input[placeholder*="width" i]'
+  ],
+  height: [
+    'input[name="pkgHeight"]', 'input[name*="pkgHeight" i]',
+    'input[name*="packageHeight" i]', 'input[placeholder*="高(CM/Piece)" i]',
+    'input[placeholder*="height" i]'
+  ]
+};
+
+const LOGISTICS_EXTRA_SELECTORS = [
+  'input[name*="volume" i]', 'input[name*="shipping" i]',
+  'input[name*="logistic" i]', 'input[name*="package" i]:not([name*="Length" i]):not([name*="Width" i]):not([name*="Height" i])',
+  'input[placeholder*="体积"]', 'input[placeholder*="物流"]',
+  'input[placeholder*="volume" i]', 'input[placeholder*="shipping" i]',
+  'input[placeholder*="logistic" i]'
+].join(', ');
+
+async function logisticsFields(page) {
+  const fields = {};
+  for (const key of Object.keys(LOGISTICS_FIELD_LABELS)) {
+    fields[key] = await firstVisible(page, LOGISTICS_FIELD_SELECTORS[key]);
+    if (!fields[key]) fields[key] = await fieldByAnyLabel(page, LOGISTICS_FIELD_LABELS[key]);
+  }
+  return fields;
+}
+
+async function setLogisticsSectionEnabled(page, enabled) {
+  const candidates = page.getByText(/包装运输\s*Packaging\s*&\s*shipping\s*specifications/i).last();
+  if (!await candidates.isVisible().catch(() => false)) return false;
+  let container = candidates.locator('xpath=ancestor::label[.//input[@type="checkbox"]][1]');
+  if (!await container.count().catch(() => 0)) container = candidates.locator('xpath=ancestor::*[.//input[@type="checkbox"]][1]');
+  const checkbox = container.locator('input[type="checkbox"]').first();
+  if (!await checkbox.count().catch(() => 0)) return false;
+  const checked = await checkbox.isChecked().catch(() => false);
+  if (checked !== enabled) {
+    if (enabled) await checkbox.check({ force: true }).catch(() => container.click({ force: true }).catch(() => {}));
+    else await checkbox.uncheck({ force: true }).catch(() => container.click({ force: true }).catch(() => {}));
+    await page.waitForTimeout(350);
+  }
+  return await checkbox.isChecked().catch(() => enabled) === enabled;
+}
+
+// Alibaba has changed the logistics form several times. Depending on the
+// selected category it can render more than one logistics card (for example a
+// product card and a "volume and weight including package" card), and the
+// generated input names are not stable. Resolve controls from their nearby
+// labels/containers instead of relying on one name or one optional checkbox.
+async function syncLogisticsControls(page, values, { clear = false } = {}) {
+  const numeric = {
+    weight: numericValue(values.weight),
+    length: numericValue(values.length),
+    width: numericValue(values.width),
+    height: numericValue(values.height)
+  };
+  numeric.volume = numeric.length > 0 && numeric.width > 0 && numeric.height > 0
+    ? numeric.length * numeric.width * numeric.height
+    : 0;
+  return page.evaluate(({ numeric, clear }) => {
+    const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
+    const logisticsHint = /logistic|shipping|package|packaging|volume|weight|length|width|height|物流|体积|重量|包装|尺寸|毛重|包装长|包装宽|包装高/i;
+    const metric = (node, context) => {
+      const ownText = `${node.name || ''} ${node.id || ''} ${node.placeholder || ''} ${node.getAttribute('aria-label') || ''}`;
+      const classify = (text) => {
+        if (/weight|gross|重量|毛重/i.test(text)) return 'weight';
+        if (/length|包装长|\b长\b|长\s*[（(]/i.test(text)) return 'length';
+        if (/width|包装宽|\b宽\b|宽\s*[（(]/i.test(text)) return 'width';
+        if (/height|包装高|\b高\b|高\s*[（(]/i.test(text)) return 'height';
+        if (/volume|体积/i.test(text)) return 'volume';
+        return '';
+      };
+      // A shared logistics wrapper often contains all four labels. Classify
+      // from the control's own metadata first so sibling labels cannot win.
+      return classify(ownText) || classify(context);
+    };
+    const setter = (node, value) => {
+      if (node instanceof HTMLSelectElement) {
+        if (clear) node.selectedIndex = 0;
+        node.dispatchEvent(new Event('input', { bubbles: true }));
+        node.dispatchEvent(new Event('change', { bubbles: true }));
+        return;
+      }
+      const prototype = node instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const setValue = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+      setValue?.call(node, clear ? '' : String(value));
+      node.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: clear ? 'deleteContentBackward' : 'insertText', data: clear ? null : String(value) }));
+      node.dispatchEvent(new Event('change', { bubbles: true }));
+      node.blur();
+    };
+    const controls = [];
+    for (const node of document.querySelectorAll('input:not([type="hidden"]), textarea, select')) {
+      if (!visible(node) || node.disabled) continue;
+      const ownText = `${node.name || ''} ${node.id || ''} ${node.placeholder || ''} ${node.getAttribute('aria-label') || ''}`;
+      const nearbyText = clean(node.closest('label')?.textContent || node.parentElement?.textContent || '').slice(0, 450);
+      let logisticsContext = logisticsHint.test(`${ownText} ${nearbyText}`);
+      let parent = node.parentElement;
+      for (let level = 0; parent && level < 6; level += 1, parent = parent.parentElement) {
+        const className = typeof parent.className === 'string' ? parent.className : '';
+        const id = parent.id || '';
+        const parentText = clean(parent.textContent).slice(0, 700);
+        if (logisticsHint.test(`${className} ${id}`) || /物流属性|体积与重量|包装运输|shipping specifications/i.test(parentText)) {
+          logisticsContext = true;
+          break;
+        }
+      }
+      if (!logisticsContext) continue;
+      const key = metric(node, nearbyText);
+      if (!key) continue;
+      controls.push({ node, key });
+    }
+    const seen = new Set();
+    let count = 0;
+    for (const { node, key } of controls) {
+      if (seen.has(node)) continue;
+      seen.add(node);
+      setter(node, numeric[key]);
+      count += 1;
+    }
+    return { count, keys: controls.map(({ key }) => key) };
+  }, { numeric, clear }).catch(() => ({ count: 0, keys: [] }));
+}
+
+async function clearLogisticsFields(page, fields = null) {
+  const targets = fields || await logisticsFields(page);
+  const extras = page.locator(LOGISTICS_EXTRA_SELECTORS);
+  const extraCount = await extras.count().catch(() => 0);
+  const allFields = [...Object.values(targets)];
+  for (let index = 0; index < extraCount; index += 1) {
+    const extra = extras.nth(index);
+    if (await extra.isVisible().catch(() => false)) allFields.push(extra);
+  }
+  const seen = new Set();
+  for (const field of allFields) {
+    if (!field) continue;
+    const key = await field.evaluate((node) => node).catch(() => null);
+    if (key && seen.has(key)) continue;
+    if (key) seen.add(key);
+    await field.fill('').catch(() => {});
+    await commitControlledInput(field, '');
+  }
+  return targets;
+}
+
+async function forceClearLogisticsSection(page) {
+  const fields = await logisticsFields(page);
+  await clearLogisticsFields(page, fields);
+  await syncLogisticsControls(page, {}, { clear: true });
+  // If Alibaba kept the optional logistics module selected after a failed
+  // submit, clear its selection as well so the retry is a true all-empty
+  // logistics state. The helper is deliberately only used during recovery;
+  // normal filling never toggles this similarly named content option.
+  await setLogisticsSectionEnabled(page, false);
+  // The form may keep controlled values in React state even after the native
+  // input is cleared. Clear every visible logistics-like input once more and
+  // dispatch the same events the page uses for a user edit.
+  await page.evaluate(() => {
+    const pattern = /pkg|weight|volume|shipping|logistic|package|length|width|height|物流|重量|体积|包装|尺寸/i;
+    for (const node of document.querySelectorAll('input:not([type="hidden"]), textarea')) {
+      const signature = `${node.name || ''} ${node.id || ''} ${node.placeholder || ''} ${node.parentElement?.textContent || ''}`;
+      if (!pattern.test(signature)) continue;
+      const prototype = node instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+      setter?.call(node, '');
+      node.dispatchEvent(new Event('input', { bubbles: true }));
+      node.dispatchEvent(new Event('change', { bubbles: true }));
+      node.blur();
+    }
+  }).catch(() => {});
+  await page.waitForTimeout(500);
+}
+
+async function fillLogisticsFields(page, packaging = {}) {
+  const values = {
+    weight: packaging.weight,
+    length: packaging.length,
+    width: packaging.width,
+    height: packaging.height
+  };
+  const completeSource = Object.values(values).every((value) => numericValue(value) > 0);
+  // Populate every rendered logistics card. Do not toggle the similarly named
+  // "Packaging & shipping specifications" checkbox: on current Alibaba forms
+  // that checkbox belongs to an unrelated optional content module.
+  const synced = await syncLogisticsControls(page, values, { clear: !completeSource });
+  const fields = await logisticsFields(page);
+  // The fixed labels used by older posting forms are not present in every
+  // category. The generic resolver above is authoritative; require one
+  // recognized control for each metric instead of rejecting a valid form just
+  // because its generated label/name changed.
+  const completeTarget = ['weight', 'length', 'width', 'height']
+    .every((key) => synced.keys.includes(key));
+
+  // Alibaba accepts this section only as a complete set or as an empty set.
+  // Never leave source or target values partially populated.
+  if (!completeSource || !completeTarget) {
+    await clearLogisticsFields(page, fields);
+    await syncLogisticsControls(page, {}, { clear: true });
+    return false;
+  }
+
+  try {
+    for (const key of Object.keys(values)) {
+      if (fields[key]) await fillAndVerify(fields[key], values[key], key);
+    }
+    return completeTarget;
+  } catch {
+    await clearLogisticsFields(page, fields);
+    await syncLogisticsControls(page, {}, { clear: true });
+    return false;
+  }
+}
+
 async function fillChoice(page, locator, value) {
   if (!locator || !value) return false;
   await locator.click().catch(() => {});
@@ -912,17 +1195,24 @@ async function fillColorSpec(page, values) {
   const colorInput = await firstVisible(page, [colorInputSelector]);
   if (!colorInput) return false;
   for (const color of colors) {
-    if ((await selectedColors()).some((item) => item.trim().toLowerCase() === color.toLowerCase())) continue;
     const inputs = page.locator(colorInputSelector);
     let input = null;
+    let emptyInput = null;
     for (let inputIndex = 0; inputIndex < await inputs.count().catch(() => 0); inputIndex += 1) {
       const candidate = inputs.nth(inputIndex);
-      if (await candidate.isVisible().catch(() => false) && !(await candidate.inputValue().catch(() => ''))) { input = candidate; break; }
+      if (!await candidate.isVisible().catch(() => false)) continue;
+      const currentValue = String(await candidate.inputValue().catch(() => '')).trim();
+      if (currentValue.toLowerCase() === color.toLowerCase()) { input = candidate; break; }
+      if (!currentValue && !emptyInput) emptyInput = candidate;
     }
+    input ||= emptyInput;
     if (!input) break;
-    await input.click({ force: true });
-    await input.fill(color);
-    await page.waitForTimeout(500);
+    const existingValue = String(await input.inputValue().catch(() => '')).trim();
+    if (existingValue.toLowerCase() !== color.toLowerCase()) {
+      await input.click({ force: true });
+      await input.fill(color);
+      await page.waitForTimeout(500);
+    }
     // The international form renders the suggestion as a plain list item on
     // some categories (without role="option"). Prefer the last visible exact
     // match so we commit the suggestion instead of leaving raw text in the
@@ -943,11 +1233,6 @@ async function fillColorSpec(page, values) {
         return true;
       }, color).catch(() => false);
     }
-    // Selecting the exact option is the complete transaction in Alibaba's
-    // current form. There is no second global "Add" confirmation. Clicking a
-    // page-wide Add button here can open the custom compatible-model editor
-    // and cause React to rebuild the color card, discarding the committed
-    // value and its specification image.
     if (!committed) {
       await input.press('ArrowDown').catch(() => {});
       await input.press('Enter').catch(() => {});
@@ -978,6 +1263,95 @@ async function fillColorSpec(page, values) {
   // row for another value, not a validation failure. Only committed source
   // values are authoritative here.
   return colors.every((color) => selected.some((item) => item.trim().toLowerCase() === color.toLowerCase()));
+}
+
+async function removeEmptyColorSpecRows(page, expectedColors = []) {
+  const row = await visibleColorSpecRow(page);
+  if (!row) return;
+  const expected = new Set(expectedColors.map((value) => String(value || '').trim().toLowerCase()).filter(Boolean));
+  // In the current editor "+ 添加" creates another blank color row. Remove
+  // only blank rows and never touch a populated source value.
+  for (let pass = 0; pass < 4; pass += 1) {
+    const items = row.locator('.posting-feild-color-item, .posting-field-color-item, .posting-feild-color-item-container');
+    let removed = false;
+    for (let index = await items.count().catch(() => 0) - 1; index >= 0; index -= 1) {
+      const item = items.nth(index);
+      if (!await item.isVisible().catch(() => false)) continue;
+      const input = item.locator('input[role="colorCombobox"], input[placeholder*="输入"], input[placeholder*="select" i]').first();
+      if (!await input.count().catch(() => 0)) continue;
+      const value = String(await input.inputValue().catch(() => '')).trim();
+      if (value || expected.has(value.toLowerCase())) continue;
+      const remove = item.locator('button, [role="button"], .next-icon-delete, [class*="delete"], [class*="remove"]').last();
+      if (!await remove.count().catch(() => 0) || !await remove.isVisible().catch(() => false)) continue;
+      await remove.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(180);
+      removed = true;
+      break;
+    }
+    if (!removed) break;
+  }
+}
+
+async function ensureColorSpecImageSwitch(page, row) {
+  const hasUploadSurface = async () => row.locator([
+    '.custom-upload-image',
+    '.value-preview',
+    '[class*="upload-image"]'
+  ].join(', ')).evaluateAll((nodes) => nodes.some((node) => Boolean(
+    node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length)
+  ))).catch(() => false);
+  if (await hasUploadSurface()) return true;
+
+  const switchIsOn = async (control) => {
+    if (!control || !await control.count().catch(() => 0)) return false;
+    if (await control.getAttribute('aria-checked').catch(() => '') === 'true') return true;
+    if (await control.getAttribute('aria-pressed').catch(() => '') === 'true') return true;
+    if (await control.isChecked().catch(() => false)) return true;
+    return /next-switch-on|is-checked|(?:^|\s)(?:on|opened|checked|active)(?:\s|$)/i.test(await control.getAttribute('class').catch(() => '') || '');
+  };
+  const resolveTarget = async () => {
+    const labels = row.getByText(/添加规格图|规格图|specification image|spec image/i);
+    let label = null;
+    for (let index = 0; index < await labels.count().catch(() => 0); index += 1) {
+      const candidate = labels.nth(index);
+      if (await candidate.isVisible().catch(() => false)) { label = candidate; break; }
+    }
+    if (!label) return null;
+    const labelBox = await label.boundingBox().catch(() => null);
+    const controls = row.locator('.next-switch, [role="switch"]');
+    const candidates = [];
+    for (let index = 0; index < await controls.count().catch(() => 0); index += 1) {
+      const control = controls.nth(index);
+      if (!await control.isVisible().catch(() => false)) continue;
+      const box = await control.boundingBox().catch(() => null);
+      const distance = labelBox && box
+        ? Math.hypot((box.x + box.width / 2) - labelBox.x, (box.y + box.height / 2) - (labelBox.y + labelBox.height / 2))
+        : index * 1000;
+      candidates.push({ control, distance });
+    }
+    candidates.sort((left, right) => left.distance - right.distance);
+    return candidates[0]?.control || label;
+  };
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const control = await resolveTarget();
+    if (!control) return false;
+    if (!await switchIsOn(control)) {
+      await control.scrollIntoViewIfNeeded().catch(() => {});
+      await control.click({ force: true }).catch(() => {});
+    }
+    const deadline = Date.now() + 2500;
+    while (Date.now() < deadline) {
+      if (await hasUploadSurface()) return true;
+      const refreshed = await resolveTarget();
+      if (await switchIsOn(refreshed)) {
+        await page.waitForTimeout(300);
+        if (await hasUploadSurface()) return true;
+      }
+      await page.waitForTimeout(150);
+    }
+  }
+  return false;
 }
 
 async function fillVariantSpecs(page, variantGroups) {
@@ -1182,6 +1556,109 @@ async function ensureSaleAttributeSelected(page, value) {
   return false;
 }
 
+async function ensureSaleAttributeCleared(page, value) {
+  if (!await saleAttributeIsSelected(page, value)) return true;
+  const committed = await page.evaluate((expectedValue) => {
+    const root = document.querySelector('#saleAttributesItems');
+    if (!root) return { ok: false, reason: 'missing-root' };
+    const fiberKey = Object.getOwnPropertyNames(root).find((key) => key.startsWith('__reactFiber'));
+    let fiber = fiberKey ? root[fiberKey] : null;
+    for (let depth = 0; fiber && depth < 12; depth += 1, fiber = fiber.return) {
+      const props = fiber.memoizedProps || fiber.stateNode?.props;
+      if (props?.id !== 'saleAttributesItems' || !Array.isArray(props.value)) continue;
+      if (!props.value.some((item) => String(item?.value) === String(expectedValue))) {
+        return { ok: true, already: true };
+      }
+      const selectedIds = props.value
+        .filter((item) => String(item?.value) !== String(expectedValue))
+        .map((item) => String(item?.value));
+      const seen = new Set();
+      const visit = (candidate, level = 0) => {
+        if (!candidate || level > 18 || seen.has(candidate)) return null;
+        seen.add(candidate);
+        const instance = candidate.stateNode;
+        if (instance?.constructor?.name === 'SaleAttributesItems' && typeof instance.onChange === 'function') return instance;
+        return visit(candidate.child, level + 1) || visit(candidate.sibling, level);
+      };
+      const instance = visit(fiber.child);
+      if (instance) {
+        instance.onChange(selectedIds);
+        return { ok: true, method: 'SaleAttributesItems.onChange' };
+      }
+      const next = props.value.filter((item) => String(item?.value) !== String(expectedValue));
+      if (typeof props.changeValue === 'function') {
+        props.changeValue.call(props, next);
+        return { ok: true, method: 'changeValue' };
+      }
+      if (typeof props.change === 'function') {
+        props.change(props.id, { props: { value: next } });
+        return { ok: true, method: 'change' };
+      }
+      return { ok: false, reason: 'missing-change-handler' };
+    }
+    return { ok: false, reason: 'missing-component' };
+  }, value).catch((error) => ({ ok: false, reason: error.message }));
+  if (!committed?.ok) return false;
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    if (!await saleAttributeIsSelected(page, value)) return true;
+    await page.waitForTimeout(200);
+  }
+  return false;
+}
+
+// A category can arrive with sale-attribute options preselected from the
+// previous browser session. Those defaults are not part of the source product
+// and image-type defaults make Alibaba reject the form with
+// “商品图片项必填项不能为空”. Clear the controlled list before applying the
+// source specifications so only exact source values remain selected.
+async function clearSaleAttributeSelections(page) {
+  const result = await page.evaluate(() => {
+    const root = document.querySelector('#saleAttributesItems');
+    if (!root) return { ok: false, reason: 'missing-root' };
+    const fiberKey = Object.getOwnPropertyNames(root).find((key) => key.startsWith('__reactFiber'));
+    let fiber = fiberKey ? root[fiberKey] : null;
+    for (let depth = 0; fiber && depth < 12; depth += 1, fiber = fiber.return) {
+      const props = fiber.memoizedProps || fiber.stateNode?.props;
+      if (props?.id !== 'saleAttributesItems' || !Array.isArray(props.value)) continue;
+      const visit = (candidate, level = 0, seen = new Set()) => {
+        if (!candidate || level > 18 || seen.has(candidate)) return null;
+        seen.add(candidate);
+        const instance = candidate.stateNode;
+        if (instance?.constructor?.name === 'SaleAttributesItems' && typeof instance.onChange === 'function') return instance;
+        return visit(candidate.child, level + 1, seen) || visit(candidate.sibling, level, seen);
+      };
+      const instance = visit(fiber.child);
+      if (instance) {
+        instance.onChange([]);
+        return { ok: true, method: 'SaleAttributesItems.onChange' };
+      }
+      if (typeof props.changeValue === 'function') {
+        props.changeValue.call(props, []);
+        return { ok: true, method: 'changeValue' };
+      }
+      if (typeof props.change === 'function') {
+        props.change(props.id, { props: { value: [] } });
+        return { ok: true, method: 'change' };
+      }
+      return { ok: false, reason: 'missing-change-handler' };
+    }
+    return { ok: false, reason: 'missing-component' };
+  }).catch((error) => ({ ok: false, reason: error.message }));
+  if (!result?.ok) return false;
+  await page.waitForTimeout(500);
+  return page.evaluate(() => {
+    const root = document.querySelector('#saleAttributesItems');
+    const fiberKey = root && Object.getOwnPropertyNames(root).find((key) => key.startsWith('__reactFiber'));
+    let fiber = fiberKey ? root[fiberKey] : null;
+    for (let depth = 0; fiber && depth < 12; depth += 1, fiber = fiber.return) {
+      const props = fiber.memoizedProps || fiber.stateNode?.props;
+      if (props?.id === 'saleAttributesItems' && Array.isArray(props.value)) return props.value.length === 0;
+    }
+    return false;
+  }).catch(() => false);
+}
+
 async function specControlIsChecked(control) {
   if (!control) return false;
   const { wrapper, input } = control;
@@ -1223,22 +1700,24 @@ async function enableSpecImageUpload(page, product, colorGroup, downloadImages) 
   // Alibaba rejects because saleAttributesItems still omits the specification.
   if (!await ensureSaleAttributeSelected(page, '191288010')) return false;
 
-  const rowDeadline = Date.now() + 5000;
+  // A populated color input is already a committed specification in the
+  // current editor. The separate "+ 添加" control creates another blank row.
+  if (!await fillColorSpec(page, colorValues)) return false;
+
+  const rowDeadline = Date.now() + 10000;
   let row = await visibleColorSpecRow(page);
   while (!row && Date.now() < rowDeadline) {
     await page.waitForTimeout(200);
     row = await visibleColorSpecRow(page);
   }
   if (!row) return false;
-  const imageSwitch = row.locator('[role="switch"]').first();
-  if (await imageSwitch.isVisible().catch(() => false) && await imageSwitch.getAttribute('aria-checked').catch(() => 'false') !== 'true') {
-    await imageSwitch.click({ force: true }).catch(() => {});
-    await page.waitForTimeout(250);
-  }
+  await removeEmptyColorSpecRows(page, colorValues);
+  row = await visibleColorSpecRow(page) || row;
+  if (!await ensureColorSpecImageSwitch(page, row)) return false;
   const files = await downloadImages([imageUrl], 'spec', 1);
   if (!files.length) return false;
   const expectedColor = colorValues[0];
-  const items = row.locator('.posting-feild-color-item');
+  const items = row.locator('.posting-feild-color-item, .posting-field-color-item, .posting-feild-color-item-container');
   let item = null;
   for (let index = 0; index < await items.count().catch(() => 0); index += 1) {
     const candidate = items.nth(index);
@@ -1248,14 +1727,38 @@ async function enableSpecImageUpload(page, product, colorGroup, downloadImages) 
       break;
     }
   }
+  if (!item) {
+    // Alibaba can rebuild the row after the image switch is enabled. Re-resolve
+    // the generated item after restoring the source value.
+    if (!await fillColorSpec(page, [expectedColor])) return false;
+    const refreshedItems = row.locator('.posting-feild-color-item, .posting-field-color-item, .posting-feild-color-item-container');
+    for (let index = 0; index < await refreshedItems.count().catch(() => 0); index += 1) {
+      const candidate = refreshedItems.nth(index);
+      const inputValue = await candidate.locator('input[role="colorCombobox"], input').first().inputValue().catch(() => '');
+      if (String(inputValue).trim().toLowerCase() === expectedColor.toLowerCase()) {
+        item = candidate;
+        break;
+      }
+    }
+  }
   if (!item) return false;
 
-  const uploadBox = item.locator('.custom-upload-image').first();
+  const uploadBox = item.locator('.custom-upload-image, [class*="upload-image"], [class*="upload-trigger"]').first();
+  await uploadBox.scrollIntoViewIfNeeded().catch(() => {});
   await uploadBox.hover({ force: true }).catch(() => {});
-  await page.waitForTimeout(150);
+  await page.waitForTimeout(250);
+  // The Alibaba uploader renders its menu in a document-level portal, so the
+  // menu button is often not a descendant of the color item. Prefer a direct
+  // file input, then resolve the newest visible portal menu after opening the
+  // item; never use the first page-wide text match (that can hit the assistant
+  // drawer or image bank menu).
+  let input = item.locator('input[type="file"][accept*="image" i], input[type="file"]').last();
+  if (await input.count().catch(() => 0)) {
+    await input.setInputFiles(files[0]);
+  }
   const uploadButton = item.getByRole('button', { name: /本地选取|本地上传|local/i }).last();
   let chooserUsed = false;
-  if (await uploadButton.isVisible().catch(() => false)) {
+  if (!await input.count().catch(() => 0) && await uploadButton.isVisible().catch(() => false)) {
     const chooserPromise = page.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null);
     await uploadButton.click({ force: true }).catch(() => {});
     const chooser = await chooserPromise;
@@ -1264,16 +1767,38 @@ async function enableSpecImageUpload(page, product, colorGroup, downloadImages) 
       chooserUsed = true;
     }
   }
-  if (!chooserUsed) {
-    const input = item.locator('input[type="file"]').last();
-    if (!await input.count().catch(() => 0)) return false;
-    await input.setInputFiles(files[0]);
+  if (!await input.count() && !chooserUsed) {
+    // Some editor versions open the action menu on click rather than hover.
+    // Click only the resolved color-slot trigger before inspecting portal text.
+    await uploadBox.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(250);
+    const portalUpload = page.getByText('本地上传', { exact: true });
+    const portalCount = await portalUpload.count().catch(() => 0);
+    for (let index = portalCount - 1; index >= 0 && !chooserUsed; index -= 1) {
+      const candidate = portalUpload.nth(index);
+      if (!await candidate.isVisible().catch(() => false)) continue;
+      const chooserPromise = page.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null);
+      await candidate.click({ force: true }).catch(() => {});
+      const chooser = await chooserPromise;
+      if (chooser) {
+        await chooser.setFiles(files[0]);
+        chooserUsed = true;
+      }
+    }
+  }
+  if (!await input.count() && !chooserUsed) {
+    const pageInputs = page.locator('input[type="file"][accept*="image" i], input[type="file"]');
+    const inputCount = await pageInputs.count().catch(() => 0);
+    if (!inputCount) return false;
+    await pageInputs.nth(inputCount - 1).setInputFiles(files[0]);
   }
 
   const preview = item.locator([
     '.value-preview.uploaded img[src]',
     '.value-preview img[src]',
-    '.value-preview [style*="background-image"]'
+    '.value-preview [style*="background-image"]',
+    '.custom-upload-image img[src]',
+    '[class*="upload-image"] img[src]'
   ].join(', '));
   const uploadDeadline = Date.now() + 60000;
   while (!await preview.count().catch(() => 0) && Date.now() < uploadDeadline) {
@@ -1311,11 +1836,16 @@ export class SellerPublisher {
   }
 
   async sourceBrowser() {
-    // Reuse the signed-in seller session first. A fresh public profile is often
-    // challenged by Alibaba before the product page can be rendered.
-    if (this.context) return this.context;
+    // Source/detail collection always uses the dedicated headless context.
+    // Reusing the headed seller context here makes a plain Alibaba login
+    // redirect look like a human-verification page and leaves refresh-detail
+    // requests waiting for the full verification timeout. The latest Electron
+    // session cookies are imported into this context instead.
     if (!this.sourceContext) {
       this.sourceContext = await launchPersistent(this.sourceProfileDir, {
+        // Alibaba serves richer product detail markup in a real Chromium
+        // context. launchPersistent keeps this window off-screen; it is only
+        // revealed when an actual human verification challenge is detected.
         headless: false,
         locale: 'en-US',
         extraHTTPHeaders: {
@@ -1324,25 +1854,61 @@ export class SellerPublisher {
       });
       this.sourceContext.on('close', () => { this.sourceContext = null; });
     }
+    await syncAlibabaCookies(this.sourceContext);
     return this.sourceContext;
   }
 
+  async completeSourceVerification(url) {
+    const previous = this.sourceContext;
+    this.sourceContext = null;
+    await previous?.close().catch(() => {});
+    const context = await launchPersistent(this.sourceProfileDir, {
+      headless: false,
+      locale: 'en-US',
+      extraHTTPHeaders: { 'Accept-Language': 'en-US,en;q=0.9' }
+    });
+    const page = context.pages()[0] || await context.newPage();
+    try {
+      await page.setExtraHTTPHeaders(SOURCE_LANGUAGE_HEADERS);
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      // Make the manual verification surface visible immediately. The page
+      // may render its challenge text after navigation completes.
+      await revealPage(page);
+      await waitForHumanVerification(page, { timeout: 300000 });
+    } finally {
+      await context.close().catch(() => {});
+    }
+  }
+
   async open(options = {}) {
+    if (options.reveal && globalThis.__KUA_YIPU_SELLER_BRIDGE?.open) {
+      return globalThis.__KUA_YIPU_SELLER_BRIDGE.open();
+    }
     if (!this.context) {
       this.context = await launchPersistent(this.profileDir, { headless: false });
       this.context.on('close', () => { this.context = null; this.page = null; });
     }
+    await syncAlibabaCookies(this.context);
     const pages = this.context.pages();
     this.page = pages.find((item) => isAlibabaInternationalUrl(item.url())) || pages[0] || await this.context.newPage();
     if (this.page.url() === 'about:blank' || !isAlibabaInternationalUrl(this.page.url())) {
       await this.page.goto(WORKBENCH_URL, { waitUntil: 'domcontentloaded', timeout: 45000 });
     }
-    if (options.reveal) { await revealPage(this.page); this.visible = true; }
+    if (options.reveal) {
+      // My Alibaba is an explicit user action: always restore and maximize the
+      // seller browser so the user can choose the posting form visibly.
+      await revealPage(this.page);
+      await this.page.bringToFront().catch(() => {});
+      this.visible = true;
+    }
     else { await hidePage(this.page); this.visible = false; }
     return this.status();
   }
 
   status() {
+    if (globalThis.__KUA_YIPU_SELLER_BRIDGE?.status) {
+      return globalThis.__KUA_YIPU_SELLER_BRIDGE.status();
+    }
     return {
       browserOpen: Boolean(this.context),
       visible: this.visible,
@@ -1357,11 +1923,24 @@ export class SellerPublisher {
   }
 
   async currentSellerPage() {
-    await this.open();
-    const pages = this.context.pages();
-    const current = [...pages].reverse().find((item) => isAlibabaInternationalUrl(item.url()));
-    if (current) this.page = current;
-    return this.page;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await this.open();
+        const pages = this.context.pages();
+        const current = [...pages].reverse().find((item) => isAlibabaInternationalUrl(item.url()));
+        if (current) this.page = current;
+        return this.page;
+      } catch (error) {
+        const message = String(error?.message || '');
+        const closed = /browser.*退出|browser has been closed|target page, context or browser has been closed|采集浏览器已关闭/i.test(message);
+        if (!closed || attempt > 0) throw error;
+        await this.context?.close().catch(() => {});
+        this.context = null;
+        this.page = null;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+    throw new Error('卖家浏览器启动失败，请重试');
   }
 
   async findPostingFormPage(options = {}) {
@@ -1379,25 +1958,36 @@ export class SellerPublisher {
   }
 
   async bindCurrentPage() {
-    const page = await this.findPostingFormPage({ reveal: true });
-    const url = page.url();
-    if (!isAlibabaInternationalUrl(url) || /login|passport/i.test(url)) {
-      throw new Error('请先登录 My Alibaba，再进入国际站商品发布页面');
+    if (globalThis.__KUA_YIPU_SELLER_BRIDGE?.bind) {
+      return globalThis.__KUA_YIPU_SELLER_BRIDGE.bind();
     }
-    if (!isProductPostingUrl(url)) {
-      throw new Error('当前不是国际站商品发布页，请进入 Products → Post Products，选好类目并打开发布表单');
+    let page;
+    try {
+      page = await this.findPostingFormPage({ reveal: true });
+      const url = page.url();
+      if (!isAlibabaInternationalUrl(url) || /login|passport/i.test(url)) {
+        throw new Error('请先登录 My Alibaba，再进入国际站商品发布页面');
+      }
+      if (!isProductPostingUrl(url)) {
+        throw new Error('当前不是国际站商品发布页，请进入 Products → Post Products，选好类目并打开发布表单');
+      }
+      await settlePage(page);
+      const titleField = await firstVisible(page, TITLE_SELECTORS);
+      if (/\/product\/(?:easyListing|category)\.htm/i.test(new URL(url).pathname) && !titleField) {
+        throw new Error('当前仍是商品类目选择页。请先选择完整类目并点击“我已阅读如上规则，现在发布产品”，进入商品填写表单后再绑定');
+      }
+      if (!titleField) {
+        throw new Error('当前页面不是商品填写表单，尚未找到商品标题输入框');
+      }
+      const bodyText = await page.locator('body').innerText().catch(() => '');
+      const category = bodyText.match(/当前类目：\s*([^\n]+)/)?.[1]?.trim() || '';
+      return { url, title: await page.title(), category };
+    } finally {
+      // Binding is complete (or rejected); never leave the seller browser
+      // visible while the workbench is idle.
+      await hidePage(page || this.page).catch(() => {});
+      this.visible = false;
     }
-    await settlePage(page);
-    const titleField = await firstVisible(page, TITLE_SELECTORS);
-    if (/\/product\/(?:easyListing|category)\.htm/i.test(new URL(url).pathname) && !titleField) {
-      throw new Error('当前仍是商品类目选择页。请先选择完整类目并点击“我已阅读如上规则，现在发布产品”，进入商品填写表单后再绑定');
-    }
-    if (!titleField) {
-      throw new Error('当前页面不是商品填写表单，尚未找到商品标题输入框');
-    }
-    const bodyText = await page.locator('body').innerText().catch(() => '');
-    const category = bodyText.match(/当前类目：\s*([^\n]+)/)?.[1]?.trim() || '';
-    return { url, title: await page.title(), category };
   }
 
   async inspectPublishPage(publishPageUrl, query = '', detailMode = '') {
@@ -1629,7 +2219,21 @@ export class SellerPublisher {
       await page.setExtraHTTPHeaders(SOURCE_LANGUAGE_HEADERS);
       for (let index = 0; index < products.length; index += 1) {
         if (typeof options.shouldStop === 'function' && options.shouldStop()) { const error = new Error('COLLECT_PAUSED'); error.code = 'COLLECT_PAUSED'; throw error; }
-        enriched.push(await withSourceLocale(context, () => this.readSourceProduct(page, products[index]), options));
+        let enrichedProduct;
+        try {
+          enrichedProduct = await withSourceLocale(context, () => this.readSourceProduct(page, products[index]), options);
+        } catch (error) {
+          if (error?.code === 'HUMAN_VERIFICATION_REQUIRED') {
+            await this.completeSourceVerification(error.verificationUrl || products[index].sourceUrl);
+            return this.enrichSourceProducts(products.slice(index), onProgress, options)
+              .then((remaining) => [...enriched, ...remaining]);
+          }
+          if (error?.code === 'COLLECT_PAUSED') throw error;
+          // One unavailable detail page must not discard the listing data or
+          // mark the entire group as failed. Persist the warning on the item.
+          enrichedProduct = { ...products[index], collectWarning: String(error?.message || '商品详情读取失败，已保留基础资料') };
+        }
+        enriched.push(enrichedProduct);
         const keepGoing = onProgress(index + 1, products.length, enriched[index]);
         if (keepGoing === false) { const error = new Error('COLLECT_PAUSED'); error.code = 'COLLECT_PAUSED'; throw error; }
         if (Number(options.delaySeconds || 0) > 0) await page.waitForTimeout(Number(options.delaySeconds) * 1000);
@@ -1644,6 +2248,7 @@ export class SellerPublisher {
     await page.setExtraHTTPHeaders(SOURCE_LANGUAGE_HEADERS);
     await page.goto(base.sourceUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+    await page.waitForTimeout(800);
     await waitForHumanVerification(page, { timeout: 300000 });
     await page.waitForTimeout(450);
     await page.locator('[data-module-name="module_description"], [data-testid="module-description"]').first().scrollIntoViewIfNeeded().catch(() => {});
@@ -1651,10 +2256,14 @@ export class SellerPublisher {
       .first().scrollIntoViewIfNeeded().catch(() => {});
     await page.waitForTimeout(300);
     if (/login|passport/i.test(page.url())) {
-      throw new Error('读取商品详情需要登录，请先打开 My Alibaba 并登录后重新采集');
+      // Alibaba may require authentication for an individual detail page even
+      // when its public listing page is readable. Keep the listing record and
+      // let the remaining products continue.
+      return { ...base, collectWarning: '阿里巴巴要求登录，详情暂未补全' };
     }
     await page.locator('iframe[src*="descIframe"]')?.first().waitFor({ state: 'attached', timeout: 8000 }).catch(() => {});
     await page.waitForTimeout(1200);
+    await waitForHumanVerification(page, { timeout: 300000 });
     const detailDataScript = await page.evaluate(() => [...document.scripts]
       .map((script) => script.textContent || '')
       .find((text) => /(?:window\.)?detailData\s*=\s*\{/.test(text)) || '').catch(() => '');
@@ -1725,13 +2334,28 @@ export class SellerPublisher {
       for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
         try { visitJson(JSON.parse(script.textContent || 'null')); } catch {}
       }
-      const mainImages = unique([
+      let mainImages = unique([
         ...jsonObjects.filter((item) => item['@type'] === 'ImageObject').map((item) => item.contentUrl),
         ...[...document.querySelectorAll('img[src*="/kf/"]')]
           .filter((image) => /_960x960|_720x720/.test(image.currentSrc || image.src))
           .map((image) => image.currentSrc || image.src)
       ]).slice(0, 6);
       const descriptionModule = document.querySelector('[data-module-name="module_description"], [data-testid="module-description"]');
+      // Alibaba changes gallery markup frequently. When the size suffix or
+      // JSON-LD gallery is absent, use loaded product images outside the rich
+      // text module as a conservative fallback instead of returning zero
+      // source images.
+      if (mainImages.length < 4) {
+        const galleryImages = [...document.querySelectorAll('img')]
+          .map((image) => ({
+            url: image.currentSrc || image.src || image.getAttribute('data-src') || image.getAttribute('data-original') || '',
+            width: image.naturalWidth || Number(image.getAttribute('width') || 0),
+            insideDescription: Boolean(image.closest('[data-module-name="module_description"], [data-testid="module-description"]'))
+          }))
+          .filter((item) => item.url && /\/kf\//i.test(item.url) && !item.insideDescription && item.width >= 120)
+          .map((item) => item.url);
+        mainImages = [...new Set([...mainImages, ...unique(galleryImages)])].slice(0, 6);
+      }
       const sourceDetailImages = unique([...((descriptionModule || document).querySelectorAll('img'))]
         .filter((image) => /\/kf\//.test(image.currentSrc || image.src)
           && (image.naturalWidth >= 300 || /id-w-\[100%\]|_\d+x\d+/.test(String(image.className) + ' ' + (image.currentSrc || image.src))))
@@ -1749,10 +2373,12 @@ export class SellerPublisher {
         source: 'dom'
       })).filter((item) => item.name && item.value);
       if (attributes.length < 2) {
-        const fallbackAttributes = [...document.querySelectorAll('table tr, [class*=attribute] li, [class*=parameter] li')].map((row) => {
+        const fallbackAttributes = [...document.querySelectorAll('table tr, dl, [class*=attribute] li, [class*=attribute] [class*=row], [class*=parameter] li, [class*=specification] li')].map((row) => {
           const cells = [...row.querySelectorAll('th,td')].map(textOf).filter(Boolean);
           const text = textOf(row);
           if (cells.length >= 2) return { name: cells[0], value: cells.slice(1).join(' ') };
+          const terms = [...row.querySelectorAll('dt, dd')].map(textOf).filter(Boolean);
+          if (terms.length >= 2) return { name: terms[0], value: terms.slice(1).join(' ') };
           const match = text.match(/^([^:：]{1,80})\s*[:：]\s*(.{1,240})$/);
           return match ? { name: clean(match[1]), value: clean(match[2]) } : null;
         }).filter((item) => item?.name && item?.value);
@@ -1860,7 +2486,11 @@ export class SellerPublisher {
     } else if (!detail.description || /^(?:视频描述|video description)$/i.test(detail.description)) {
       detail.description = '';
     }
-    if (detail.mainImages.length < 4 || detail.attributes.length < 2) {
+    const hasUsableDetail = detail.mainImages.length > 0
+      || detail.detailImages.length > 0
+      || detail.attributes.length > 0
+      || Boolean(detail.descriptionHtml || detail.description || detail.priceText);
+    if (!hasUsableDetail) {
       throw new Error(`商品详情读取不完整：${base.title}（主图 ${detail.mainImages.length}，属性 ${detail.attributes.length}）`);
     }
     const sourcePriceTiers = structuredSource
@@ -1937,17 +2567,16 @@ export class SellerPublisher {
 
   async downloadImageSet(product, urls, prefix, limit = 6) {
     fs.mkdirSync(this.imageDir, { recursive: true });
-    const selectedUrls = [...new Set(urls.filter(Boolean))].filter((url) => /\/kf\//i.test(url)).slice(0, limit);
-    const paths = [];
-    for (let index = 0; index < selectedUrls.length; index += 1) {
+    const selectedUrls = distinctAlibabaImageUrls(urls).filter((url) => /\/kf\//i.test(url)).slice(0, limit);
+    const paths = await Promise.all(selectedUrls.map(async (url, index) => {
       try {
-        const response = await fetch(selectedUrls[index], { headers: { referer: product.sourceUrl, 'user-agent': 'Mozilla/5.0' } });
-        if (!response.ok) continue;
+        const response = await fetch(url, { headers: { referer: product.sourceUrl, 'user-agent': 'Mozilla/5.0' } });
+        if (!response.ok) return '';
         const contentType = response.headers.get('content-type') || '';
-        if (!/^image\/(?:jpeg|jpg|png)/i.test(contentType)) continue;
+        if (!/^image\/(?:jpeg|jpg|png)/i.test(contentType)) return '';
         let extension = contentType.includes('png') ? 'png' : 'jpg';
         let buffer = Buffer.from(await response.arrayBuffer());
-        if (!buffer.length || buffer.length > 5 * 1024 * 1024) continue;
+        if (!buffer.length || buffer.length > 5 * 1024 * 1024) return '';
         if (prefix === 'detail') {
           const metadata = await sharp(buffer).metadata();
           if ((metadata.width || 0) > 960 || (metadata.height || 0) > 960) {
@@ -1962,10 +2591,10 @@ export class SellerPublisher {
         const safePrefix = String(prefix || 'image').replace(/[^A-Za-z0-9]/g, '');
         const filePath = path.join(this.imageDir, `${safeId}${safePrefix}${index}.${extension}`);
         fs.writeFileSync(filePath, buffer);
-        paths.push(filePath);
-      } catch {}
-    }
-    return paths;
+        return filePath;
+      } catch { return ''; }
+    }));
+    return paths.filter(Boolean);
   }
 
   async uploadMainImages(page, product) {
@@ -1973,40 +2602,120 @@ export class SellerPublisher {
     const images = await this.downloadImageSet(product, urls, 'main', 6);
     if (images.length < 4) throw new Error(`主图资料不足：仅下载到 ${images.length} 张，至少需要 4 张`);
     const placeholders = () => page.locator('.image-uploader .image-upload-list-item #image-placeholder-span');
+    const initialSlotCount = await placeholders().count().catch(() => 0);
+    if (initialSlotCount < images.length) {
+      throw new Error(`国际站主图槽位不足：当前 ${initialSlotCount} 个，商品需要上传 ${images.length} 张`);
+    }
+    const finishBatchUpload = async () => {
+      const result = await this.waitForMainImageUploads(page, images.length, initialSlotCount);
+      const remainingSlots = await placeholders().count().catch(() => initialSlotCount);
+      const occupiedSlots = Math.max(0, initialSlotCount - remainingSlots);
+      if (occupiedSlots < images.length) {
+        throw new Error(`国际站主图批量上传完成校验失败：已占用 ${occupiedSlots}/${images.length} 个主图槽位`);
+      }
+      return result;
+    };
+    const firstTrigger = placeholders().first();
+    const firstSlot = firstTrigger.locator('xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " image-upload-list-item ")][1]');
+    const firstInput = firstSlot.locator('input[type="file"][accept*="image" i], input[type="file"]').last();
+    if (await firstInput.count().catch(() => 0) && await firstInput.getAttribute('multiple') !== null) {
+      await firstInput.setInputFiles(images);
+      return finishBatchUpload();
+    }
+    // Alibaba renders several unrelated "本地上传" labels (the AI assistant,
+    // image bank and the active slot menu) in the same document. Resolve the
+    // menu item closest to the slot that was just opened instead of using a
+    // page-wide text locator, which could click an unrelated overlay.
+    const findLocalUpload = async (trigger, timeout = 5000) => {
+      const deadline = Date.now() + timeout;
+      while (Date.now() < deadline) {
+        const triggerBox = await trigger.boundingBox().catch(() => null);
+        const candidates = page.getByText('本地上传', { exact: true });
+        const scored = [];
+        for (let candidateIndex = 0; candidateIndex < await candidates.count().catch(() => 0); candidateIndex += 1) {
+          const candidate = candidates.nth(candidateIndex);
+          if (!await candidate.isVisible().catch(() => false)) continue;
+          const box = await candidate.boundingBox().catch(() => null);
+          const meta = await candidate.evaluate((node) => {
+            const ancestor = node.closest('[role="menu"], [role="listbox"], [class*="menu"], [class*="popup"], [class*="overlay"], [class*="dropdown"]');
+            return {
+              context: String(ancestor?.className || ancestor?.getAttribute?.('role') || '').slice(0, 180),
+              text: String(ancestor?.textContent || node.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 220)
+            };
+          }).catch(() => ({ context: '', text: '' }));
+          if (/__kua_yipu_entry_bar|(?:^|[-_])ai[-_]?assistant|business-assistant/i.test(meta.context)) continue;
+          const distance = triggerBox && box
+            ? Math.hypot((box.x + box.width / 2) - (triggerBox.x + triggerBox.width / 2), (box.y + box.height / 2) - (triggerBox.y + triggerBox.height / 2))
+            : 100000;
+          const popupBias = /menu|popup|overlay|dropdown|listbox/i.test(meta.context) ? -1000 : 0;
+          scored.push({ candidate, score: distance + popupBias });
+        }
+        scored.sort((left, right) => left.score - right.score);
+        if (scored[0]) return scored[0].candidate;
+        await page.waitForTimeout(250);
+      }
+      return null;
+    };
     for (const [index, image] of images.entries()) {
       const before = await placeholders().count().catch(() => 0);
       const trigger = placeholders().first();
       if (!before || !await trigger.isVisible().catch(() => false)) {
         throw new Error(`国际站主图第 ${index + 1} 个上传槽位不存在`);
       }
-      await trigger.hover().catch(() => {});
-      await page.waitForTimeout(350);
-      let localUpload = await firstVisibleByText(page, '本地上传', false);
-      if (!localUpload) {
-        await trigger.click({ force: true }).catch(() => {});
-        await page.waitForTimeout(350);
-        localUpload = await firstVisibleByText(page, '本地上传', false);
+      const slot = trigger.locator('xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " image-upload-list-item ")][1]');
+      let slotInput = slot.locator('input[type="file"][accept*="image" i], input[type="file"]');
+      let assignedDirectly = false;
+      if (await slotInput.count().catch(() => 0)) {
+        await slotInput.last().setInputFiles([image]);
+        assignedDirectly = true;
       }
-      if (!localUpload) {
-        const menuText = compactText(await page.locator('[class*="menu"], [class*="popup"], [class*="overlay"]').allInnerTexts().catch(() => []), 500);
-        throw new Error(`国际站主图第 ${index + 1} 个槽位未出现“本地上传”${menuText ? `，当前弹层：${menuText}` : ''}`);
-      }
-
-      const chooserPromise = page.waitForEvent('filechooser', { timeout: 4000 }).catch(() => null);
-      await localUpload.click({ force: true }).catch(() => {});
-      const chooser = await chooserPromise;
-      if (chooser) {
-        await chooser.setFiles([image]);
-      } else {
-        const uploadHost = localUpload.locator('xpath=ancestor-or-self::*[.//input[@type="file"]][1]');
-        const scopedInput = uploadHost.locator('input[type="file"]').last();
-        if (!await scopedInput.count().catch(() => 0)) {
-          throw new Error(`国际站主图第 ${index + 1} 个槽位未打开文件选择窗口`);
+      if (!assignedDirectly) {
+        await trigger.hover().catch(() => {});
+        await page.waitForTimeout(250);
+        let localUpload = await findLocalUpload(trigger, 900);
+        if (!localUpload) {
+          await trigger.click({ force: true }).catch(() => {});
+          localUpload = await findLocalUpload(trigger, 5000);
         }
-        await scopedInput.setInputFiles([image]);
+        if (!localUpload) {
+          const menuText = compactText((await page.locator('[class*="menu"], [class*="popup"], [class*="overlay"]').evaluateAll((nodes) => nodes
+            .filter((node) => Boolean(node.offsetWidth || node.offsetHeight || node.getClientRects().length))
+            .map((node) => String(node.innerText || '').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(-4).join(' ')).catch(() => '')), 500);
+          throw new Error(`国际站主图第 ${index + 1} 个槽位未出现“本地上传”${menuText ? `，当前弹层：${menuText}` : ''}`);
+        }
+
+        const chooserPromise = page.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null);
+        const clicked = await localUpload.click({ force: true }).then(() => true).catch(() => false);
+        const chooser = await chooserPromise;
+        if (chooser) {
+          if (index === 0 && chooser.isMultiple()) {
+            await chooser.setFiles(images);
+            return finishBatchUpload();
+          }
+          await chooser.setFiles([image]);
+        } else {
+          const uploadHost = localUpload.locator('xpath=ancestor-or-self::*[.//input[@type="file"]][1]');
+          let scopedInput = uploadHost.locator('input[type="file"][accept*="image" i], input[type="file"]').last();
+          if (!await scopedInput.count().catch(() => 0)) {
+            slotInput = slot.locator('input[type="file"][accept*="image" i], input[type="file"]');
+            if (await slotInput.count().catch(() => 0)) scopedInput = slotInput.last();
+          }
+          if (!await scopedInput.count().catch(() => 0)) {
+            const activePopupInputs = page.locator('[role="menu"] input[type="file"], [class*="popup"] input[type="file"], [class*="overlay"] input[type="file"]');
+            if (await activePopupInputs.count().catch(() => 0)) scopedInput = activePopupInputs.last();
+          }
+          if (!await scopedInput.count().catch(() => 0)) {
+            throw new Error(`国际站主图第 ${index + 1} 个槽位未打开文件选择窗口${clicked ? '' : '（本地上传按钮点击失败）'}`);
+          }
+          if (index === 0 && await scopedInput.getAttribute('multiple') !== null) {
+            await scopedInput.setInputFiles(images);
+            return finishBatchUpload();
+          }
+          await scopedInput.setInputFiles([image]);
+        }
       }
 
-      const deadline = Date.now() + 30000;
+      const deadline = Date.now() + 60000;
       while (Date.now() < deadline) {
         const remaining = await placeholders().count().catch(() => before);
         const feedback = (await visibleFeedback(page)).join(' ');
@@ -2016,11 +2725,12 @@ export class SellerPublisher {
         if (remaining < before) break;
         await page.waitForTimeout(400);
       }
-      if (await placeholders().count().catch(() => before) >= before) {
-        throw new Error(`国际站主图第 ${index + 1} 张上传超过 30 秒仍未完成`);
+      const remainingAfter = await placeholders().count().catch(() => before);
+      if (remainingAfter >= before) {
+        throw new Error(`国际站主图第 ${index + 1} 张上传超过 60 秒仍未完成`);
       }
     }
-    return this.waitForMainImageUploads(page, images.length);
+    return finishBatchUpload();
   }
 
   async downloadProductVideo(product) {
@@ -2083,22 +2793,26 @@ export class SellerPublisher {
     throw new Error('国际站主图视频上传超过 120 秒仍未完成');
   }
 
-  async waitForMainImageUploads(page, expectedCount) {
+  async waitForMainImageUploads(page, expectedCount, initialSlotCount = 6) {
     const uploadDeadline = Date.now() + 60000;
     while (Date.now() < uploadDeadline) {
-      const remainingSlots = await page.locator([
-        '.image-upload-list-item #image-placeholder-span',
-        '.image-upload-list-item #image-placeholder-icon',
-        '.image-upload-list-item .image-upload-photobank-placeholder'
-      ].join(', ')).count().catch(() => 6);
+      // Count one canonical marker per empty slot. The icon and photobank
+      // trigger are children of that same slot; counting all three inflated a
+      // single empty slot into multiple entries and falsely timed out after
+      // every per-image upload had already succeeded.
+      const remainingSlots = await page.locator('.image-uploader .image-upload-list-item #image-placeholder-span')
+        .count().catch(() => initialSlotCount);
       const feedback = (await visibleFeedback(page)).join(' ');
       if (/上传失败|文件.*过大|图片.*不符合|upload failed/i.test(feedback)) {
         throw new Error(`国际站主图上传失败：${compactText(feedback, 300)}`);
       }
-      if (remainingSlots <= Math.max(0, 6 - expectedCount)) return expectedCount;
+      if (mainImageSlotsComplete(initialSlotCount, remainingSlots, expectedCount)) return expectedCount;
       await page.waitForTimeout(500);
     }
-    throw new Error('国际站主图上传超过 60 秒仍未完成');
+    const remainingSlots = await page.locator('.image-uploader .image-upload-list-item #image-placeholder-span')
+      .count().catch(() => initialSlotCount);
+    const occupiedSlots = Math.max(0, initialSlotCount - remainingSlots);
+    throw new Error(`国际站主图上传超过 60 秒仍未完成（已占用 ${occupiedSlots}/${expectedCount} 个槽位，空槽位 ${remainingSlots}）`);
   }
 
   async fillProductFields(page, product) {
@@ -2120,6 +2834,8 @@ export class SellerPublisher {
         if (filled) unmappedAttributes.delete(item.name);
       }
     };
+
+    await clearSaleAttributeSelections(page);
 
     const productTypeFilled = await fillChoice(page, await fieldByLabel(page, '产品类型'), productType || 'Other');
     markSourceAttributes(['产品类型', 'product type'], productTypeFilled);
@@ -2160,17 +2876,16 @@ export class SellerPublisher {
     }
 
     const colorGroup = (product.variantGroups || []).find((group) => /颜色|colou?r/i.test(group.name));
-    const colorValues = colorGroup?.options?.length ? colorGroup.options : ['Black'];
-    const sourceHasSpecImage = Boolean(colorGroup?.options?.some((value) => colorGroup.optionImages?.[value]));
-    // Select color through Alibaba's own form model first. Uploading into the
-    // initial empty color row is lossy: committing Black rebuilds that row and
-    // discards its image. The source image is therefore uploaded only after
-    // the exact source color has been committed below.
-    if (sourceHasSpecImage && !await ensureSaleAttributeSelected(page, '191288010')) {
+    const colorValues = colorGroup?.options?.length ? colorGroup.options : [];
+    const useColorSaleSpec = needsColorSaleSpecification(colorGroup);
+    const sourceHasSpecImage = useColorSaleSpec && Boolean(
+      colorGroup?.options?.some((value) => colorGroup.optionImages?.[value])
+    );
+    if (useColorSaleSpec && !await ensureSaleAttributeSelected(page, '191288010')) {
       throw new Error('国际站商品规格区的颜色规格未能启用');
     }
-    const colorSpecRow = await visibleColorSpecRow(page);
-    if (sourceHasSpecImage && !colorSpecRow) {
+    const colorSpecRow = useColorSaleSpec ? await visibleColorSpecRow(page) : null;
+    if (useColorSaleSpec && !colorSpecRow) {
       throw new Error('国际站商品规格区的颜色规格未能启用');
     }
     const variantResult = await fillVariantSpecs(page, product.variantGroups);
@@ -2184,11 +2899,10 @@ export class SellerPublisher {
       '.posting-feild-color-item input[placeholder*="请输入"]',
       '.posting-feild-color-item-container input[placeholder*="请输入"]'
     ].join(', ');
-    const colorControl = await firstVisible(page, [colorControlSelector]);
+    const colorControl = useColorSaleSpec ? await firstVisible(page, [colorControlSelector]) : null;
     // Color is optional at the source level and not every Alibaba category
-    // exposes it as a target specification. Only require a successful add
-    // when the selected target category actually renders a visible color
-    // control; hidden template inputs must never block a publish job.
+    // exposes it as a target specification. Only require a successful value
+    // when the selected target category actually renders a visible control.
     const colorFilled = colorControl ? await fillColorSpec(page, colorValues) : true;
     if (colorControl && !colorFilled) {
       throw new Error('国际站颜色规格未成功添加，请检查颜色输入框和“添加”按钮');
@@ -2201,24 +2915,14 @@ export class SellerPublisher {
         (urls, prefix, limit) => this.downloadImageSet(product, urls, prefix, limit)
       );
       if (sourceHasSpecImage && !specImageUploaded) {
-        throw new Error('国际站颜色规格图片未能上传');
+        throw new Error('国际站颜色规格图片未能上传，已停止提交以避免生成缺图商品');
       }
     }
-    markSourceAttributes(['颜色', 'color', 'colour'], colorFilled);
+    markSourceAttributes(['颜色', 'color', 'colour'], Boolean(colorValues.length) && colorFilled);
 
-    const packaging = product.packaging || {};
-    const weightFilled = await fillFirst(page, ['input[name="pkgWeight"]'], packaging.weight);
-    markSourceAttributes(['单个产品毛重', 'single gross weight'], weightFilled);
-    const packageFields = [
-      ['长(CM/Piece)', packaging.length], ['宽(CM/Piece)', packaging.width], ['高(CM/Piece)', packaging.height]
-    ];
-    let dimensionsFilled = Boolean(packaging.length && packaging.width && packaging.height);
-    for (const [label, value] of packageFields) {
-      const field = await fieldByLabel(page, label);
-      if (field && value) await fillAndVerify(field, value, label);
-      else if (value) dimensionsFilled = false;
-    }
-    markSourceAttributes(['单个包装尺寸', 'single package size'], dimensionsFilled);
+    const logisticsFilled = await fillLogisticsFields(page, product.packaging || {});
+    markSourceAttributes(['单个产品毛重', 'single gross weight'], logisticsFilled);
+    markSourceAttributes(['单个包装尺寸', 'single package size'], logisticsFilled);
 
     const sellingUnitItems = sourceItemsByName('销售单位', 'selling unit', 'selling units');
     if (sellingUnitItems.length) {
@@ -2362,6 +3066,104 @@ export class SellerPublisher {
   async uploadLegacyDetailImages(page, product) {
     const imagePaths = await this.downloadImageSet(product, product.detailImages || [], 'detail', 15);
     if (!imagePaths.length) throw new Error('详情图下载失败，无法上传到国际站普通编辑器');
+    const editorImageCount = async () => {
+      let count = 0;
+      for (const frame of page.frames()) {
+        const body = frame.locator('body.mce-content-body, body[contenteditable="true"]');
+        if (!await body.isVisible().catch(() => false)) continue;
+        count = Math.max(count, await body.locator('img[src], img[data-src]').count().catch(() => 0));
+      }
+      return count;
+    };
+    const syncEditor = async () => {
+      await page.evaluate(() => {
+        const editor = [...(window.tinymce?.editors || []), ...(window.tinyMCE?.editors || [])]
+          .find((item) => item && !item.hidden);
+        editor?.save();
+        editor?.fire('input');
+        editor?.fire('change');
+      }).catch(() => {});
+    };
+    const visiblePageImageDialog = async () => {
+      const dialogs = page.locator('.mce-window, [role="dialog"], .next-dialog, [class*="image-dialog"], [class*="upload-dialog"]');
+      for (let index = (await dialogs.count().catch(() => 0)) - 1; index >= 0; index -= 1) {
+        const dialog = dialogs.nth(index);
+        if (!await dialog.isVisible().catch(() => false)) continue;
+        const text = compactText(await dialog.innerText().catch(() => ''), 600);
+        const hasFileInput = await dialog.locator('input[type="file"]').count().catch(() => 0);
+        if (hasFileInput || /图片|上传|image|upload/i.test(text)) return dialog;
+      }
+      return null;
+    };
+    let lastDialogActionAt = 0;
+    const clickPageImageDialogAction = async () => {
+      if (Date.now() - lastDialogActionAt < 2200) return false;
+      const dialog = await visiblePageImageDialog();
+      if (!dialog) return false;
+      const actions = [/^确认上传/, /^开始上传/, /^上传$/, /^插入$/, /^确定$/, /^完成$/, /^确认$/];
+      for (const pattern of actions) {
+        const roleButton = dialog.getByRole('button', { name: pattern }).last();
+        const textButton = dialog.getByText(pattern).last();
+        const target = await roleButton.isVisible().catch(() => false) ? roleButton : textButton;
+        if (!await target.isVisible().catch(() => false) || await target.isDisabled().catch(() => true)) continue;
+        await target.click({ force: true }).catch(() => {});
+        lastDialogActionAt = Date.now();
+        return true;
+      }
+      return false;
+    };
+    const waitForEditorImages = async (minimum, timeout) => {
+      const deadline = Date.now() + timeout;
+      let count = await editorImageCount();
+      while (count < minimum && Date.now() < deadline) {
+        const feedback = (await visibleFeedback(page)).join(' ');
+        if (/上传失败|图片.*失败|文件.*过大|图片.*不符合|upload failed/i.test(feedback)) {
+          throw new Error(`国际站详情图上传失败：${compactText(feedback, 300)}`);
+        }
+        await clickPageImageDialogAction();
+        await page.waitForTimeout(400);
+        count = await editorImageCount();
+      }
+      if (count >= minimum) await syncEditor();
+      return count;
+    };
+    const findUploaderFrame = async () => {
+      const frames = page.frames().filter((frame) => frame !== page.mainFrame());
+      const legacy = frames.find((frame) => /photobank\.alibaba\.com\/uploader\.htm/i.test(frame.url()));
+      if (legacy) return legacy;
+      for (const frame of frames) {
+        if (!/upload|image|photo|bank/i.test(frame.url())) continue;
+        if (await frame.locator('input[type="file"]').count().catch(() => 0)) return frame;
+      }
+      for (const frame of frames) {
+        if (!await frame.locator('input[type="file"]').count().catch(() => 0)) continue;
+        const text = compactText(await frame.locator('body').innerText().catch(() => ''), 500);
+        if (/上传|图片|upload|image/i.test(text)) return frame;
+      }
+      return null;
+    };
+    const setFilesOnPageDialog = async (paths) => {
+      const dialog = await visiblePageImageDialog();
+      if (!dialog) return 0;
+      const inputs = dialog.locator('input[type="file"]');
+      const count = await inputs.count().catch(() => 0);
+      if (!count) return 0;
+      const input = inputs.nth(count - 1);
+      const multiple = await input.getAttribute('multiple') !== null;
+      if (multiple) {
+        await input.setInputFiles(paths);
+        return paths.length;
+      }
+      let assigned = 0;
+      for (const filePath of paths) {
+        await input.setInputFiles([filePath]);
+        assigned += 1;
+        const inserted = await waitForEditorImages(initialEditorImages + assigned, 30000);
+        if (inserted < initialEditorImages + assigned) break;
+      }
+      return assigned;
+    };
+    const initialEditorImages = await editorImageCount();
     let uploadButton = null;
     const toolbarDeadline = Date.now() + 15000;
     while (Date.now() < toolbarDeadline) {
@@ -2382,16 +3184,50 @@ export class SellerPublisher {
     const chooserMultiple = Boolean(chooser?.isMultiple());
     if (chooser) {
       await chooser.setFiles(chooserMultiple ? imagePaths : [imagePaths[0]]);
+
+      // Alibaba's current ordinary editor can upload directly from the native
+      // chooser. In that flow no photobank iframe is created, so completion is
+      // determined from the editor content instead of requiring the old dialog.
+      if (chooserMultiple) {
+        const inserted = await waitForEditorImages(initialEditorImages + imagePaths.length, 60000);
+        if (inserted >= initialEditorImages + imagePaths.length) return inserted - initialEditorImages;
+      } else {
+        let inserted = await waitForEditorImages(initialEditorImages + 1, 30000);
+        if (inserted >= initialEditorImages + 1) {
+          for (let index = 1; index < imagePaths.length; index += 1) {
+            const nextChooserPromise = page.waitForEvent('filechooser', { timeout: 8000 }).catch(() => null);
+            await uploadButton.click({ force: true });
+            const nextChooser = await nextChooserPromise;
+            if (!nextChooser) break;
+            await nextChooser.setFiles([imagePaths[index]]);
+            inserted = await waitForEditorImages(initialEditorImages + index + 1, 30000);
+            if (inserted < initialEditorImages + index + 1) break;
+          }
+          if (inserted >= initialEditorImages + imagePaths.length) return inserted - initialEditorImages;
+        }
+      }
+    }
+
+    if (!chooser) {
+      const assigned = await setFilesOnPageDialog(imagePaths);
+      if (assigned) {
+        const inserted = await waitForEditorImages(initialEditorImages + imagePaths.length, 60000);
+        if (inserted >= initialEditorImages + imagePaths.length) return inserted - initialEditorImages;
+      }
     }
 
     const frameDeadline = Date.now() + 12000;
     let uploaderFrame = null;
     while (Date.now() < frameDeadline) {
-      uploaderFrame = page.frames().find((frame) => /photobank\.alibaba\.com\/uploader\.htm/i.test(frame.url()));
+      uploaderFrame = await findUploaderFrame();
       if (uploaderFrame) break;
       await page.waitForTimeout(250);
     }
-    if (!uploaderFrame) throw new Error('普通编辑器图片上传弹窗未加载完成');
+    if (!uploaderFrame) {
+      const inserted = await waitForEditorImages(initialEditorImages + imagePaths.length, 30000);
+      if (inserted >= initialEditorImages + imagePaths.length) return inserted - initialEditorImages;
+      throw new Error(`普通编辑器未完成详情图上传（已插入 ${Math.max(0, inserted - initialEditorImages)}/${imagePaths.length} 张）`);
+    }
 
     const frameInputs = uploaderFrame.locator('input[type="file"]');
     const frameInputCount = await frameInputs.count().catch(() => 0);
@@ -2401,6 +3237,35 @@ export class SellerPublisher {
     }
     const frameInput = frameInputs.nth(frameInputCount - 1);
     const inputMultiple = await frameInput.getAttribute('multiple') !== null;
+    const uploaderTextBefore = compactText(await uploaderFrame.locator('body').innerText().catch(() => ''), 1200);
+    const isLegacyPhotobank = /photobank\.alibaba\.com\/uploader\.htm/i.test(uploaderFrame.url())
+      || /确认上传\s*[（(]\s*\d+\s*\/\s*30/i.test(uploaderTextBefore);
+    if (!isLegacyPhotobank) {
+      if (!chooser) {
+        if (inputMultiple) await frameInput.setInputFiles(imagePaths);
+        else {
+          for (let index = 0; index < imagePaths.length; index += 1) {
+            await frameInput.setInputFiles([imagePaths[index]]);
+            const inserted = await waitForEditorImages(initialEditorImages + index + 1, 30000);
+            if (inserted < initialEditorImages + index + 1) break;
+          }
+        }
+      }
+      const actions = [/^确认上传/, /^开始上传/, /^上传$/, /^插入$/, /^确定$/, /^完成$/, /^确认$/];
+      for (const pattern of actions) {
+        const target = uploaderFrame.getByRole('button', { name: pattern }).last();
+        if (!await target.isVisible().catch(() => false) || await target.isDisabled().catch(() => true)) continue;
+        await target.click({ force: true }).catch(() => {});
+        break;
+      }
+      const inserted = await waitForEditorImages(initialEditorImages + imagePaths.length, 90000);
+      if (inserted >= initialEditorImages + imagePaths.length) {
+        await this.closeImageUploaderDialog(page);
+        return inserted - initialEditorImages;
+      }
+      const frameText = compactText(await uploaderFrame.locator('body').innerText().catch(() => ''), 800);
+      throw new Error(`新版普通编辑器详情图未完成上传（已插入 ${Math.max(0, inserted - initialEditorImages)}/${imagePaths.length} 张）${frameText ? `：${frameText}` : ''}`);
+    }
     const queuedCount = async () => {
       const text = await uploaderFrame.locator('body').innerText().catch(() => '');
       const match = text.match(/确认上传\s*[（(]\s*(\d+)\s*\/\s*30\s*[）)]/);
@@ -2615,8 +3480,14 @@ export class SellerPublisher {
     const validationErrors = validateProductData(product);
     if (validationErrors.length) throw new Error(`商品资料未通过上架检查：${validationErrors.join('；')}`);
     const page = await this.currentSellerPage();
+    // Publishing is intentionally observable: keep the actual automation
+    // page maximized so the user can inspect uploads, validation messages, and
+    // the final Alibaba response in real time. Collection remains hidden.
+    await revealPage(page);
+    this.visible = true;
     await page.goto(publishPageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await settlePage(page);
+    await revealPage(page);
     await waitForHumanVerification(page, { timeout: 300000 });
     if (/login|passport/i.test(page.url())) throw new Error('阿里巴巴国际站登录状态已失效，请重新登录');
     if (/\/product\/(?:easyListing|category)\.htm/i.test(new URL(page.url()).pathname)) {
@@ -2653,7 +3524,7 @@ export class SellerPublisher {
     ], product.stock);
     const fieldMapping = await this.fillProductFields(page, product);
     if (mode === 'submit') {
-      const unmappedRequiredVariant = fieldMapping.unmappedAttributes.find((item) => /^.+:\s*.+$/.test(String(item)));
+      const unmappedRequiredVariant = findBlockingUnmappedVariant(product, fieldMapping.unmappedAttributes);
       if (unmappedRequiredVariant) {
         throw new Error(`国际站目标类目没有与来源规格“${unmappedRequiredVariant}”一致的选项；为保证数据不被篡改，请先在发布页选择匹配类目或人工映射后再提交`);
       }
@@ -2677,11 +3548,12 @@ export class SellerPublisher {
     // exact source value, and its uploaded source image must all be present.
     const finalColorGroup = (product.variantGroups || []).find((group) => /颜色|colou?r/i.test(group.name));
     const finalColorValues = [...new Set(finalColorGroup?.options || [])].map((value) => englishSpecText(value)).filter(Boolean);
-    const finalHasColorImage = finalColorValues.some((value) => Boolean(
+    const finalUsesColorSaleSpec = needsColorSaleSpecification(finalColorGroup);
+    const finalHasColorImage = finalUsesColorSaleSpec && finalColorValues.some((value) => Boolean(
       finalColorGroup?.optionImages?.[value]
       || finalColorGroup?.optionImages?.[finalColorGroup.options?.find((item) => englishSpecText(item) === value)]
     ));
-    if (finalHasColorImage) {
+    if (finalUsesColorSaleSpec && finalHasColorImage) {
       const colorFilled = await fillColorSpec(page, finalColorValues);
       const colorImageUploaded = colorFilled && await enableSpecImageUpload(
         page,
@@ -2689,15 +3561,19 @@ export class SellerPublisher {
         finalColorGroup,
         (urls, prefix, limit) => this.downloadImageSet(product, urls, prefix, limit)
       );
-      const finalColorRow = await visibleColorSpecRow(page);
       const finalColorSelected = await saleAttributeIsSelected(page, '191288010');
-      const finalColorPreview = finalColorRow
-        ? await finalColorRow.locator('.value-preview.uploaded img[src]').count().catch(() => 0)
-        : 0;
-      if (!colorFilled || !colorImageUploaded || !finalColorSelected || !finalColorPreview) {
-        throw new Error('国际站颜色规格提交前复核失败：颜色、Black 规格值或来源规格图片未保留');
+      if (!colorFilled || !finalColorSelected) {
+        throw new Error('国际站颜色规格提交前复核失败：来源颜色规格值未保留');
+      }
+      if (!colorImageUploaded) {
+        throw new Error('国际站颜色规格提交前复核失败：来源规格图片未被表单接收');
       }
     }
+
+    // Uploaders and rich-text editors can rerender the form after the first
+    // field pass. Re-apply the all-or-nothing logistics rule immediately
+    // before the final action so stale weight/volume values cannot survive.
+    await fillLogisticsFields(page, product.packaging || {});
 
     const agreementText = page.getByText(/请再次检查并确认提交的信息真实、合法和有效/).last();
     if (await agreementText.isVisible().catch(() => false)) {
@@ -2722,7 +3598,24 @@ export class SellerPublisher {
       return { status: 'needs_review', message: '表单已填充，未识别到保存或发布按钮，请在浏览器中人工确认' };
     }
     const originalUrl = page.url();
-    const verification = await waitForActionResult(page, action, mode, originalUrl);
+    let verification;
+    try {
+      verification = await waitForActionResult(page, action, mode, originalUrl);
+    } catch (error) {
+      // Alibaba sometimes restores a partially selected logistics card during
+      // the final submit transaction. Recover once by disabling and clearing
+      // the whole card, then retry the same action instead of reporting a
+      // product-level failure to the user.
+      if (!/物流属性|重量、体积|packaging|shipping/i.test(String(error?.message || ''))) throw error;
+      await forceClearLogisticsSection(page);
+      let fallbackAction = null;
+      for (const text of buttonTexts) {
+        const candidate = page.getByRole('button', { name: text, exact: false }).last();
+        if (await candidate.isVisible().catch(() => false) && !await candidate.isDisabled().catch(() => false)) { fallbackAction = candidate; break; }
+      }
+      if (!fallbackAction) throw error;
+      verification = await waitForActionResult(page, fallbackAction, mode, originalUrl);
+    }
     return {
       status: mode === 'submit' ? 'published' : 'drafted',
       message: `${mode === 'submit' ? '已提交发布' : '已保存草稿'}${videoWarning ? '（主图视频已降级为详情链接）' : ''}`,

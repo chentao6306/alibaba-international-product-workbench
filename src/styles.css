@@ -48,6 +48,8 @@ main { margin-left: 232px; padding: 31px 34px 60px; max-width: 1640px; }
 .page-header { display: flex; align-items: center; gap: 12px; margin-bottom: 25px; }
 .page-header h1 { margin: 0; font-size: 25px; line-height: 1.25; letter-spacing: 0; }
 .page-header p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+.account-summary { margin-left: auto; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; padding: 7px 10px; border: 1px solid #d8e4e1; border-radius: 5px; background: #f1f9f7; color: #276c60; font-size: 11px; white-space: nowrap; }
+.account-summary span { color: #6a817c; font-size: 10px; }
 .mobile-menu { display: none !important; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 7px; }
 .section-title { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 20px 22px; border-bottom: 1px solid #e8ecee; }
@@ -338,6 +340,7 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--orange); }
   main { margin-left: 0; padding: 20px 16px 45px; }
   .mobile-menu { display: grid !important; flex: 0 0 auto; border: 1px solid #d6dde0; background: white; }
   .page-header { align-items: flex-start; }.page-header h1 { font-size: 21px; }
+  .account-summary { margin-left: 0; margin-top: 4px; }
   .metrics { grid-template-columns: 1fr; gap: 8px; }.metric { min-height: 70px; padding: 13px 15px; }.metric div { width: 100%; grid-template-columns: 1fr auto auto; }.metric span { grid-column: auto; align-self: center; }.metric strong { font-size: 20px; }
   .url-form { flex-direction: column; padding: 16px; }.url-form .primary-button { height: 42px; }
   .collection-options { grid-template-columns: 1fr 1fr; padding: 0 16px 16px; }.option-heading { grid-column: 1 / -1; }

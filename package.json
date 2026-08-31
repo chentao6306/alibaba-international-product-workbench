@@ -1,6 +1,9 @@
 {
   "name": "alibaba-international-product-workbench",
-  "version": "1.0.0",
+  "version": "1.2.6",
+  "main": "electron/main.js",
+  "description": "跨易铺 Alibaba.com 国际站商品采集与发布工作台",
+  "author": "跨易铺",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,21 +12,45 @@
     "dev:web": "vite --host 127.0.0.1",
     "build": "vite build",
     "start": "node server/index.js",
+    "desktop": "electron electron/main.js",
+    "desktop:dev": "concurrently -k \"npm:dev:server\" \"npm:dev:web\" \"npm:desktop\"",
+    "prepare:chromium": "node tools/prepare-chromium.mjs",
+    "dist:win": "npm run build && npm run prepare:chromium && electron-builder --win",
+    "dist:win:installer": "npm run build && npm run prepare:chromium && electron-builder --win nsis --x64 --config.directories.output=release-installer --config.artifactName=\"kua-yipu-${version}-setup.${ext}\" --publish never",
     "test": "node --test"
   },
   "dependencies": {
     "cheerio": "^1.1.2",
     "express": "^5.1.0",
     "lucide-react": "^0.468.0",
-    "playwright-core": "^1.51.1",
+    "pg": "^8.13.1",
+    "playwright-core": "1.62.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "sharp": "^0.35.3",
-    "xlsx": "^0.18.5"
+  "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.4.1",
     "concurrently": "^9.1.2",
+    "electron": "^36.9.5",
+    "electron-builder": "^26.15.3",
     "vite": "^6.2.2"
+  },
+  "build": {
+    "appId": "com.kua-yipu.workbench",
+    "productName": "跨易铺",
+    "artifactName": "跨易铺-${version}-${os}-${arch}.${ext}",
+    "directories": { "output": "release" },
+    "files": ["dist/**/*", "server/**/*", "electron/**/*", "node_modules/**/*", "package.json"],
+    "asarUnpack": ["server/**/*", "node_modules/**/*", "node_modules/playwright-core/**/*", "node_modules/sharp/**/*"],
+    "extraResources": [{ "from": "vendor/chromium", "to": "chromium", "filter": ["**/*"] }],
+    "asar": true,
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }, { "target": "portable", "arch": ["x64"] }],
+      "verifyUpdateCodeSignature": false
+    },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "createDesktopShortcut": true },
+    "publish": [{ "provider": "generic", "url": "https://updates.example.invalid/kua-yipu/" }]
   }
 }

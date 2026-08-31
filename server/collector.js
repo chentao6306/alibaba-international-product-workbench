@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { hidePage, launchPersistent, revealPage, settlePage, waitForHumanVerification } from './browser-runtime.js';
+import { hidePage, launchPersistent, revealPage, settlePage, syncAlibabaCookies, waitForHumanVerification } from './browser-runtime.js';
 import { SOURCE_LANGUAGE_HEADERS, withSourceLocale } from './source-locale.js';
 
 function absoluteUrl(value, base) {
@@ -84,10 +84,62 @@ export class ShopCollector {
   }
 
   async getContext() {
-    if (this.context) return this.context;
-    this.context = await launchPersistent(this.profileDir, { headless: false });
+    if (this.context) {
+      try {
+        const browser = this.context.browser();
+        if (browser?.isConnected() !== false) {
+          // The Electron login window may have refreshed the Alibaba session
+          // after this context was created. Re-import the latest cookies before
+          // starting another listing/detail request.
+          await syncAlibabaCookies(this.context);
+          this.context.pages();
+          return this.context;
+        }
+      } catch {
+      }
+      await this.resetContext();
+    }
+    // Ordinary collection runs in Chromium's real headless mode, so Windows
+    // never creates a desktop window or taskbar icon.
+    this.context = await launchPersistent(this.profileDir, { headless: true });
     this.context.on('close', () => { this.context = null; this.verificationPage = null; });
+    this.context.on('page', (page) => {
+      if (!this.visible) hidePage(page).catch(() => {});
+    });
     return this.context;
+  }
+
+  async resetContext() {
+    const context = this.context;
+    this.context = null;
+    this.verificationPage = null;
+    await context?.close().catch(() => {});
+  }
+
+  async completeHumanVerification(url) {
+    await this.resetContext();
+    const context = await launchPersistent(this.profileDir, { headless: false });
+    this.context = context;
+    this.visible = true;
+    context.on('close', () => {
+      if (this.context === context) this.context = null;
+      this.verificationPage = null;
+      this.visible = false;
+    });
+    const page = context.pages()[0] || await context.newPage();
+    this.verificationPage = page;
+    await page.setExtraHTTPHeaders(SOURCE_LANGUAGE_HEADERS);
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    // Restore the headed browser before inspecting the challenge. Alibaba may
+    // paint the CAPTCHA asynchronously, so waiting for text first can leave a
+    // minimized/off-screen window while the job is already paused.
+    await revealPage(page);
+    const completed = await waitForHumanVerification(page, { timeout: 300000 });
+    if (!completed && await page.locator('body').innerText().then((text) => /captcha|滑块|请完成验证|人机验证|安全验证/i.test(text)).catch(() => false)) {
+      throw new Error('人工验证未完成，请重试');
+    }
+    await this.resetContext();
+    this.visible = false;
   }
 
   status() {
@@ -111,9 +163,21 @@ export class ShopCollector {
     return this.status();
   }
 
-  async withPage(callback) {
-    const context = await this.getContext();
-    const page = await context.newPage();
+  async withPage(callback, attempt = 0) {
+    let context = await this.getContext();
+    let page;
+    try {
+      page = await context.newPage();
+    } catch {
+      await this.resetContext();
+      context = await this.getContext();
+      try {
+        page = await context.newPage();
+      } catch {
+        await this.resetContext();
+        throw new Error('采集浏览器启动失败，请重试');
+      }
+    }
     try {
       await page.setExtraHTTPHeaders(SOURCE_LANGUAGE_HEADERS);
       await hidePage(this.verificationPage);
@@ -122,6 +186,19 @@ export class ShopCollector {
         await hidePage(page);
         return callback(page);
       });
+    } catch (error) {
+      const message = String(error?.message || '');
+      if (error?.code === 'HUMAN_VERIFICATION_REQUIRED' && attempt < 2) {
+        await this.completeHumanVerification(error.verificationUrl || page.url());
+        return this.withPage(callback, attempt + 1);
+      }
+      const closed = /target page, context or browser has been closed|browser has been closed|page has been closed|target closed/i.test(message);
+      if (closed && attempt < 1) {
+        await this.resetContext();
+        return this.withPage(callback, attempt + 1);
+      }
+      if (closed) throw new Error('采集浏览器已关闭，请重试');
+      throw error;
     } finally {
       await page.close().catch(() => {});
     }
@@ -129,6 +206,9 @@ export class ShopCollector {
 
   async listGroups(shopUrl) {
     const normalized = normalizeShopUrl(shopUrl);
+    // Group reading is automatic and hidden. The verification helper reveals
+    // the page only when Alibaba requires a human action.
+    this.visible = false;
     return this.withPage(async (page) => {
       await page.goto(normalized, { waitUntil: 'domcontentloaded', timeout: 45000 });
       await settlePage(page);
@@ -145,8 +225,8 @@ export class ShopCollector {
             url: absoluteUrl(group.url, normalized), productCount: group.productCount ?? null
           });
         }
-        if (map.size === 1 && /verify|captcha|sign in|验证|登录/i.test(await page.locator('body').innerText().catch(() => ''))) {
-          throw new Error('国际站要求人工验证，请点击“打开采集浏览器”完成验证后重试');
+        if (map.size === 1 && /verify|captcha|验证|登录/i.test(await page.locator('body').innerText().catch(() => ''))) {
+          throw new Error('国际站需要人工验证，请在弹出的验证页面完成验证后重试');
         }
         if (map.size === 1) throw new Error('没有从该国际站页面读取到商品分组，请确认粘贴的是同行店铺首页');
         return {
@@ -178,7 +258,7 @@ export class ShopCollector {
         });
       }
       if (map.size === 1 && /验证|captcha|登录/.test(await page.locator('body').innerText().catch(() => ''))) {
-        throw new Error('1688 要求人工验证，请点击“打开采集浏览器”完成验证后重试');
+        throw new Error('1688 需要人工验证，请在弹出的验证页面完成验证后重试');
       }
       return { shopUrl: normalized, shopName: title.replace(/[-_]1688.*$/i, '').trim() || new URL(normalized).hostname, groups: [...map.values()] };
     });

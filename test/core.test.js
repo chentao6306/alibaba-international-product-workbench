@@ -9,11 +9,15 @@ import {
   buildSkuCombinations,
   canonicalizePriceTiers,
   classifyAlibabaActionResult,
+  distinctAlibabaImageUrls,
+  findBlockingUnmappedVariant,
   categoryMismatchMessage,
   canonicalCategoryLeaf,
   parseDeliveryTiers,
   isAlibabaInternationalUrl,
   isProductPostingUrl,
+  mainImageSlotsComplete,
+  needsColorSaleSpecification,
   normalizePriceTiers,
   parsePriceTiers,
   sanitizeCategoryPath,
@@ -89,6 +93,39 @@ test('recognizes the Alibaba product success URL even when only notices are visi
   });
   assert.equal(result.succeeded, true);
   assert.equal(result.verifiedBy, 'success-url');
+});
+
+test('counts each remaining Alibaba main-image slot only once', () => {
+  assert.equal(mainImageSlotsComplete(6, 2, 4), true);
+  assert.equal(mainImageSlotsComplete(6, 1, 5), true);
+  assert.equal(mainImageSlotsComplete(6, 2, 5), false);
+});
+
+test('deduplicates Alibaba CDN derivatives of the same source image', () => {
+  assert.deepEqual(distinctAlibabaImageUrls([
+    'https://sc04.alicdn.com/kf/Habc123.jpg',
+    'https://s.alicdn.com/@sc04/kf/Habc123.jpg_960x960q80.jpg',
+    'https://sc04.alicdn.com/kf/Hdifferent.jpg'
+  ]), [
+    'https://sc04.alicdn.com/kf/Habc123.jpg',
+    'https://sc04.alicdn.com/kf/Hdifferent.jpg'
+  ]);
+});
+
+test('does not treat a single descriptive source value as a required SKU variant', () => {
+  const product = { variantGroups: [{ name: 'compatible model', options: ['General'] }] };
+  assert.equal(findBlockingUnmappedVariant(product, ['compatible model: General']), '');
+});
+
+test('keeps a multi-option SKU variant blocking when the target category cannot represent it', () => {
+  const product = { variantGroups: [{ name: 'Compatible model', options: ['Model A', 'Model B'] }] };
+  assert.equal(findBlockingUnmappedVariant(product, ['Compatible model: Model B']), 'Compatible model: Model B');
+});
+
+test('keeps the source color as a target sales specification, including one-color SKUs', () => {
+  assert.equal(needsColorSaleSpecification({ options: ['Black'] }), true);
+  assert.equal(needsColorSaleSpecification({ options: ['Black', 'Black'] }), true);
+  assert.equal(needsColorSaleSpecification({ options: ['Black', 'Red'] }), true);
 });
 
 test('does not treat Alibaba feature notices as a publish result', () => {

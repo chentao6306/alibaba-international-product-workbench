@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Boxes, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, ClipboardList, CloudUpload,
   ExternalLink, Eye, FolderTree, LayoutDashboard, Link2, LoaderCircle, Menu, PackageCheck,
@@ -8,6 +8,17 @@ import * as XLSX from 'xlsx';
 
 const EMPTY = { shops: [], groups: [], products: [], jobs: [], settings: {}, browser: {}, collectorBrowser: {} };
 
+function displayError(message, status) {
+  const text = String(message || '');
+  if (/browserType\.launchPersistentContext|Target page, context or browser has been closed|user data directory is already in use|browser has been closed/i.test(text)) {
+    return '采集浏览器启动失败，请先关闭已打开的采集浏览器后重试';
+  }
+  if (text.length > 240 || /--disable-|component-extensions|AutomationControlled|ipc-flooding|no-sandbox/i.test(text)) {
+    return '读取分组失败，请稍后重试；需要验证码时系统会自动显示验证页面';
+  }
+  return text || `操作失败（${status || 500}）`;
+}
+
 async function api(url, options = {}) {
   const response = await fetch(url, {
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
@@ -15,7 +26,7 @@ async function api(url, options = {}) {
   });
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
-    throw new Error(data.error || `请求失败 (${response.status})`);
+    throw new Error(displayError(data.error, response.status));
   }
   if (response.status === 204) return null;
   return response.json();
@@ -42,10 +53,14 @@ function Notice({ notice, onClose }) {
 }
 
 function Header({ title, subtitle, onMenu }) {
+  const desktopSession = typeof window !== 'undefined' ? window.kuaYipu : null;
+  const [session, setSession] = useState(null);
+  useEffect(() => { desktopSession?.session?.().then(setSession).catch(() => {}); }, []);
   return (
     <header className="page-header">
       <button className="icon-button mobile-menu" onClick={onMenu} title="菜单"><Menu size={20} /></button>
       <div><h1>{title}</h1><p>{subtitle}</p></div>
+      {session && <div className="account-summary"><strong>{session.username}</strong><span>授权至 {new Date(session.expiresAt).toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' })}</span></div>}
     </header>
   );
 }
@@ -94,13 +109,6 @@ function SourceView({ state, refresh, notify, onMenu }) {
     try {
       for (const group of groups) await api(`/api/groups/${group.id}/collect`, { method: 'POST', body: JSON.stringify(collectConfig) });
       await refresh(); notify(`已开始读取 ${groups.length} 个分组`);
-    } catch (error) { notify(error.message, 'error'); }
-  }
-
-  async function openCollector() {
-    try {
-      await api('/api/collector/open', { method: 'POST', body: JSON.stringify({ url: url.trim() || undefined }) });
-      await refresh(); notify('采集浏览器已打开，请在浏览器中完成国际站验证');
     } catch (error) { notify(error.message, 'error'); }
   }
 
@@ -164,7 +172,6 @@ function SourceView({ state, refresh, notify, onMenu }) {
       <div className="section-title"><div><h2>读取国际站同行店铺</h2><p>支持 *.en.alibaba.com 店铺首页、商品列表和分组链接</p></div></div>
       <form className="url-form" onSubmit={readGroups}>
         <div className="input-with-icon"><Link2 size={18} /><input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="粘贴阿里巴巴国际站同行店铺链接" aria-label="国际站同行店铺链接" /></div>
-        <button type="button" className="secondary-button" onClick={openCollector}><ExternalLink size={17} />打开采集浏览器</button>
         <button className="primary-button" disabled={reading}>{reading ? <LoaderCircle className="spin" size={17} /> : <Search size={17} />}读取分组</button>
       </form>
       <div className="collection-options">
@@ -639,8 +646,32 @@ export default function App() {
   const [view, setView] = useState('source');
   const [notice, setNotice] = useState(null);
   const [menuOpen, setMenuOpen] = useState(false);
-  async function refresh() { try { setState(await api('/api/state')); } catch (error) { setNotice({ text: error.message, type: 'error' }); } }
-  useEffect(() => { refresh(); const timer = setInterval(refresh, 2000); return () => clearInterval(timer); }, []);
+  const refreshInFlight = useRef(null);
+  const mounted = useRef(true);
+  async function refresh() {
+    // State includes captured product details. Keep only one request active so
+    // StrictMode and the polling timer cannot queue repeated multi-megabyte
+    // JSON parses and React renders in the Electron renderer.
+    if (refreshInFlight.current) return refreshInFlight.current;
+    const request = api('/api/state')
+      .then((nextState) => { if (mounted.current) setState(nextState); return nextState; })
+      .catch((error) => { if (mounted.current) setNotice({ text: error.message, type: 'error' }); throw error; })
+      .finally(() => { if (refreshInFlight.current === request) refreshInFlight.current = null; });
+    refreshInFlight.current = request;
+    return request;
+  }
+  useEffect(() => {
+    mounted.current = true;
+    refresh().catch(() => {});
+    const timer = setInterval(() => refresh().catch(() => {}), 5000);
+    return () => { mounted.current = false; clearInterval(timer); };
+  }, []);
+  useEffect(() => {
+    const heartbeat = window.kuaYipu?.heartbeat;
+    if (!heartbeat) return undefined;
+    const timer = setInterval(() => heartbeat().catch(() => {}), 5 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, []);
   function notify(text, type = 'success') { setNotice({ text, type }); setTimeout(() => setNotice(null), 4200); }
   function navigate(id) { setView(id); setMenuOpen(false); }
   const props = { state, refresh, notify, onMenu: () => setMenuOpen(true) };

@@ -8,6 +8,8 @@
 
 ## 1. 系统功能
 
+> 桌面版说明：项目现在同时提供 Electron 桌面壳、Windows 安装包/便携包配置，以及独立的 Linux 授权服务。桌面版启动后先验证 Alibaba 账号授权，再进入现有工作台；授权服务地址通过打包环境变量 `KUA_YIPU_AUTH_URL` 配置。授权服务部署说明见 `auth-server/README.md`。
+
 ### 1.1 店铺与商品采集
 
 - 支持 `*.en.alibaba.com` 店铺首页、商品列表页和商品分组链接。
