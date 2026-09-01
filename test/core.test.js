@@ -30,7 +30,13 @@ import {
 import { auditProduct, recordProductMutation, sourceSnapshotFingerprint, syncProductModel, verifySourceIntegrity } from '../server/product-model.js';
 import { extractAlibabaSourceData, parseAlibabaDetailDataScript } from '../server/alibaba-source-data.js';
 import { deleteWorkspaceEntities, findWorkspaceJobs, JsonStore } from '../server/store.js';
-import { normalizeAlibabaCookies } from '../server/browser-runtime.js';
+import { isExplicitHumanVerificationSignal, normalizeAlibabaCookies } from '../server/browser-runtime.js';
+
+test('does not classify ordinary product text containing captcha as a challenge', () => {
+  assert.equal(isExplicitHumanVerificationSignal('Product description and captcha-compatible camera module'), false);
+  assert.equal(isExplicitHumanVerificationSignal('Please drag the slider to verify'), true);
+  assert.equal(isExplicitHumanVerificationSignal('请完成验证后继续访问'), true);
+});
 
 test('normalizes a 1688 shop home page to its product list', () => {
   assert.equal(

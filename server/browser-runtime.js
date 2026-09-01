@@ -190,38 +190,68 @@ export async function hidePage(page) {
   return setWindowState(page, 'normal', { x: -32000, y: -32000, width: 1280, height: 900 });
 }
 
+const HUMAN_CHALLENGE_SELECTORS = [
+  'iframe[src*="captcha" i]', 'iframe[src*="verify" i]',
+  '[id*="captcha" i]', '[class*="captcha" i]',
+  '.nc-container', '#nc_1_n1z', '[class*="baxia" i]',
+  '[class*="challenge" i]'
+].join(',');
+
+const HUMAN_CHALLENGE_TEXT = /请完成验证|请拖动滑块|滑动验证|滑块验证|人机验证|安全验证|安全校验|security verification|slide to verify|drag (?:the )?slider to verify|verify you are human|complete (?:the )?captcha|unusual traffic/i;
+
+export function isExplicitHumanVerificationSignal(text = '') {
+  return HUMAN_CHALLENGE_TEXT.test(String(text || ''));
+}
+
+/**
+ * Check only explicit, visible challenge signals. A whole Alibaba product
+ * page may contain the word "captcha" in auxiliary markup or translations;
+ * that word alone must never open a desktop window or pause collection.
+ */
+export async function hasExplicitHumanChallenge(page) {
+  if (!page || page.isClosed()) return false;
+  const text = await page.locator('body').innerText().catch(() => '');
+  const visibleChallenge = await page.locator(HUMAN_CHALLENGE_SELECTORS).evaluateAll((nodes) => nodes.some((node) => {
+    const style = window.getComputedStyle(node);
+    return style.display !== 'none' && style.visibility !== 'hidden' && Boolean(node.getClientRects().length);
+  })).catch(() => false);
+  return visibleChallenge || isExplicitHumanVerificationSignal(text);
+}
+
 export async function isHumanVerificationPage(page) {
   if (!page || page.isClosed()) return false;
-  const url = page.url();
-  const text = await page.locator('body').innerText().catch(() => '');
-  // Do not treat ordinary Alibaba login/session notices as a CAPTCHA. Product
-  // pages can contain stale “登录失效” text in hidden or auxiliary modules;
-  // only an explicit human-challenge marker may reveal the browser window.
-  const verificationText = /captcha|滑块|请完成验证|人机验证|安全验证|security verification|slide to verify|verify you are human/i.test(text);
-  const authUrl = /(^|\/)(login|passport|signin|sign-in)([/?#]|$)/i.test(url);
-  return verificationText || authUrl;
+  const authUrl = /(^|\/)(login|passport|signin|sign-in)([/?#]|$)/i.test(page.url());
+  return authUrl || await hasExplicitHumanChallenge(page);
 }
 
 export async function waitForHumanVerification(page, options = {}) {
   // Alibaba's punishment page often paints after domcontentloaded. A single
   // immediate check races that render and causes the CAPTCHA document to be
   // parsed as a product page (all detail fields then appear empty).
-  let verificationVisible = false;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    verificationVisible = await isHumanVerificationPage(page);
-    if (verificationVisible) break;
-    if (attempt < 3) await page.waitForTimeout(400);
+  let verificationVisible = await isHumanVerificationPage(page);
+  // Only a URL that looks like Alibaba's punishment/verification flow needs
+  // a render grace period. Normal product pages get a single cheap check so
+  // every collected item does not pay an unnecessary 1.2s polling penalty.
+  if (!verificationVisible && /(?:punish|captcha|nocaptcha|verify|verification|x5sec|security)/i.test(page.url())) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await page.waitForTimeout(350);
+      verificationVisible = await isHumanVerificationPage(page);
+      if (verificationVisible) break;
+    }
   }
   if (!verificationVisible) return false;
-  const text = await page.locator('body').innerText().catch(() => '');
-  const challenge = /captcha|滑块|请完成验证|人机验证|安全验证|security verification|slide to verify|verify you are human/i.test(text);
+  const challenge = await hasExplicitHumanChallenge(page);
   if (contextModes.get(page.context())?.headless) {
     // A plain Alibaba login redirect is handled as an unavailable detail page
     // by the caller. Only an actual challenge should interrupt headless work.
     if (!challenge) return false;
     const bridge = globalThis.__KUA_YIPU_SELLER_BRIDGE;
     if (typeof bridge?.humanVerification === 'function') {
-      await bridge.humanVerification(page.url());
+      // The desktop bridge re-checks the page while hidden. It may return
+      // false when a transient redirect was not a real challenge; in that
+      // case do not reload or treat the ordinary product page as verified.
+      const handled = await bridge.humanVerification(page.url());
+      if (!handled) return false;
       await syncAlibabaCookies(page.context());
       await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
       await page.waitForTimeout(800);

@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { hidePage, launchPersistent, revealPage, settlePage, syncAlibabaCookies, waitForHumanVerification } from './browser-runtime.js';
+import { hasExplicitHumanChallenge, hidePage, launchPersistent, revealPage, settlePage, syncAlibabaCookies, waitForHumanVerification } from './browser-runtime.js';
 import { SOURCE_LANGUAGE_HEADERS, withSourceLocale } from './source-locale.js';
 
 function absoluteUrl(value, base) {
@@ -135,12 +135,16 @@ export class ShopCollector {
     this.verificationPage = page;
     await page.setExtraHTTPHeaders(SOURCE_LANGUAGE_HEADERS);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
-    // Restore the headed browser before inspecting the challenge. Alibaba may
-    // paint the CAPTCHA asynchronously, so waiting for text first can leave a
-    // minimized/off-screen window while the job is already paused.
+    // Inspect while hidden first. A transient redirect must not flash a
+    // desktop window; reveal only when a real visible challenge is present.
+    if (!await hasExplicitHumanChallenge(page)) {
+      await this.resetContext();
+      this.visible = false;
+      return;
+    }
     await revealPage(page);
     const completed = await waitForHumanVerification(page, { timeout: 300000 });
-    if (!completed && await page.locator('body').innerText().then((text) => /captcha|滑块|请完成验证|人机验证|安全验证/i.test(text)).catch(() => false)) {
+    if (!completed && await hasExplicitHumanChallenge(page)) {
       throw new Error('人工验证未完成，请重试');
     }
     await this.resetContext();

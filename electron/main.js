@@ -351,34 +351,74 @@ async function openAlibabaSourceWindow(sourceUrl) {
 }
 
 async function handleAlibabaHumanVerification(url) {
-  const seller = await ensureAlibabaSellerWindow();
-  const current = seller.webContents.getURL();
-  if (String(url || '') && current !== url) {
-    await seller.loadURL(String(url));
-  }
-  seller.setSkipTaskbar(false);
-  seller.show();
-  if (seller.isMinimized()) seller.restore();
-  seller.maximize();
-  seller.focus();
-  const deadline = Date.now() + 300000;
-  while (Date.now() < deadline && isWindowAlive(seller)) {
-    const state = await seller.webContents.executeJavaScript(`(() => {
-      const text = document.body?.innerText || '';
-      const url = location.href;
-      const challenge = /captcha|滑块|请完成验证|人机验证|安全验证|security verification|slide to verify|verify you are human|登录失效/i.test(text);
-      const login = /login|passport|signin|sign-in/i.test(url) && Boolean(document.querySelector('input[type="password"],input[name="password"]'));
-      return { challenge, login };
-    })()`, true).catch(() => ({ challenge: true, login: true }));
-    if (!state.challenge && !state.login) {
-      await saveAlibabaCookies(seller);
-      seller.setSkipTaskbar(true);
-      seller.hide();
-      return true;
+  // Never navigate or reveal the user's seller window just because the
+  // headless collector reported a possible challenge. Alibaba product pages
+  // can contain the word "captcha" in hidden modules, which used to make a
+  // normal product page flash on screen for every item. Probe the URL in a
+  // separate hidden window first and reveal it only after a visible challenge
+  // control/text is confirmed.
+  const username = currentSession?.username;
+  if (!username || !String(url || '')) return false;
+  const probe = new BrowserWindow({
+    width: 1440,
+    height: 960,
+    show: false,
+    skipTaskbar: true,
+    title: 'Alibaba 验证',
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      partition: `persist:kua-yipu-${username}`
     }
-    await wait(1000);
+  });
+  const inspect = () => probe.webContents.executeJavaScript(`(() => {
+    const visible = (node) => {
+      if (!node) return false;
+      const style = getComputedStyle(node);
+      return style.display !== 'none' && style.visibility !== 'hidden' && Boolean(node.getClientRects().length);
+    };
+    const selectors = 'iframe[src*="captcha" i],iframe[src*="verify" i],[id*="captcha" i],[class*="captcha" i],.nc-container,#nc_1_n1z,[class*="baxia" i],[class*="challenge" i]';
+    const challengeElement = [...document.querySelectorAll(selectors)].some(visible);
+    const body = document.body?.innerText || '';
+    const challengeText = /请完成验证|请拖动滑块|滑动验证|滑块验证|人机验证|安全验证|安全校验|security verification|slide to verify|drag (?:the )?slider to verify|verify you are human|complete (?:the )?captcha|unusual traffic/i.test(body);
+    return { challenge: challengeElement || challengeText, url: location.href };
+  })()`, true).catch(() => ({ challenge: false, url: probe.webContents.getURL() }));
+  try {
+    await Promise.race([
+      probe.loadURL(String(url)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('验证码页面加载超时')), 60000))
+    ]);
+    let state = await inspect();
+    for (let attempt = 0; attempt < 8 && !state.challenge; attempt += 1) {
+      await wait(350);
+      state = await inspect();
+    }
+    // A normal product page is not a verification event. Close the hidden
+    // probe and let collection continue without touching the taskbar.
+    if (!state.challenge) return false;
+
+    probe.setSkipTaskbar(false);
+    probe.show();
+    if (probe.isMinimized()) probe.restore();
+    probe.maximize();
+    probe.focus();
+    const deadline = Date.now() + 300000;
+    while (Date.now() < deadline && isWindowAlive(probe)) {
+      state = await inspect();
+      if (!state.challenge) {
+        await saveAlibabaCookies(probe);
+        return true;
+      }
+      await wait(1000);
+    }
+    throw new Error('验证码未完成，请完成验证后重试');
+  } finally {
+    if (isWindowAlive(probe)) {
+      probe.setSkipTaskbar(true);
+      probe.hide();
+      probe.destroy();
+    }
   }
-  throw new Error('验证码未完成，请完成验证后重试');
 }
 
 async function inspectAndHideAlibabaSellerWindow() {

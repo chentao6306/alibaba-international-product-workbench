@@ -1,6 +1,6 @@
 {
   "name": "alibaba-international-product-workbench",
-  "version": "1.2.9",
+  "version": "1.2.10",
   "main": "electron/main.js",
   "description": "跨易铺 Alibaba.com 国际站商品采集与发布工作台",
   "author": "跨易铺",
@@ -29,7 +29,7 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "sharp": "^0.35.3",
-  "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.4.1",
@@ -42,16 +42,59 @@
     "appId": "com.kua-yipu.workbench",
     "productName": "跨易铺",
     "artifactName": "跨易铺-${version}-${os}-${arch}.${ext}",
-    "directories": { "output": "release" },
-    "files": ["dist/**/*", "server/**/*", "electron/**/*", "node_modules/**/*", "package.json"],
-    "asarUnpack": ["server/**/*", "node_modules/**/*", "node_modules/playwright-core/**/*", "node_modules/sharp/**/*"],
-    "extraResources": [{ "from": "vendor/chromium", "to": "chromium", "filter": ["**/*"] }],
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "server/**/*",
+      "electron/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "server/**/*",
+      "node_modules/**/*",
+      "node_modules/playwright-core/**/*",
+      "node_modules/sharp/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/chromium",
+        "to": "chromium",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
     "asar": true,
     "win": {
-      "target": [{ "target": "nsis", "arch": ["x64"] }, { "target": "portable", "arch": ["x64"] }],
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "verifyUpdateCodeSignature": false
     },
-    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "createDesktopShortcut": true },
-    "publish": [{ "provider": "generic", "url": "https://updates.example.invalid/kua-yipu/" }]
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://updates.example.invalid/kua-yipu/"
+      }
+    ]
   }
 }

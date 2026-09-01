@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import sharp from 'sharp';
 import { load } from 'cheerio';
-import { hidePage, launchPersistent, revealPage, settlePage, syncAlibabaCookies, waitForHumanVerification } from './browser-runtime.js';
+import { hasExplicitHumanChallenge, hidePage, launchPersistent, revealPage, settlePage, syncAlibabaCookies, waitForHumanVerification } from './browser-runtime.js';
 import { extractAlibabaSourceData, parseAlibabaDetailDataScript } from './alibaba-source-data.js';
 import { SOURCE_LANGUAGE_HEADERS, withSourceLocale } from './source-locale.js';
 
@@ -1951,8 +1951,9 @@ export class SellerPublisher {
     try {
       await page.setExtraHTTPHeaders(SOURCE_LANGUAGE_HEADERS);
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-      // Make the manual verification surface visible immediately. The page
-      // may render its challenge text after navigation completes.
+      // Keep the headed fallback off-screen unless a real challenge is
+      // visible. This path is only used outside the Electron bridge.
+      if (!await hasExplicitHumanChallenge(page)) return;
       await revealPage(page);
       await waitForHumanVerification(page, { timeout: 300000 });
     } finally {
@@ -2337,25 +2338,34 @@ export class SellerPublisher {
     }
   }
 
-  async readSourceProduct(page, base) {
+  async readSourceProduct(page, base, retry = 0) {
     await page.setExtraHTTPHeaders(SOURCE_LANGUAGE_HEADERS);
     await page.goto(base.sourceUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
     await page.waitForTimeout(800);
     await waitForHumanVerification(page, { timeout: 300000 });
     await page.waitForTimeout(450);
+    // Product attributes and the rich description are lazy-rendered on many
+    // Alibaba templates. Trigger the section and allow the DOM a short,
+    // bounded window to populate before extracting it. This replaces the old
+    // unconditional iframe wait that added 8 seconds even when no iframe
+    // existed.
     await page.locator('[data-module-name="module_description"], [data-testid="module-description"]').first().scrollIntoViewIfNeeded().catch(() => {});
+    await page.locator('[data-testid="module-attribute-row"], [data-module-name*="attribute" i], [data-module-name*="specification" i], table').first().scrollIntoViewIfNeeded().catch(() => {});
     await page.locator('[data-module-name="module_product_specification"] iframe, iframe[src*="descIframe"]')
       .first().scrollIntoViewIfNeeded().catch(() => {});
-    await page.waitForTimeout(300);
+    await page.waitForTimeout(650);
     if (/login|passport/i.test(page.url())) {
       // Alibaba may require authentication for an individual detail page even
       // when its public listing page is readable. Keep the listing record and
       // let the remaining products continue.
       return { ...base, collectWarning: '阿里巴巴要求登录，详情暂未补全' };
     }
-    await page.locator('iframe[src*="descIframe"]')?.first().waitFor({ state: 'attached', timeout: 8000 }).catch(() => {});
-    await page.waitForTimeout(1200);
+    const detailIframe = page.locator('iframe[src*="descIframe"]');
+    if (await detailIframe.count().catch(() => 0)) {
+      await detailIframe.first().waitFor({ state: 'attached', timeout: 3000 }).catch(() => {});
+    }
+    await page.waitForTimeout(500);
     await waitForHumanVerification(page, { timeout: 300000 });
     const detailDataScript = await page.evaluate(() => [...document.scripts]
       .map((script) => script.textContent || '')
@@ -2404,6 +2414,7 @@ export class SellerPublisher {
       };
       const unique = (values) => [...new Set(values.map(absolute).filter(Boolean))];
       const textOf = (node) => clean(node?.textContent || '');
+      const bodyText = document.body?.innerText || '';
       const labelValue = (labels) => {
         const wanted = labels.map((label) => label.toLowerCase());
         const nodes = [...document.querySelectorAll('tr, li, div, span')];
@@ -2477,6 +2488,23 @@ export class SellerPublisher {
         }).filter((item) => item?.name && item?.value);
         attributes.push(...fallbackAttributes);
       }
+      // New Alibaba templates render the attribute grid as anonymous divs
+      // (no table/data-testid/class hint). Recover the same label/value pairs
+      // from the visible section text using a conservative label vocabulary.
+      if (attributes.length < 2) {
+        const knownLabel = /^(?:材质|material|私模|private\s*mold|产地|place\s+of\s+origin|原产地|product\s+name|weight|重量|color|颜色|size|尺寸|feature|特征|moq|blade\s+pitch|blade\s+width|blade\s+diameter|销售单位|sales\s+unit|单个包装尺寸|single\s+package\s+size|单个产品毛重|single\s+gross\s+weight|包装重量|gross\s+weight|型号|model(?:\s+number)?|品牌(?:名称)?|brand(?:\s+name)?|type|类型)$/i;
+        const lines = bodyText.split(/\r?\n/).map(clean).filter((line) => line && line.length < 160);
+        const recovered = [];
+        for (let index = 0; index < lines.length - 1; index += 1) {
+          if (!knownLabel.test(lines[index]) || knownLabel.test(lines[index + 1])) continue;
+          const name = clean(lines[index]);
+          const value = clean(lines[index + 1]);
+          if (name && value && !recovered.some((item) => item.name === name && item.value === value)) {
+            recovered.push({ name, value, section: 'Product Attributes', source: 'visible-text' });
+          }
+        }
+        attributes.push(...recovered.filter((item) => !attributes.some((current) => current.name === item.name && current.value === item.value)));
+      }
       const variantGroupsRaw = [...document.querySelectorAll('[data-testid="sku-list"]')].map((group) => ({
         name: clean(group.querySelector('[data-testid="sku-list-title"]')?.textContent),
         options: [...group.querySelectorAll('[data-testid*="sku-item"]')].map((option) => clean(
@@ -2498,7 +2526,7 @@ export class SellerPublisher {
         document.querySelector('[data-module-name="module_price"]')?.textContent,
         document.querySelector('[data-testid*="price"]')?.textContent,
         productJson?.offers?.price,
-        document.body?.innerText?.match(/(?:¥|￥|\$)\s*[\d,.]+\s*(?:\d+\s*[-–]\s*\d+|≥\s*[\d,]+)?/g)?.join(' ')
+        bodyText.match(/(?:¥|￥|\$)\s*[\d,.]+\s*(?:\d+\s*[-–]\s*\d+|≥\s*[\d,]+)?/g)?.join(' ')
       ].filter(Boolean).join(' '));
       const categoryPath = [...document.querySelectorAll('nav a, [data-testid*="breadcrumb"] a')]
         .map((node) => clean(node.textContent)).filter((text) => text && text.length < 80
@@ -2564,9 +2592,22 @@ export class SellerPublisher {
         },
         documentLanguage: document.documentElement?.lang || '',
         metaLanguage: document.querySelector('meta[http-equiv="content-language"], meta[name="language"]')?.content || '',
-        renderTextSample: clean(document.body?.innerText).slice(0, 3000)
+        renderTextSample: clean(bodyText).slice(0, 3000)
       };
     });
+    // Alibaba defers attributes/description until the corresponding section
+    // enters the viewport. If the first snapshot contains only the gallery,
+    // trigger lazy modules and retry once before persisting an incomplete
+    // product. This keeps transient rendering races from becoming permanent
+    // "资料阻断" records while avoiding an unbounded slowdown.
+    const needsLazyRetry = retry < 1 && detail.mainImages.length > 0
+      && detail.attributes.length === 0 && detail.detailImages.length === 0
+      && !detail.descriptionHtml && !detail.description;
+    if (needsLazyRetry) {
+      await page.evaluate(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'instant' })).catch(() => {});
+      await page.waitForTimeout(1400);
+      return this.readSourceProduct(page, base, retry + 1);
+    }
     if (iframeDetail?.html && iframeDetail.html.length > 80) {
       detail.descriptionHtml = iframeDetail.html.slice(0, 90000);
       detail.description = iframeDetail.text.slice(0, 12000);
