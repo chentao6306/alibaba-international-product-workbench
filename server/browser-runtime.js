@@ -194,7 +194,10 @@ export async function isHumanVerificationPage(page) {
   if (!page || page.isClosed()) return false;
   const url = page.url();
   const text = await page.locator('body').innerText().catch(() => '');
-  const verificationText = /captcha|滑块|请完成验证|人机验证|安全验证|security verification|slide to verify|verify you are human|登录失效/i.test(text);
+  // Do not treat ordinary Alibaba login/session notices as a CAPTCHA. Product
+  // pages can contain stale “登录失效” text in hidden or auxiliary modules;
+  // only an explicit human-challenge marker may reveal the browser window.
+  const verificationText = /captcha|滑块|请完成验证|人机验证|安全验证|security verification|slide to verify|verify you are human/i.test(text);
   const authUrl = /(^|\/)(login|passport|signin|sign-in)([/?#]|$)/i.test(url);
   return verificationText || authUrl;
 }
@@ -211,7 +214,7 @@ export async function waitForHumanVerification(page, options = {}) {
   }
   if (!verificationVisible) return false;
   const text = await page.locator('body').innerText().catch(() => '');
-  const challenge = /captcha|滑块|请完成验证|人机验证|安全验证|security verification|slide to verify|verify you are human|登录失效/i.test(text);
+  const challenge = /captcha|滑块|请完成验证|人机验证|安全验证|security verification|slide to verify|verify you are human/i.test(text);
   if (contextModes.get(page.context())?.headless) {
     // A plain Alibaba login redirect is handled as an unavailable detail page
     // by the caller. Only an actual challenge should interrupt headless work.
