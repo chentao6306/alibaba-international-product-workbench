@@ -37,6 +37,24 @@ async function saveAlibabaCookies(login) {
   }
 }
 
+async function saveAlibabaSession(login) {
+  await saveAlibabaCookies(login);
+  try {
+    const url = login.webContents.getURL();
+    const origin = new URL(url).origin;
+    if (!/alibaba\.com$/i.test(new URL(url).hostname)) return;
+    const storage = await login.webContents.executeJavaScript('Object.fromEntries(Object.entries(localStorage))', true);
+    const file = path.join(path.dirname(alibabaCookiesFile()), 'alibaba-storage.json');
+    let all = {};
+    try { all = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+    all[origin] = storage && typeof storage === 'object' ? storage : {};
+    fs.writeFileSync(file, JSON.stringify(all), { mode: 0o600 });
+  } catch {
+    // Some Alibaba pages disable script access during a redirect; cookies are
+    // still persisted by saveAlibabaCookies above.
+  }
+}
+
 function credentialFile() {
   return path.join(app.getPath('userData'), 'credentials.bin');
 }
@@ -393,9 +411,15 @@ async function handleAlibabaHumanVerification(url) {
       await wait(350);
       state = await inspect();
     }
-    // A normal product page is not a verification event. Close the hidden
-    // probe and let collection continue without touching the taskbar.
-    if (!state.challenge) return false;
+    // The seller session may already be authenticated even though the
+    // separate headless profile was challenged. Persist those cookies and let
+    // the caller reload its original page. Returning false here used to leave
+    // the headless page stuck on CAPTCHA, so every following product was
+    // parsed as an empty detail and paid the verification cost again.
+    if (!state.challenge) {
+      await saveAlibabaSession(probe);
+      return true;
+    }
 
     probe.setSkipTaskbar(false);
     probe.show();
@@ -406,7 +430,7 @@ async function handleAlibabaHumanVerification(url) {
     while (Date.now() < deadline && isWindowAlive(probe)) {
       state = await inspect();
       if (!state.challenge) {
-        await saveAlibabaCookies(probe);
+        await saveAlibabaSession(probe);
         return true;
       }
       await wait(1000);
@@ -467,7 +491,7 @@ async function enterSystem() {
   // loading are supervised in the background so the Alibaba page can never be
   // held in an endless "正在进入" state.
   const seller = currentAlibabaWindow();
-  if (isWindowAlive(seller)) saveAlibabaCookies(seller).catch(() => {});
+  if (isWindowAlive(seller)) saveAlibabaSession(seller).catch(() => {});
   if (isWindowAlive(mainWindow)) {
     mainWindow.show();
     mainWindow.focus();
@@ -643,7 +667,7 @@ async function startAlibabaLogin(username, password) {
         const currentUrl = login.webContents.getURL();
         if (/login|passport/i.test(currentUrl)) return;
         loginSucceeded = true;
-        await saveAlibabaCookies(login);
+        await saveAlibabaSession(login);
         settle(null, { url: currentUrl });
       }
       if (currentSession) {
@@ -759,7 +783,7 @@ async function startAlibabaLogin(username, password) {
       if (!hasLoginForm && !/login|passport/i.test(url) && await pageLooksRendered()) {
         loginSucceeded = true;
         await injectEntryBar();
-        await saveAlibabaCookies(login);
+        await saveAlibabaSession(login);
         settle(null, { url });
       }
     };
@@ -802,7 +826,7 @@ globalThis.__KUA_YIPU_SELLER_BRIDGE = {
   sync: async () => {
     const seller = currentAlibabaWindow({ preferPosting: true });
     if (!isWindowAlive(seller)) return false;
-    await saveAlibabaCookies(seller);
+    await saveAlibabaSession(seller);
     return true;
   },
   bind: inspectAndHideAlibabaSellerWindow,

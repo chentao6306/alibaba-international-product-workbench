@@ -1934,6 +1934,7 @@ export class SellerPublisher {
       });
       this.sourceContext.on('close', () => { this.sourceContext = null; });
     }
+    await globalThis.__KUA_YIPU_SELLER_BRIDGE?.sync?.().catch(() => false);
     await syncAlibabaCookies(this.sourceContext);
     return this.sourceContext;
   }
@@ -2323,9 +2324,10 @@ export class SellerPublisher {
               .then((remaining) => [...enriched, ...remaining]);
           }
           if (error?.code === 'COLLECT_PAUSED') throw error;
-          // One unavailable detail page must not discard the listing data or
-          // mark the entire group as failed. Persist the warning on the item.
-          enrichedProduct = { ...products[index], collectWarning: String(error?.message || '商品详情读取失败，已保留基础资料') };
+          // Do not turn a CAPTCHA, empty shell, or parser failure into a
+          // seemingly successful product that contains only a title/thumb.
+          // The job must stop so the user can fix authentication and retry.
+          throw new Error(`第 ${index + 1} 件商品详情读取失败：${String(error?.message || '未获得有效详情数据')}`);
         }
         enriched.push(enrichedProduct);
         const keepGoing = onProgress(index + 1, products.length, enriched[index]);
@@ -2342,9 +2344,9 @@ export class SellerPublisher {
     await page.setExtraHTTPHeaders(SOURCE_LANGUAGE_HEADERS);
     await page.goto(base.sourceUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(400);
     await waitForHumanVerification(page, { timeout: 300000 });
-    await page.waitForTimeout(450);
+    await page.waitForTimeout(250);
     // Product attributes and the rich description are lazy-rendered on many
     // Alibaba templates. Trigger the section and allow the DOM a short,
     // bounded window to populate before extracting it. This replaces the old
@@ -2354,7 +2356,7 @@ export class SellerPublisher {
     await page.locator('[data-testid="module-attribute-row"], [data-module-name*="attribute" i], [data-module-name*="specification" i], table').first().scrollIntoViewIfNeeded().catch(() => {});
     await page.locator('[data-module-name="module_product_specification"] iframe, iframe[src*="descIframe"]')
       .first().scrollIntoViewIfNeeded().catch(() => {});
-    await page.waitForTimeout(650);
+    await page.waitForTimeout(450);
     if (/login|passport/i.test(page.url())) {
       // Alibaba may require authentication for an individual detail page even
       // when its public listing page is readable. Keep the listing record and
@@ -2365,7 +2367,7 @@ export class SellerPublisher {
     if (await detailIframe.count().catch(() => 0)) {
       await detailIframe.first().waitFor({ state: 'attached', timeout: 3000 }).catch(() => {});
     }
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(350);
     await waitForHumanVerification(page, { timeout: 300000 });
     const detailDataScript = await page.evaluate(() => [...document.scripts]
       .map((script) => script.textContent || '')
@@ -2620,10 +2622,14 @@ export class SellerPublisher {
     } else if (!detail.description || /^(?:视频描述|video description)$/i.test(detail.description)) {
       detail.description = '';
     }
-    const hasUsableDetail = detail.mainImages.length > 0
-      || detail.detailImages.length > 0
-      || detail.attributes.length > 0
-      || Boolean(detail.descriptionHtml || detail.description || detail.priceText);
+    // A listing thumbnail alone is not a successful detail read. Requiring at
+    // least one real detail module prevents CAPTCHA/empty shells from being
+    // persisted as products with attributes, SKUs and descriptions all set to
+    // zero.
+    const hasUsableDetail = detail.detailImages.length > 0
+      || detail.attributes.length >= 2
+      || detail.variantGroups.length > 0
+      || Boolean(detail.descriptionHtml || detail.description || detail.priceText || structuredSource);
     if (!hasUsableDetail) {
       throw new Error(`商品详情读取不完整：${base.title}（主图 ${detail.mainImages.length}，属性 ${detail.attributes.length}）`);
     }

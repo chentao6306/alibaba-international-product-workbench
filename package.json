@@ -1,6 +1,6 @@
 {
   "name": "alibaba-international-product-workbench",
-  "version": "1.2.10",
+  "version": "1.2.12",
   "main": "electron/main.js",
   "description": "跨易铺 Alibaba.com 国际站商品采集与发布工作台",
   "author": "跨易铺",

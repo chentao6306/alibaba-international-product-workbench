@@ -96,6 +96,7 @@ export class ShopCollector {
           // The Electron login window may have refreshed the Alibaba session
           // after this context was created. Re-import the latest cookies before
           // starting another listing/detail request.
+          await globalThis.__KUA_YIPU_SELLER_BRIDGE?.sync?.().catch(() => false);
           await syncAlibabaCookies(this.context);
           this.context.pages();
           return this.context;
@@ -106,6 +107,7 @@ export class ShopCollector {
     }
     // Ordinary collection runs in Chromium's real headless mode, so Windows
     // never creates a desktop window or taskbar icon.
+    await globalThis.__KUA_YIPU_SELLER_BRIDGE?.sync?.().catch(() => false);
     this.context = await launchPersistent(this.profileDir, { headless: true });
     this.context.on('close', () => { this.context = null; this.verificationPage = null; });
     this.context.on('page', (page) => {

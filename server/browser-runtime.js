@@ -9,6 +9,11 @@ function cookieFile() {
   return process.env.KUA_YIPU_ALIBABA_COOKIES_FILE || '';
 }
 
+function storageFile() {
+  const file = cookieFile();
+  return file ? path.join(path.dirname(file), 'alibaba-storage.json') : '';
+}
+
 export function normalizeAlibabaCookies(rawCookies = []) {
   return (Array.isArray(rawCookies) ? rawCookies : []).map((cookie) => ({
     name: String(cookie.name || ''),
@@ -35,8 +40,19 @@ function readAlibabaCookies() {
 
 export async function syncAlibabaCookies(context) {
   const cookies = readAlibabaCookies();
-  if (!cookies.length) return;
-  await context.addCookies(cookies).catch(() => {});
+  if (cookies.length) await context.addCookies(cookies).catch(() => {});
+  const file = storageFile();
+  if (!file || !fs.existsSync(file)) return;
+  let storage = {};
+  try { storage = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return; }
+  await context.addInitScript((entries) => {
+    try {
+      if (!location.hostname.endsWith('alibaba.com')) return;
+      const values = entries[location.origin] || entries['https://www.alibaba.com'];
+      if (!values || typeof values !== 'object') return;
+      for (const [key, value] of Object.entries(values)) localStorage.setItem(key, String(value));
+    } catch {}
+  }, storage).catch(() => {});
 }
 
 function existing(paths) {
@@ -254,7 +270,15 @@ export async function waitForHumanVerification(page, options = {}) {
       if (!handled) return false;
       await syncAlibabaCookies(page.context());
       await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-      await page.waitForTimeout(800);
+      await page.waitForTimeout(450);
+      // The seller session can take one navigation to apply its cookies. Do
+      // not let the parser run against a second CAPTCHA document.
+      if (await hasExplicitHumanChallenge(page)) {
+        const error = new Error('验证码处理后商品页仍不可用');
+        error.code = 'HUMAN_VERIFICATION_REQUIRED';
+        error.verificationUrl = page.url();
+        throw error;
+      }
       return true;
     }
     const error = new Error('需要人工验证');
