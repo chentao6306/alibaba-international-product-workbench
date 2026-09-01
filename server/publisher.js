@@ -1998,6 +1998,15 @@ export class SellerPublisher {
     };
   }
 
+  async shutdown() {
+    const contexts = [...new Set([this.context, this.sourceContext].filter(Boolean))];
+    this.context = null;
+    this.sourceContext = null;
+    this.page = null;
+    this.visible = false;
+    await Promise.allSettled(contexts.map((context) => context.close()));
+  }
+
   async hide() {
     if (this.page) await hidePage(this.page);
     this.visible = false;

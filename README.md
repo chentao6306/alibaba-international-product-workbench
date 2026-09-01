@@ -14,6 +14,7 @@
 
 - 支持 `*.en.alibaba.com` 店铺首页、商品列表页和商品分组链接。
 - 先读取店铺全部分组，再采集指定分组或全部分组。
+- 国际站店铺会额外读取“橱窗（Featured products）”页面，并作为独立分组展示；用户可以只勾选橱窗采集。
 - 支持设置起始页、结束页、采集间隔、交货地国家和排序方式。
 - 逐条读取商品详情，并在每件商品完成后立即保存，避免中途退出造成全部数据丢失。
 - 支持暂停、继续和取消采集任务；程序重新启动后可恢复未完成任务的状态。
@@ -584,6 +585,75 @@ git ls-files .data
 ```
 
 第二条命令正常应无输出。GitHub 仓库即使是私密仓库，也不应保存卖家 Cookie、浏览器配置、商品业务数据或 API 密钥。
+
+---
+
+## 17. Electron 桌面端与 EXE 打包
+
+### 17.1 源码首次运行桌面端
+
+在项目根目录打开 PowerShell，首次运行执行：
+
+```powershell
+npm install
+npm run build
+npm run prepare:chromium
+npm run desktop
+```
+
+桌面端会先显示登录窗口。登录成功后进入商品工作台；采集浏览器和 My Alibaba 发布浏览器使用项目自己的持久化资料目录。开发源码时不要删除 `vendor/chromium`，否则桌面端无法启动内置浏览器。
+
+### 17.2 日常运行桌面端
+
+代码没有变化时直接运行：
+
+```powershell
+npm run desktop
+```
+
+拉取新代码或修改了前端后，先重新构建：
+
+```powershell
+npm install
+npm run build
+npm run prepare:chromium
+npm run desktop
+```
+
+需要同时调试 Vite 前端和 Electron 时运行：
+
+```powershell
+npm run desktop:dev
+```
+
+### 17.3 生成 Windows EXE 安装包
+
+生成 NSIS 安装版（输出到 `release-installer/`）：
+
+```powershell
+npm run dist:win:installer
+```
+
+生成 Electron 便携版（不写入系统安装目录）：
+
+```powershell
+npm run dist:win:portable
+```
+
+也可以执行完整 Windows 打包命令：
+
+```powershell
+npm run dist:win
+```
+
+每次打包都会先构建前端并准备 `vendor/chromium`，发布包必须包含 `resources/chromium/chrome.exe`。打包前建议执行：
+
+```powershell
+npm test
+npm run build
+```
+
+安装包和便携包只包含代码、依赖和内置 Chromium，不包含 `.data` 下的登录会话、Cookie、商品数据或任务记录；升级程序不会自动迁移或覆盖这些本地数据。
 
 ---
 

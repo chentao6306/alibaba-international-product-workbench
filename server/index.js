@@ -783,10 +783,19 @@ if (staticDir && fs.existsSync(path.join(staticDir, 'index.html'))) {
 }
 
 const port = Number(process.env.PORT || 8787);
+let listener = null;
 export const serverReady = new Promise((resolve, reject) => {
-  const listener = app.listen(port, '127.0.0.1', () => {
+  listener = app.listen(port, '127.0.0.1', () => {
     console.log(`Alibaba.com workbench API: http://127.0.0.1:${port}`);
     resolve(listener);
   });
   listener.once('error', reject);
 });
+
+export async function shutdownServer() {
+  await Promise.allSettled([collector.resetContext(), publisher.shutdown()]);
+  const active = listener;
+  listener = null;
+  if (!active?.listening) return;
+  await new Promise((resolve) => active.close(() => resolve()));
+}

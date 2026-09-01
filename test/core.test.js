@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { normalizeShopUrl, productIdFromUrl } from '../server/collector.js';
+import { internationalFeaturedUrl, normalizeShopUrl, productIdFromUrl } from '../server/collector.js';
 import {
   buildLegacyDescriptionHtml,
   buildSkuCombinations,
@@ -58,6 +58,13 @@ test('normalizes an Alibaba.com international storefront', () => {
   assert.equal(
     normalizeShopUrl('同行店铺：https://sample.en.alibaba.com/?from=share 请查看'),
     'https://sample.en.alibaba.com/productlist.html'
+  );
+});
+
+test('builds the international storefront featured-products URL', () => {
+  assert.equal(
+    internationalFeaturedUrl('https://sample.m.en.alibaba.com/productgrouplist-123/Parts.html'),
+    'https://sample.m.en.alibaba.com/featureproductlist.html'
   );
 });
 

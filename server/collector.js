@@ -41,6 +41,11 @@ export function isInternationalShopUrl(value) {
   try { return /(^|\.)alibaba\.com$/i.test(new URL(value).hostname); } catch { return false; }
 }
 
+export function internationalFeaturedUrl(value) {
+  const url = new URL(normalizeShopUrl(value));
+  return `${url.protocol}//${url.host}/featureproductlist.html`;
+}
+
 export function productIdFromUrl(value) {
   return value.match(/(?:detail\.1688\.com\/offer\/|\/offer\/)(\d+)\.html/i)?.[1]
     || value.match(/\/product-detail\/[^?#]*?(\d{8,})\.html/i)?.[1]
@@ -225,9 +230,30 @@ export class ShopCollector {
             url: absoluteUrl(group.url, normalized), productCount: group.productCount ?? null
           });
         }
-        if (map.size === 1 && /verify|captcha|验证|登录/i.test(await page.locator('body').innerText().catch(() => ''))) {
+        const groupPageText = await page.locator('body').innerText().catch(() => '');
+        if (map.size === 1 && /verify|captcha|验证|登录/i.test(groupPageText)) {
           throw new Error('国际站需要人工验证，请在弹出的验证页面完成验证后重试');
         }
+        // The storefront's "Featured products" page is a separate listing
+        // and is not included in the product-group module. Keep it as a
+        // normal selectable group so collection, pagination and persistence
+        // use the same path as every other group.
+        const featuredUrl = internationalFeaturedUrl(normalized);
+        let featuredCount = null;
+        let featuredAvailable = false;
+        try {
+          const response = await page.goto(featuredUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+          await settlePage(page);
+          await waitForHumanVerification(page);
+          const featuredData = await readInternationalModules(page);
+          featuredCount = featuredData.pageNav?.totalLines ?? featuredData.products.length ?? null;
+          featuredAvailable = response?.ok() !== false
+            && !/error\.alibaba\.com|error404/i.test(page.url())
+            && Boolean(featuredData.pageNav || featuredData.products.length);
+        } catch {
+          // Some storefronts do not configure a featured-products page.
+        }
+        if (featuredAvailable) map.set('featured', { externalId: 'featured', name: '橱窗', url: featuredUrl, productCount: featuredCount });
         if (map.size === 1) throw new Error('没有从该国际站页面读取到商品分组，请确认粘贴的是同行店铺首页');
         return {
           shopUrl: normalized,

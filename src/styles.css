@@ -107,6 +107,7 @@ main { margin-left: 232px; padding: 31px 34px 60px; max-width: 1640px; }
 .group-row { min-height: 61px; padding: 9px 22px; display: grid; grid-template-columns: 20px 25px minmax(180px, 1fr) 74px 112px 34px; gap: 10px; align-items: center; border-bottom: 1px solid #edf0f1; }
 .group-row:last-child { border: 0; }
 .group-row > svg { color: #849097; }
+.group-row > svg.featured-group-icon { color: var(--orange); }
 .group-row > div { display: flex; flex-direction: column; min-width: 0; }
 .group-row strong { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .group-row small { margin-top: 4px; color: var(--muted); font-size: 11px; }

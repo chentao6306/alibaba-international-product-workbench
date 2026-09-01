@@ -18,6 +18,7 @@ const alibabaWindows = new Set();
 const registeredAlibabaWindows = new WeakSet();
 let currentSession = null;
 let enterSystemPromise = null;
+let shutdownStarted = false;
 const localGate = crypto.randomBytes(32).toString('hex');
 let hasSingleInstanceLock = false;
 
@@ -258,6 +259,10 @@ async function createMainWindow() {
     if (level >= 2) console.error(`工作台渲染错误 ${sourceId}:${line} ${message}`);
   });
   window.on('closed', () => { if (mainWindow === window) mainWindow = null; });
+  // The Alibaba and automation windows may be hidden rather than closed.
+  // Closing the visible workbench must therefore quit the whole application,
+  // otherwise those windows keep Electron alive and block the next installer.
+  window.on('close', () => { if (!shutdownStarted) app.quit(); });
   // Do not make the Alibaba login button wait for renderer lifecycle events.
   // Electron can delay did-finish-load while the page is already usable; the
   // workbench is shown immediately and the load is supervised in the background.
@@ -719,10 +724,20 @@ globalThis.__KUA_YIPU_SELLER_BRIDGE = {
 };
 
 ipcMain.handle('auth:enter', async () => enterSystem());
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  event.preventDefault();
   currentSession = null;
   if (isWindowAlive(loginWindow)) loginWindow.destroy();
   if (isWindowAlive(mainWindow)) mainWindow.destroy();
   for (const window of liveAlibabaWindows()) window.destroy();
+  const shutdown = async () => {
+    try {
+      const serverModule = serverModulePromise ? await serverModulePromise : null;
+      await serverModule?.shutdownServer?.();
+    } catch {}
+  };
+  Promise.race([shutdown(), wait(4000)]).finally(() => app.exit(0));
 });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
