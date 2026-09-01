@@ -12,7 +12,8 @@ const TITLE_SELECTORS = [
   'input[placeholder*="商品标题"]', 'input[placeholder*="标题"]',
   'input[placeholder*="product title" i]', 'input[placeholder*="product name" i]',
   'input[placeholder*="enter a title" i]', 'input[name*="title" i]',
-  'textarea[placeholder*="标题"]', 'textarea[placeholder*="title" i]'
+  'textarea[placeholder*="标题"]', 'textarea[placeholder*="title" i]',
+  '[contenteditable="true"][aria-label*="title" i]', '[contenteditable="true"][data-testid*="title" i]'
 ];
 
 const PROMOTIONAL_TEXT = /(?:Alibaba\s*Lens|免费比价插件|寻找价格更低|相似商品|省时又省钱|下载扩展程序|Accio\s*Work|报告可疑活动|report suspicious activity|find similar products)/i;
@@ -165,6 +166,15 @@ async function fillAndVerify(locator, value, fieldName) {
     actual = (await locator.inputValue().catch(() => '')).trim();
   }
   if (actual !== expected) throw new Error(`${fieldName}写入失败，国际站输入框未保留内容`);
+}
+
+function isUsableImageUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return /^https?:$/i.test(url.protocol)
+      && (/(?:^|\.)alicdn\.com$/i.test(url.hostname) || /(?:^|\.)alibaba\.com$/i.test(url.hostname))
+      && (/(?:\/kf\/|\/ibank\/|\/img\/)/i.test(url.pathname) || /\.(?:jpe?g|png|webp)(?:$|[?_])/i.test(url.pathname));
+  } catch { return false; }
 }
 
 async function commitControlledInput(locator, value) {
@@ -1292,11 +1302,12 @@ async function removeEmptyColorSpecRows(page, expectedColors = []) {
   }
 }
 
-async function ensureColorSpecImageSwitch(page, row) {
+export async function ensureColorSpecImageSwitch(page, row) {
   const hasUploadSurface = async () => row.locator([
     '.custom-upload-image',
     '.value-preview',
-    '[class*="upload-image"]'
+    '.posting-feild-color-item input[type="file"]',
+    '.posting-field-color-item input[type="file"]'
   ].join(', ')).evaluateAll((nodes) => nodes.some((node) => Boolean(
     node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length)
   ))).catch(() => false);
@@ -1310,9 +1321,14 @@ async function ensureColorSpecImageSwitch(page, row) {
     return /next-switch-on|is-checked|(?:^|\s)(?:on|opened|checked|active)(?:\s|$)/i.test(await control.getAttribute('class').catch(() => '') || '');
   };
   const resolveTarget = async () => {
+    // Current Alibaba markup puts the exact switch inside this wrapper. Use
+    // it before proximity matching so a hidden/portal label cannot resolve
+    // to an unrelated switch in the specification card.
+    const direct = row.locator('.upload-image-switch [role="switch"], .upload-image-switch .next-switch').last();
+    if (await direct.count().catch(() => 0) && await direct.isVisible().catch(() => false)) return direct;
     const labels = row.getByText(/添加规格图|规格图|specification image|spec image/i);
     let label = null;
-    for (let index = 0; index < await labels.count().catch(() => 0); index += 1) {
+    for (let index = await labels.count().catch(() => 0) - 1; index >= 0; index -= 1) {
       const candidate = labels.nth(index);
       if (await candidate.isVisible().catch(() => false)) { label = candidate; break; }
     }
@@ -1339,6 +1355,7 @@ async function ensureColorSpecImageSwitch(page, row) {
     if (!await switchIsOn(control)) {
       await control.scrollIntoViewIfNeeded().catch(() => {});
       await control.click({ force: true }).catch(() => {});
+      if (!await switchIsOn(control)) await control.press('Space').catch(() => {});
     }
     const deadline = Date.now() + 2500;
     while (Date.now() < deadline) {
@@ -1478,11 +1495,12 @@ async function visibleColorSpecControl(page) {
 }
 
 async function visibleColorSpecRow(page) {
-  const rows = page.locator('[id="p-191288010"]');
+  const rows = page.locator('[id="p-191288010"], [id="struct-p-191288010"], [data-attribute-id="191288010"], [data-id="191288010"], [data-attribute-id="color"], [data-spec-id="191288010"]');
   const count = await rows.count().catch(() => 0);
   for (let index = 0; index < count; index += 1) {
     const row = rows.nth(index);
-    if (await row.isVisible().catch(() => false)) return row;
+    if (await row.isVisible().catch(() => false)
+      && await row.locator('input[role="colorCombobox"]').count().catch(() => 0)) return row;
   }
   return null;
 }
@@ -1690,7 +1708,7 @@ async function ensureSpecControlChecked(page, resolveControl) {
   return specControlIsChecked(await resolveControl());
 }
 
-async function enableSpecImageUpload(page, product, colorGroup, downloadImages) {
+export async function enableSpecImageUpload(page, product, colorGroup, downloadImages) {
   const colorValues = [...new Set(colorGroup?.options || [])].map((value) => englishSpecText(value)).filter(Boolean);
   const imageUrl = colorValues.map((value) => colorGroup?.optionImages?.[value] || colorGroup?.optionImages?.[colorGroup.options?.find((item) => englishSpecText(item) === value)]).find(Boolean);
   if (!imageUrl) return false;
@@ -1713,7 +1731,17 @@ async function enableSpecImageUpload(page, product, colorGroup, downloadImages) 
   if (!row) return false;
   await removeEmptyColorSpecRows(page, colorValues);
   row = await visibleColorSpecRow(page) || row;
-  if (!await ensureColorSpecImageSwitch(page, row)) return false;
+  if (!await ensureColorSpecImageSwitch(page, row)) {
+    const state = await row.evaluate((node) => ({
+      rowClass: String(node.className || ''),
+      switches: [...node.querySelectorAll('[role="switch"], .next-switch')].map((item) => ({
+        className: String(item.className || ''),
+        ariaChecked: item.getAttribute('aria-checked')
+      })),
+      colorValues: [...node.querySelectorAll('input[role="colorCombobox"]')].map((item) => item.value)
+    })).catch(() => null);
+    throw new Error(`国际站颜色规格图片开关未能打开（${JSON.stringify(state || {})}）`);
+  }
   const files = await downloadImages([imageUrl], 'spec', 1);
   if (!files.length) return false;
   const expectedColor = colorValues[0];
@@ -1742,6 +1770,18 @@ async function enableSpecImageUpload(page, product, colorGroup, downloadImages) 
     }
   }
   if (!item) return false;
+
+  // Only the uploaded preview is authoritative. The upload menu itself also
+  // contains decorative <img> icons, so broad `img[src]` selectors report a
+  // false success before Alibaba has accepted the source file.
+  const uploadedPreview = () => item.locator([
+    '.value-preview.uploaded img[src]',
+    '.value-preview.uploaded [style*="background-image"]',
+    '.custom-upload-image.uploaded .value-preview img[src]'
+  ].join(', '));
+  if (await uploadedPreview().count().catch(() => 0)) {
+    return ensureSaleAttributeSelected(page, '191288010');
+  }
 
   const uploadBox = item.locator('.custom-upload-image, [class*="upload-image"], [class*="upload-trigger"]').first();
   await uploadBox.scrollIntoViewIfNeeded().catch(() => {});
@@ -1793,21 +1833,61 @@ async function enableSpecImageUpload(page, product, colorGroup, downloadImages) 
     await pageInputs.nth(inputCount - 1).setInputFiles(files[0]);
   }
 
-  const preview = item.locator([
-    '.value-preview.uploaded img[src]',
-    '.value-preview img[src]',
-    '.value-preview [style*="background-image"]',
-    '.custom-upload-image img[src]',
-    '[class*="upload-image"] img[src]'
-  ].join(', '));
   const uploadDeadline = Date.now() + 60000;
-  while (!await preview.count().catch(() => 0) && Date.now() < uploadDeadline) {
+  while (!await uploadedPreview().count().catch(() => 0) && Date.now() < uploadDeadline) {
     const feedback = (await visibleFeedback(page)).join(' ');
     if (/上传失败|图片.*不符合|upload failed/i.test(feedback)) return false;
     await page.waitForTimeout(350);
   }
-  if (!await preview.count().catch(() => 0)) return false;
-  return saleAttributeIsSelected(page, '191288010');
+  if (!await uploadedPreview().count().catch(() => 0)) return false;
+  // Repeat the same transaction for each color option. The old code uploaded
+  // only the first value, leaving the remaining Alibaba color rows empty.
+  for (const additionalColor of colorValues.slice(1)) {
+    const additionalUrl = colorGroup?.optionImages?.[additionalColor]
+      || colorGroup?.optionImages?.[colorGroup.options?.find((value) => englishSpecText(value) === additionalColor)];
+    if (!additionalUrl) continue;
+    const additionalFiles = await downloadImages([additionalUrl], 'spec', 1);
+    if (!additionalFiles.length) return false;
+    const additionalItems = row.locator('.posting-feild-color-item, .posting-field-color-item, .posting-feild-color-item-container');
+    let additionalItem = null;
+    for (let index = 0; index < await additionalItems.count().catch(() => 0); index += 1) {
+      const candidate = additionalItems.nth(index);
+      const value = await candidate.locator('input[role="colorCombobox"], input').first().inputValue().catch(() => '');
+      if (String(value).trim().toLowerCase() === additionalColor.toLowerCase()) { additionalItem = candidate; break; }
+    }
+    if (!additionalItem) return false;
+    const additionalPreview = additionalItem.locator('.value-preview.uploaded img[src], .value-preview.uploaded [style*="background-image"]');
+    if (await additionalPreview.count().catch(() => 0)) continue;
+    const additionalInput = additionalItem.locator('input[type="file"][accept*="image" i], input[type="file"]').last();
+    if (await additionalInput.count().catch(() => 0)) await additionalInput.setInputFiles(additionalFiles[0]);
+    else {
+      const trigger = additionalItem.locator('.custom-upload-image, [class*="upload-image"], [class*="upload-trigger"]').first();
+      const chooserPromise = page.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null);
+      await trigger.click({ force: true }).catch(() => {});
+      let chooser = await chooserPromise;
+      if (!chooser) {
+        const portal = page.getByText('本地上传', { exact: true }).last();
+        if (await portal.isVisible().catch(() => false)) {
+          const portalChooser = page.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null);
+          await portal.click({ force: true }).catch(() => {});
+          chooser = await portalChooser;
+        }
+      }
+      if (!chooser) return false;
+      await chooser.setFiles(additionalFiles[0]);
+    }
+    const deadline = Date.now() + 60000;
+    while (!await additionalPreview.count().catch(() => 0) && Date.now() < deadline) {
+      const feedback = (await visibleFeedback(page)).join(' ');
+      if (/上传失败|图片.*不符合|upload failed/i.test(feedback)) return false;
+      await page.waitForTimeout(350);
+    }
+    if (!await additionalPreview.count().catch(() => 0)) return false;
+  }
+  // The uploader rerenders the color row. Wait for the enclosing form model
+  // to settle and recommit the exact sale attribute if that rerender briefly
+  // removed it instead of turning a successful upload into a false failure.
+  return ensureSaleAttributeSelected(page, '191288010');
 }
 
 async function switchToLegacyDetails(page) {
@@ -1884,6 +1964,7 @@ export class SellerPublisher {
     if (options.reveal && globalThis.__KUA_YIPU_SELLER_BRIDGE?.open) {
       return globalThis.__KUA_YIPU_SELLER_BRIDGE.open();
     }
+    await globalThis.__KUA_YIPU_SELLER_BRIDGE?.sync?.().catch(() => false);
     if (!this.context) {
       this.context = await launchPersistent(this.profileDir, { headless: false });
       this.context.on('close', () => { this.context = null; this.page = null; });
@@ -2567,7 +2648,7 @@ export class SellerPublisher {
 
   async downloadImageSet(product, urls, prefix, limit = 6) {
     fs.mkdirSync(this.imageDir, { recursive: true });
-    const selectedUrls = distinctAlibabaImageUrls(urls).filter((url) => /\/kf\//i.test(url)).slice(0, limit);
+    const selectedUrls = distinctAlibabaImageUrls(urls).filter(isUsableImageUrl).slice(0, limit);
     const paths = await Promise.all(selectedUrls.map(async (url, index) => {
       try {
         const response = await fetch(url, { headers: { referer: product.sourceUrl, 'user-agent': 'Mozilla/5.0' } });
@@ -2579,10 +2660,10 @@ export class SellerPublisher {
         if (!buffer.length || buffer.length > 5 * 1024 * 1024) return '';
         if (prefix === 'detail') {
           const metadata = await sharp(buffer).metadata();
-          if ((metadata.width || 0) > 960 || (metadata.height || 0) > 960) {
+          if ((metadata.width || 0) > 960 || (metadata.height || 0) > 960 || buffer.length > 3 * 1024 * 1024) {
             buffer = await sharp(buffer)
               .resize({ width: 960, height: 960, fit: 'inside', withoutEnlargement: true })
-              .jpeg({ quality: 90 })
+              .jpeg({ quality: buffer.length > 3 * 1024 * 1024 ? 82 : 90 })
               .toBuffer();
             extension = 'jpg';
           }
@@ -2599,13 +2680,17 @@ export class SellerPublisher {
 
   async uploadMainImages(page, product) {
     const urls = product.mainImages?.length ? product.mainImages : [product.mainImage, ...(product.images || [])];
-    const images = await this.downloadImageSet(product, urls, 'main', 6);
-    if (images.length < 4) throw new Error(`主图资料不足：仅下载到 ${images.length} 张，至少需要 4 张`);
+    const downloaded = await this.downloadImageSet(product, urls, 'main', 6);
+    if (downloaded.length < 4) throw new Error(`主图资料不足：仅下载到 ${downloaded.length} 张，至少需要 4 张`);
     const placeholders = () => page.locator('.image-uploader .image-upload-list-item #image-placeholder-span');
     const initialSlotCount = await placeholders().count().catch(() => 0);
-    if (initialSlotCount < images.length) {
-      throw new Error(`国际站主图槽位不足：当前 ${initialSlotCount} 个，商品需要上传 ${images.length} 张`);
-    }
+    const totalSlotCount = await page.locator('.image-uploader .image-upload-list-item').count().catch(() => 0);
+    if (!initialSlotCount && totalSlotCount >= 4) return 0;
+    // A draft form may already contain one or more images. Upload every valid
+    // empty slot up to Alibaba's six-image limit, while never treating occupied
+    // slots as missing capacity or reporting a false required-image error.
+    const images = downloaded.slice(0, Math.min(downloaded.length, initialSlotCount));
+    if (images.length < 4) throw new Error(`国际站主图槽位不足：当前可用空槽位 ${initialSlotCount} 个，至少需要上传 4 张`);
     const finishBatchUpload = async () => {
       const result = await this.waitForMainImageUploads(page, images.length, initialSlotCount);
       const remainingSlots = await placeholders().count().catch(() => initialSlotCount);
@@ -3164,6 +3249,58 @@ export class SellerPublisher {
       return assigned;
     };
     const initialEditorImages = await editorImageCount();
+    const uploadViaAlibabaEditorPlugin = async () => {
+      const payloads = imagePaths.map((filePath) => ({
+        name: path.basename(filePath),
+        type: path.extname(filePath).toLowerCase() === '.png' ? 'image/png' : 'image/jpeg',
+        data: fs.readFileSync(filePath).toString('base64')
+      }));
+      const started = await page.evaluate((files) => {
+        const editors = [...(window.tinymce?.editors || []), ...(window.tinyMCE?.editors || [])];
+        const editor = editors.find((item) => item && !item.hidden && item.plugins?.alipicpastedrag);
+        const plugin = editor?.plugins?.alipicpastedrag;
+        if (!editor || !plugin?.insertAnchorImages || !plugin?.uploadFiles) return false;
+        const created = files.map((item, index) => {
+          const binary = atob(item.data);
+          const bytes = new Uint8Array(binary.length);
+          for (let offset = 0; offset < binary.length; offset += 1) bytes[offset] = binary.charCodeAt(offset);
+          const file = new File([bytes], item.name, { type: item.type || 'image/jpeg' });
+          file.fileUUID = `kyp-${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`;
+          return file;
+        });
+        if (plugin.checkFilesError?.(created)) return { started: false, reason: 'rejected' };
+        // Alibaba's custom drag/paste plugin requires placeholders before its
+        // uploader can associate server responses with editor images.
+        plugin.insertAnchorImages(created);
+        plugin.uploadFiles(created);
+        return { started: true };
+      }, payloads).catch(() => ({ started: false, reason: 'exception' }));
+      if (!started?.started) return null;
+
+      const deadline = Date.now() + 120000;
+      while (Date.now() < deadline) {
+        let stable = 0;
+        for (const frame of page.frames()) {
+          const body = frame.locator('body.mce-content-body, body[contenteditable="true"]');
+          if (!await body.isVisible().catch(() => false)) continue;
+          stable = Math.max(stable, await body.locator('img[src]:not([src*="loading"]):not([src*="progress"]):not([src^="data:"])').count().catch(() => 0));
+        }
+        if (stable >= initialEditorImages + imagePaths.length) {
+          await syncEditor();
+          return stable - initialEditorImages;
+        }
+        const feedback = (await visibleFeedback(page)).join(' ');
+        if (/上传失败|图片.*失败|文件.*过大|图片.*不符合|upload failed/i.test(feedback)) {
+          throw new Error(`国际站详情图上传失败：${compactText(feedback, 300)}`);
+        }
+        await page.waitForTimeout(600);
+      }
+      const inserted = await editorImageCount();
+      throw new Error(`普通编辑器未完成详情图上传（已插入 ${Math.max(0, inserted - initialEditorImages)}/${imagePaths.length} 张）`);
+    };
+    const pluginInserted = await uploadViaAlibabaEditorPlugin();
+    if (pluginInserted !== null) return pluginInserted;
+
     let uploadButton = null;
     const toolbarDeadline = Date.now() + 15000;
     while (Date.now() < toolbarDeadline) {
@@ -3489,6 +3626,16 @@ export class SellerPublisher {
     await settlePage(page);
     await revealPage(page);
     await waitForHumanVerification(page, { timeout: 300000 });
+    // Electron owns the authenticated browser partition. Refresh its exported
+    // cookies once more before classifying a login redirect, then retry the
+    // publish navigation in the already-created Playwright context.
+    if (/login|passport/i.test(page.url())) {
+      await globalThis.__KUA_YIPU_SELLER_BRIDGE?.sync?.().catch(() => false);
+      await syncAlibabaCookies(page.context());
+      await page.goto(publishPageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+      await settlePage(page);
+      await waitForHumanVerification(page, { timeout: 300000 });
+    }
     if (/login|passport/i.test(page.url())) throw new Error('阿里巴巴国际站登录状态已失效，请重新登录');
     if (/\/product\/(?:easyListing|category)\.htm/i.test(new URL(page.url()).pathname)) {
       throw new Error('绑定的是商品类目选择页，不是商品填写表单。请先完成类目选择后重新绑定');

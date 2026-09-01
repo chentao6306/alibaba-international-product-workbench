@@ -361,41 +361,62 @@ export class ShopCollector {
       await page.goto(base.sourceUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
       await settlePage(page);
       const detail = await page.evaluate(() => {
+        const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
         const meta = (name) => document.querySelector(`meta[property="${name}"],meta[name="${name}"]`)?.content || '';
-        const normalize = (value) => value?.startsWith('//') ? `https:${value}` : value || '';
-        const images = [...document.querySelectorAll('img')].map((image) => normalize(
-          image.getAttribute('data-lazy-src') || image.getAttribute('data-src') || image.currentSrc || image.src
-        )).filter((src) => /^https?:/.test(src) && !/logo|avatar|icon|qr/i.test(src));
-        const attributes = [...document.querySelectorAll('[class*=attribute] li, [class*=props] li, [class*=parameter] li')]
-          .map((node) => (node.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 80);
-        const skuTexts = [...document.querySelectorAll('[class*=sku] [class*=item], [class*=sku] li')]
-          .map((node) => (node.textContent || '').replace(/\s+/g, ' ').trim()).filter((value) => value && value.length < 80).slice(0, 100);
+        const normalize = (value) => { try { return new URL(String(value || '').startsWith('//') ? `https:${value}` : String(value || ''), location.href).href; } catch { return ''; } };
         const bodyText = document.body?.innerText || '';
-        const price = meta('product:price:amount') || bodyText.match(/[¥￥$]\s*([\d.]+)/)?.[1] || '';
-        const descriptionNode = document.querySelector('[class*=description], #desc-lazyload-container, [data-spm*=desc]');
+        const json = [];
+        const visit = (value) => { if (!value || typeof value !== 'object') return; json.push(value); if (Array.isArray(value)) value.forEach(visit); else Object.values(value).forEach(visit); };
+        for (const script of document.querySelectorAll('script[type="application/ld+json"], script:not([src])')) {
+          try { const text = script.textContent || ''; if (/product|sku|price|spec|商品|规格/i.test(text)) visit(JSON.parse(text)); } catch {}
+        }
+        const images = [...new Set([
+          ...json.flatMap((item) => [item.image, item.images, item.contentUrl]).flat(Infinity),
+          ...[...document.querySelectorAll('img')].map((image) => image.currentSrc || image.src || image.getAttribute('data-lazy-src') || image.getAttribute('data-src') || image.getAttribute('data-original'))
+        ].map(normalize).filter((src) => /^https?:/.test(src) && !/logo|avatar|icon|qr/i.test(src)))].slice(0, 40);
+        const descriptionNode = document.querySelector('#desc-lazyload-container, [data-module-name*=description i], [class*=description i], [data-spm*=desc i], [id*=detail i]');
+        const pairMap = new Map();
+        const addPair = (name, value) => { const key = clean(name).replace(/[：:]$/, ''); const val = clean(value); if (key && val && key !== val && key.length < 100 && val.length < 500) pairMap.set(`${key}\u0000${val}`, { name: key, value: val, source: 'detail-dom' }); };
+        for (const row of document.querySelectorAll('tr')) { const cells = [...row.querySelectorAll('th,td')].map((node) => clean(node.innerText || node.textContent)).filter(Boolean); if (cells.length >= 2) addPair(cells[0], cells.slice(1).join(' / ')); }
+        for (const node of document.querySelectorAll('[class*=attribute i] li, [class*=props i] li, [class*=parameter i] li, [class*=property i] li')) { const match = clean(node.innerText || node.textContent).match(/^([^：:]{1,100})\s*[：:]\s*(.{1,500})$/); if (match) addPair(match[1], match[2]); }
+        const attributes = [...pairMap.values()].slice(0, 120);
+        const priceValues = [meta('product:price:amount'), ...json.flatMap((item) => [item.price, item.lowPrice, item.minPrice, item.offers?.price]).flat(Infinity), ...(bodyText.match(/[¥￥$]\s*[\d,]+(?:\.\d+)?/g) || [])].map((value) => clean(value).replace(/^[^\d]*/, '').replace(/,/g, '')).filter((value) => /^\d+(?:\.\d+)?$/.test(value));
+        const price = priceValues[0] || '';
+        const priceTiers = [];
+        for (const node of document.querySelectorAll('tr,li,[class*=price i],[class*=ladder i]')) { const text = clean(node.innerText || node.textContent); const amount = text.match(/[¥￥$]\s*([\d,]+(?:\.\d+)?)/)?.[1]; if (!amount) continue; const numbers = [...text.matchAll(/\d[\d,]*/g)].map((m) => Number(m[0].replace(/,/g, ''))).filter((n) => Number.isFinite(n) && n > 0); const value = Number(amount.replace(/,/g, '')); const quantities = numbers.filter((n) => n !== value); const tier = { price: value.toFixed(2), minQuantity: quantities[0] || 1, maxQuantity: quantities[1] || null, currencySymbol: text.includes('$') ? '$' : '¥' }; if (value > 0 && !priceTiers.some((item) => item.price === tier.price && item.minQuantity === tier.minQuantity)) priceTiers.push(tier); }
+        const variantMap = new Map();
+        const addVariant = (name, values) => { const key = clean(name); const options = [...new Set(values.map(clean).filter((value) => value && value.length < 120))]; if (!key || !options.length) return; const current = variantMap.get(key) || { name: key, options: [], optionImages: {}, source: 'detail-dom' }; current.options = [...new Set([...current.options, ...options])].slice(0, 100); variantMap.set(key, current); };
+        for (const select of document.querySelectorAll('select')) addVariant(select.getAttribute('name') || select.getAttribute('aria-label') || 'Specification', [...select.options].map((option) => option.textContent));
+        const variantGroups = [...variantMap.values()];
+        const skus = [...document.querySelectorAll('[class*=sku i] tr, [class*=sku i] li, [data-sku-id]')].map((node) => { const text = clean(node.innerText || node.textContent); const price = text.match(/[¥￥$]\s*([\d,]+(?:\.\d+)?)/)?.[1]?.replace(/,/g, ''); const stock = text.match(/(?:库存|stock|quantity)\s*[:：]?\s*(\d+)/i)?.[1]; return text ? { id: node.getAttribute('data-sku-id') || node.getAttribute('data-id') || '', name: text.slice(0, 300), ...(price ? { price } : {}), ...(stock ? { stock: Number(stock) } : {}), source: 'detail-dom' } : null; }).filter(Boolean).slice(0, 200);
+        const categoryPath = [...document.querySelectorAll('nav a, [class*=breadcrumb i] a, [class*=category i] a')].map((node) => clean(node.innerText || node.textContent)).filter((value) => value && value.length < 100).filter((value, index, all) => all.indexOf(value) === index).slice(-8);
+        const videoUrl = normalize(document.querySelector('video[src], video source[src], [data-video-url]')?.src || document.querySelector('[data-video-url]')?.getAttribute('data-video-url') || '');
+        const packagingText = attributes.map((item) => `${item.name}:${item.value}`).join(' ');
+        const weightMatch = packagingText.match(/(?:毛重|重量|包装重量|gross weight|weight)\s*[:：]?\s*([\d.]+)\s*(kg|公斤|千克|g|克)?/i);
+        const sizeMatch = packagingText.match(/(?:包装尺寸|单个包装尺寸|package size|尺寸)\s*[:：]?\s*([\d.]+)\s*[x×*]\s*([\d.]+)\s*[x×*]\s*([\d.]+)/i);
+        const packaging = { ...(sizeMatch ? { length: sizeMatch[1], width: sizeMatch[2], height: sizeMatch[3] } : {}), ...(weightMatch ? { weight: Number(weightMatch[1]) * (/^(?:g|克)$/i.test(weightMatch[2] || '') ? 0.001 : 1) } : {}) };
+        const keywords = clean(meta('keywords')).split(/[,，;；]/).map(clean).filter(Boolean).slice(0, 30);
         return {
           title: meta('og:title') || document.querySelector('h1')?.textContent || document.title,
-          image: normalize(meta('og:image')),
-          images: [...new Set(images)].slice(0, 12),
+          image: normalize(meta('og:image')) || images[0] || '', images,
           price,
-          description: (descriptionNode?.innerText || '').replace(/\n{3,}/g, '\n\n').trim().slice(0, 12000),
-          attributes,
-          skuTexts
+          priceTiers, description: clean(descriptionNode?.innerText || '').slice(0, 20000), descriptionHtml: descriptionNode?.innerHTML?.slice(0, 90000) || '',
+          attributes, variantGroups, skus, categoryPath, videoUrl, packaging, keywords
         };
       });
+      const mergedImages = [...new Set([base.mainImage, ...(base.images || []), detail.image, ...(detail.images || [])].filter(Boolean))].slice(0, 40);
       return {
         ...base,
         sourceTitle: usefulProductTitle(detail.title) || base.sourceTitle,
         title: usefulProductTitle(detail.title) || base.title,
         mainImage: base.mainImage || detail.image || detail.images[0] || '',
-        images: isInternationalShopUrl(base.sourceUrl)
-          ? [...new Set([base.mainImage, ...(base.images || [])].filter(Boolean))]
-          : [...new Set([detail.image, base.mainImage, ...(base.images || []), ...detail.images].filter(Boolean))],
+        images: mergedImages, mainImages: mergedImages.slice(0, 6), detailImages: mergedImages.slice(6),
         sourcePrice: detail.price || base.sourcePrice,
         price: detail.price || base.price,
-        description: detail.description,
-        attributes: detail.attributes,
-        skus: detail.skuTexts.map((name) => ({ name, price: detail.price || base.price, stock: 100 }))
+        ...(detail.priceTiers?.length ? { sourcePriceTiers: detail.priceTiers, priceTiers: detail.priceTiers, priceMode: 'quantity-tier' } : {}),
+        description: detail.description || base.description || '', descriptionHtml: detail.descriptionHtml || base.descriptionHtml || '',
+        attributes: detail.attributes?.length ? detail.attributes : (base.attributes || []), variantGroups: detail.variantGroups?.length ? detail.variantGroups : (base.variantGroups || []), skus: detail.skus?.length ? detail.skus : (base.skus || []),
+        ...(detail.categoryPath?.length ? { sourceCategoryPath: detail.categoryPath, categoryPath: detail.categoryPath } : {}), ...(detail.videoUrl ? { videoUrl: detail.videoUrl } : {}), ...(Object.keys(detail.packaging || {}).length ? { packaging: { ...(base.packaging || {}), ...detail.packaging } } : {}), ...(detail.keywords?.length ? { keywords: detail.keywords } : {})
       };
     } catch (error) {
       return { ...base, collectWarning: error.message };

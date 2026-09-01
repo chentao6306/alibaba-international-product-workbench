@@ -108,10 +108,26 @@ function registerAlibabaWindow(window) {
   registeredAlibabaWindows.add(window);
 
   window.on('focus', () => { if (isWindowAlive(window)) alibabaWindow = window; });
+  // Track every real browser window created by Alibaba. Some pages use
+  // window.open(), while others navigate a named target; accepting only the
+  // default Electron behavior leaves the child outside our registry and the
+  // bind action keeps inspecting the old parent window.
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      return { action: /^https?:$/i.test(new URL(url).protocol) ? 'allow' : 'deny' };
+    } catch {
+      return { action: 'deny' };
+    }
+  });
   window.webContents.on('did-create-window', (child) => {
     registerAlibabaWindow(child);
     alibabaWindow = child;
   });
+  const selectIfPosting = (_event, url) => {
+    if (isAlibabaProductPostingUrl(url) && isWindowAlive(window)) alibabaWindow = window;
+  };
+  window.webContents.on('did-navigate', selectIfPosting);
+  window.webContents.on('did-frame-navigate', selectIfPosting);
   // Alibaba installs beforeunload handlers on some pages. Native close must
   // still destroy the selected browser window immediately.
   window.on('close', (event) => {
@@ -313,20 +329,30 @@ async function inspectAndHideAlibabaSellerWindow() {
   if (!windows.length) return null;
   let postingPage = null;
   try {
-    for (const seller of [...windows].reverse()) {
-      const details = await seller.webContents.executeJavaScript(`(() => {
-        const title = document.title || '';
-        const body = document.body?.innerText || '';
-        const titleField = document.querySelector('input[name="productTitle"], input[placeholder*="商品标题"], input[placeholder*="标题"], input[placeholder*="product title" i], input[placeholder*="product name" i], textarea[placeholder*="标题"], textarea[placeholder*="title" i]');
-        const category = body.match(/当前类目：\\s*([^\\n]+)/)?.[1]?.trim() || '';
-        return { url: location.href, title, category, hasTitleField: Boolean(titleField) };
-      })()`, true).catch(() => null);
-      if (!details || !isAlibabaProductPostingUrl(details.url)) continue;
-      postingPage ||= { seller, details };
-      if (details.hasTitleField) {
-        postingPage = { seller, details };
-        break;
+    // A child posting form can still be loading when the user clicks Bind.
+    // Poll the current registry briefly so we inspect the real form instead of
+    // racing the parent Products page.
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline && !postingPage?.details?.hasTitleField) {
+      for (const seller of [...liveAlibabaWindows()].reverse()) {
+        const details = await seller.webContents.executeJavaScript(`(() => {
+          const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
+          const titleField = [...document.querySelectorAll('input, textarea, [contenteditable="true"]')].find((node) => {
+            if (!visible(node)) return false;
+            const text = [node.name, node.id, node.placeholder, node.getAttribute('aria-label'), node.getAttribute('data-testid')].join(' ');
+            return /product\\s*(title|name)|商品标题|产品名称|标题/i.test(text);
+          });
+          const body = document.body?.innerText || '';
+          const category = body.match(/当前类目：\\s*([^\\n]+)/)?.[1]?.trim()
+            || body.match(/(?:Current category|Category)\\s*:\\s*([^\\n]+)/i)?.[1]?.trim() || '';
+          return { url: location.href, title: document.title || '', category, hasTitleField: Boolean(titleField) };
+        })()`, true).catch(() => null);
+        if (!details || !isAlibabaProductPostingUrl(details.url)) continue;
+        postingPage ||= { seller, details };
+        if (details.hasTitleField) { postingPage = { seller, details }; break; }
       }
+      if (postingPage?.details?.hasTitleField) break;
+      await wait(350);
     }
     if (!postingPage) throw new Error('当前不是国际站商品发布页，请进入 Products → Post Products 并打开商品填写表单');
     if (!postingPage.details.hasTitleField) throw new Error('请先完成类目选择并打开商品填写表单后再绑定');
@@ -386,7 +412,9 @@ async function startLocalServer() {
   process.env.KUA_YIPU_LOCAL_GATE = localGate;
   // A packaged client must use the Chromium shipped in resources/chromium.
   // Development builds may still use the local Playwright cache.
-  process.env.KUA_YIPU_REQUIRE_BUNDLED_BROWSER = app.isPackaged ? '1' : '0';
+  // Electron always uses the repository/package Chromium. Standalone web
+  // server users may still opt into their own browser outside this process.
+  process.env.KUA_YIPU_REQUIRE_BUNDLED_BROWSER = '1';
   process.env.APP_ROOT_DIR = app.isPackaged ? app.getAppPath() : rootDir;
   process.env.KUA_YIPU_DIST_DIR = path.join(process.env.APP_ROOT_DIR, 'dist');
   process.env.KUA_YIPU_ALIBABA_COOKIES_FILE = alibabaCookiesFile();
@@ -672,6 +700,12 @@ app.whenReady().then(() => {
 // again.
 globalThis.__KUA_YIPU_SELLER_BRIDGE = {
   open: showAlibabaSellerWindow,
+  sync: async () => {
+    const seller = currentAlibabaWindow({ preferPosting: true });
+    if (!isWindowAlive(seller)) return false;
+    await saveAlibabaCookies(seller);
+    return true;
+  },
   bind: inspectAndHideAlibabaSellerWindow,
   status: () => {
     const seller = currentAlibabaWindow({ preferPosting: true });

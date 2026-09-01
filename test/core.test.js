@@ -10,6 +10,7 @@ import {
   canonicalizePriceTiers,
   classifyAlibabaActionResult,
   distinctAlibabaImageUrls,
+  ensureColorSpecImageSwitch,
   findBlockingUnmappedVariant,
   categoryMismatchMessage,
   canonicalCategoryLeaf,
@@ -29,6 +30,7 @@ import {
 import { auditProduct, recordProductMutation, sourceSnapshotFingerprint, syncProductModel, verifySourceIntegrity } from '../server/product-model.js';
 import { extractAlibabaSourceData, parseAlibabaDetailDataScript } from '../server/alibaba-source-data.js';
 import { deleteWorkspaceEntities, findWorkspaceJobs, JsonStore } from '../server/store.js';
+import { normalizeAlibabaCookies } from '../server/browser-runtime.js';
 
 test('normalizes a 1688 shop home page to its product list', () => {
   assert.equal(
@@ -71,6 +73,49 @@ test('accepts only Alibaba.com international product-posting pages for publishin
   assert.equal(isProductPostingUrl('https://post.alibaba.com/product/category.htm'), true);
   assert.equal(isProductPostingUrl('https://work.1688.com/'), false);
   assert.equal(isProductPostingUrl('https://www.alibaba.com/product-detail/example_12345678.html'), false);
+});
+
+test('normalizes Electron session cookies for Playwright without dropping unspecified SameSite cookies', () => {
+  const cookies = normalizeAlibabaCookies([
+    { name: 'session', value: 'abc', domain: '.alibaba.com', sameSite: 'unspecified' },
+    { name: 'strict', value: 'def', domain: '.alibaba.com', sameSite: 'strict' },
+    { name: '', value: 'ignored', domain: '.alibaba.com', sameSite: 'lax' }
+  ]);
+  assert.deepEqual(cookies.map((cookie) => cookie.sameSite), ['Lax', 'Strict']);
+  assert.equal(cookies.length, 2);
+});
+
+test('does not mistake the color image switch wrapper for an enabled upload slot', async () => {
+  let clicked = false;
+  const switchControl = {
+    count: async () => 1,
+    isVisible: async () => true,
+    getAttribute: async (name) => name === 'aria-checked' ? (clicked ? 'true' : 'false') : (clicked ? 'next-switch-on' : 'next-switch-off'),
+    isChecked: async () => false,
+    scrollIntoViewIfNeeded: async () => {},
+    click: async () => { clicked = true; },
+    press: async () => {},
+    last() { return this; }
+  };
+  const emptyLocator = {
+    count: async () => 0,
+    isVisible: async () => false,
+    evaluateAll: async () => false,
+    last() { return this; }
+  };
+  const row = {
+    locator(selector) {
+      if (selector.includes('.upload-image-switch')) return switchControl;
+      if (selector.includes('.custom-upload-image')) {
+        return { evaluateAll: async () => clicked };
+      }
+      return emptyLocator;
+    },
+    getByText: () => emptyLocator
+  };
+  const page = { waitForTimeout: async () => {} };
+  assert.equal(await ensureColorSpecImageSwitch(page, row), true);
+  assert.equal(clicked, true);
 });
 
 test('recognizes Alibaba review confirmation text after submit', () => {

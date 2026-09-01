@@ -9,21 +9,25 @@ function cookieFile() {
   return process.env.KUA_YIPU_ALIBABA_COOKIES_FILE || '';
 }
 
+export function normalizeAlibabaCookies(rawCookies = []) {
+  return (Array.isArray(rawCookies) ? rawCookies : []).map((cookie) => ({
+    name: String(cookie.name || ''),
+    value: String(cookie.value || ''),
+    domain: cookie.domain || '.alibaba.com',
+    path: cookie.path || '/',
+    expires: Number(cookie.expirationDate || cookie.expires || -1),
+    httpOnly: Boolean(cookie.httpOnly),
+    secure: Boolean(cookie.secure),
+    sameSite: ({ no_restriction: 'None', lax: 'Lax', strict: 'Strict', unspecified: 'Lax' }[String(cookie.sameSite || '').toLowerCase()] || 'Lax')
+  })).filter((cookie) => cookie.name && cookie.value);
+}
+
 function readAlibabaCookies() {
   const file = cookieFile();
   if (!file || !fs.existsSync(file)) return [];
   try {
     const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return (Array.isArray(raw) ? raw : []).map((cookie) => ({
-      name: String(cookie.name || ''),
-      value: String(cookie.value || ''),
-      domain: cookie.domain || '.alibaba.com',
-      path: cookie.path || '/',
-      expires: Number(cookie.expirationDate || cookie.expires || -1),
-      httpOnly: Boolean(cookie.httpOnly),
-      secure: Boolean(cookie.secure),
-      sameSite: ({ no_restriction: 'None', lax: 'Lax', strict: 'Strict' }[cookie.sameSite] || cookie.sameSite || 'Lax')
-    })).filter((cookie) => cookie.name && cookie.value);
+    return normalizeAlibabaCookies(raw);
   } catch {
     return [];
   }
@@ -52,13 +56,16 @@ export function findChromium() {
     path.join(resources, 'chromium', 'chrome-win64', 'chrome.exe'),
     path.join(resources, 'chromium', 'chrome.exe'),
     path.join(resources, 'app.asar.unpacked', 'chromium', 'chrome-win', 'chrome.exe'),
-    path.join(resources, 'app.asar.unpacked', 'chromium', 'chrome-win64', 'chrome.exe')
+    path.join(resources, 'app.asar.unpacked', 'chromium', 'chrome-win64', 'chrome.exe'),
+    // Development Electron runs from the repository but must use the same
+    // bundled engine as the packaged client, never the user's Edge/Chrome.
+    path.join(process.env.APP_ROOT_DIR || process.cwd(), 'vendor', 'chromium', 'chrome.exe')
   ]);
   if (packaged) return packaged;
   // Packaged clients must be self-contained. Falling back to a customer's
   // Edge/Chrome silently changes the browser engine and was the source of
   // EXE-only session, upload, and CAPTCHA differences.
-  if (process.env.KUA_YIPU_REQUIRE_BUNDLED_BROWSER === '1') return null;
+  if (process.env.KUA_YIPU_REQUIRE_BUNDLED_BROWSER === '1' || process.env.KUA_YIPU_DESKTOP === '1') return null;
   const direct = existing([
     process.env.KUA_YIPU_CHROMIUM_PATH,
     process.env.CHROME_PATH,

@@ -8,7 +8,7 @@
 
 ## 1. 系统功能
 
-> 桌面版说明：项目现在同时提供 Electron 桌面壳、Windows 安装包/便携包配置，以及独立的 Linux 授权服务。桌面版启动后先验证 Alibaba 账号授权，再进入现有工作台；授权服务地址通过打包环境变量 `KUA_YIPU_AUTH_URL` 配置。授权服务部署说明见 `auth-server/README.md`。
+> 桌面版说明：项目现在同时提供 Electron 桌面壳、Windows 安装包/便携包配置，以及独立的 Linux 授权服务。桌面版启动后先验证 Alibaba 账号授权，再进入现有工作台；授权服务地址通过打包环境变量 `KUA_YIPU_AUTH_URL` 配置。Electron 发布包自带 Chromium，不依赖用户电脑安装 Edge 或 Chrome。授权服务部署说明见 `auth-server/README.md`。
 
 ### 1.1 店铺与商品采集
 
@@ -70,6 +70,8 @@
 - 绑定当前国际站商品发布页及其类目。
 - 批量逐件填充标题、属性、规格、SKU、阶梯价、物流、图片和详情。
 - 支持保存草稿和直接提交发布两种模式。
+- 普通编辑器详情图通过 Alibaba 当前 `alipicpastedrag` 上传插件逐张上传，并等待每张图片替换为正式图片地址。
+- 有颜色规格时先打开规格图片开关，再按颜色逐项上传对应规格图；上传失败会阻止提交，避免生成缺图商品。
 - 支持暂停、继续和取消上架任务。
 - 保存每件商品的执行结果、错误原因和任务历史。
 - 登录失效或触发验证码时自动显示浏览器，等待人工处理；验证完成后继续任务并重新最小化。
@@ -84,7 +86,7 @@
 | 操作系统 | Windows 10/11，64 位 | Windows 11 |
 | Node.js | 20 LTS 或更高版本 | 22.22.2 |
 | npm | 随 Node.js 安装，建议 10 或更高 | 10.9.7 |
-| 浏览器 | Microsoft Edge 或 Google Chrome 最新稳定版 | Edge/Chrome 均支持 |
+| 浏览器 | Electron 桌面版自带 Chromium；源码开发可使用项目准备的 Chromium | 发布包不依赖外部 Edge/Chrome |
 | 网络 | 可正常访问 `alibaba.com` 和 `post.alibaba.com` | 必需 |
 | 卖家账号 | 已开通 My Alibaba 商品发布权限 | 发布功能必需 |
 | 磁盘空间 | 建议至少预留 5 GB | 图片、缓存和浏览器资料会持续增长 |
@@ -108,7 +110,7 @@ npm --version
 | React / React DOM | `^19.0.0` | 前端界面 |
 | Vite | `^6.2.2` | 前端构建和开发服务 |
 | Express | `^5.1.0` | 本地 API 和静态页面服务 |
-| Playwright Core | `^1.51.1` | Edge/Chrome 浏览器自动化 |
+| Playwright Core | `1.62.1` | 内置 Chromium 浏览器自动化 |
 | Cheerio | `^1.1.2` | HTML 结构化解析 |
 | Sharp | `^0.35.3` | 图片格式识别、压缩和尺寸处理 |
 | SheetJS xlsx | `^0.18.5` | SKU 表格导入和导出 |
@@ -174,7 +176,7 @@ http://127.0.0.1:8787/
 6. 回到系统点击“绑定国际站发布页”。
 7. 建议先用 1 件商品执行“保存草稿”，人工检查资料后再使用批量直接发布。
 
-浏览器登录资料会保存在本地 `.data` 目录，正常情况下不需要每次重新登录。
+浏览器登录资料会保存在本地 `.data` 目录，正常情况下不需要每次重新登录。Electron 会在启动发布流程前同步桌面浏览器会话 Cookie；如果 Alibaba 要求重新登录或人工验证，程序会显示内置浏览器窗口，完成后继续任务。
 
 ## 4. 日常启动
 
@@ -289,7 +291,7 @@ Express 本地服务
         +-- xlsx SKU 表格处理
         |
         v
-Playwright Core + 本机 Edge/Chrome
+Playwright Core + Electron 内置 Chromium
         |
         +-- Alibaba.com 来源商品页
         +-- My Alibaba 商品发布页
@@ -313,7 +315,7 @@ Express 服务负责：
 
 ### 7.3 浏览器自动化
 
-系统优先使用本机 Edge 或 Chrome，通过持久化浏览器配置保存登录状态。采集浏览器与卖家发布浏览器使用不同资料目录，防止来源站点和卖家后台会话互相干扰。
+Electron 桌面版使用打包在安装目录 `resources/chromium` 下的 Chromium，通过持久化浏览器配置保存登录状态。采集浏览器与卖家发布浏览器使用不同资料目录，防止来源站点和卖家后台会话互相干扰。源码开发时运行 `npm run prepare:chromium` 将 Chromium 准备到 `vendor/chromium`；如果桌面版找不到内置浏览器，程序会明确提示安装包不完整，而不会偷偷切换到用户的外部浏览器。
 
 正常任务中浏览器会保持最小化。检测到登录、验证码、安全验证或人工确认页面时才显示窗口。不要手工关闭自动化浏览器；关闭后当前任务可能失败，需要重新打开并继续。
 
@@ -441,6 +443,15 @@ npm run dev:web
 
 # 运行自动化测试
 npm test
+
+# 准备源码开发用 Chromium
+npm run prepare:chromium
+
+# 构建 Windows NSIS 安装包
+npm run dist:win:installer
+
+# 构建 Windows 便携版
+npm run dist:win:portable
 ```
 
 发布新版本前至少执行：
@@ -509,9 +520,9 @@ npm start
 
 不要复制其他电脑的 `node_modules`，应在当前电脑重新安装。
 
-### 找不到 Edge 或 Chrome
+### 桌面版提示缺少内置 Chromium
 
-安装最新版 Microsoft Edge 或 Google Chrome，然后重新启动系统。浏览器安装在非标准路径时，需要在代码配置中补充可执行文件路径。
+请重新下载完整的 Windows 安装包并重新安装。发布包必须包含 `resources/chromium/chrome.exe`；不要只复制 `win-unpacked` 的部分文件。源码开发时先运行 `npm run prepare:chromium`，再运行 `npm run desktop`。
 
 ### 采集很慢
 

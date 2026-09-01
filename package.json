@@ -1,6 +1,6 @@
 {
   "name": "alibaba-international-product-workbench",
-  "version": "1.2.6",
+  "version": "1.2.7",
   "main": "electron/main.js",
   "description": "跨易铺 Alibaba.com 国际站商品采集与发布工作台",
   "author": "跨易铺",
@@ -17,6 +17,7 @@
     "prepare:chromium": "node tools/prepare-chromium.mjs",
     "dist:win": "npm run build && npm run prepare:chromium && electron-builder --win",
     "dist:win:installer": "npm run build && npm run prepare:chromium && electron-builder --win nsis --x64 --config.directories.output=release-installer --config.artifactName=\"kua-yipu-${version}-setup.${ext}\" --publish never",
+    "dist:win:portable": "npm run build && npm run prepare:chromium && electron-builder --win portable --x64 --publish never",
     "test": "node --test"
   },
   "dependencies": {
