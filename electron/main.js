@@ -284,7 +284,8 @@ async function ensureAlibabaSellerWindow() {
   const seller = new BrowserWindow({
     width: 1440,
     height: 960,
-    show: true,
+    show: false,
+    skipTaskbar: true,
     title: 'Alibaba.com 卖家后台',
     webPreferences: {
       contextIsolation: true,
@@ -311,6 +312,7 @@ async function showAlibabaSellerWindow() {
   // Reuse the authenticated Alibaba session, including any tracked child
   // window, before creating another browser profile.
   const seller = await ensureAlibabaSellerWindow();
+  seller.setSkipTaskbar(false);
   seller.show();
   if (seller.isMinimized()) seller.restore();
   seller.maximize();
@@ -327,6 +329,56 @@ async function showAlibabaSellerWindow() {
   }
   await saveAlibabaCookies(seller);
   return { browserOpen: true, visible: true, currentUrl: seller.webContents.getURL(), onAlibabaInternational: true };
+}
+
+async function openAlibabaSourceWindow(sourceUrl) {
+  let parsed;
+  try { parsed = new URL(String(sourceUrl || '')); } catch { throw new Error('来源商品链接无效'); }
+  if (!/(^|\.)alibaba\.com$/i.test(parsed.hostname) || !/\/product-detail\//i.test(parsed.pathname)) {
+    throw new Error('仅支持打开阿里巴巴国际站来源商品');
+  }
+  const seller = await ensureAlibabaSellerWindow();
+  seller.setSkipTaskbar(false);
+  await Promise.race([
+    seller.loadURL(parsed.href),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('来源商品页面加载超时')), 60000))
+  ]);
+  seller.show();
+  if (seller.isMinimized()) seller.restore();
+  seller.maximize();
+  seller.focus();
+  return { browserOpen: true, visible: true, currentUrl: seller.webContents.getURL(), onAlibabaInternational: true };
+}
+
+async function handleAlibabaHumanVerification(url) {
+  const seller = await ensureAlibabaSellerWindow();
+  const current = seller.webContents.getURL();
+  if (String(url || '') && current !== url) {
+    await seller.loadURL(String(url));
+  }
+  seller.setSkipTaskbar(false);
+  seller.show();
+  if (seller.isMinimized()) seller.restore();
+  seller.maximize();
+  seller.focus();
+  const deadline = Date.now() + 300000;
+  while (Date.now() < deadline && isWindowAlive(seller)) {
+    const state = await seller.webContents.executeJavaScript(`(() => {
+      const text = document.body?.innerText || '';
+      const url = location.href;
+      const challenge = /captcha|滑块|请完成验证|人机验证|安全验证|security verification|slide to verify|verify you are human|登录失效/i.test(text);
+      const login = /login|passport|signin|sign-in/i.test(url) && Boolean(document.querySelector('input[type="password"],input[name="password"]'));
+      return { challenge, login };
+    })()`, true).catch(() => ({ challenge: true, login: true }));
+    if (!state.challenge && !state.login) {
+      await saveAlibabaCookies(seller);
+      seller.setSkipTaskbar(true);
+      seller.hide();
+      return true;
+    }
+    await wait(1000);
+  }
+  throw new Error('验证码未完成，请完成验证后重试');
 }
 
 async function inspectAndHideAlibabaSellerWindow() {
@@ -365,7 +417,7 @@ async function inspectAndHideAlibabaSellerWindow() {
     await saveAlibabaCookies(postingPage.seller);
     return { url: postingPage.details.url, title: postingPage.details.title, category: postingPage.details.category };
   } finally {
-    for (const window of liveAlibabaWindows()) window.hide();
+    for (const window of liveAlibabaWindows()) { window.setSkipTaskbar(true); window.hide(); }
   }
 }
 
@@ -384,7 +436,7 @@ async function enterSystem() {
   } else {
     createMainWindow().catch((error) => showWorkbenchError(mainWindow, error));
   }
-  for (const window of liveAlibabaWindows()) window.hide();
+  for (const window of liveAlibabaWindows()) { window.setSkipTaskbar(true); window.hide(); }
   if (isWindowAlive(loginWindow)) loginWindow.close();
   return true;
 }
@@ -705,6 +757,8 @@ app.whenReady().then(() => {
 // again.
 globalThis.__KUA_YIPU_SELLER_BRIDGE = {
   open: showAlibabaSellerWindow,
+  openSource: openAlibabaSourceWindow,
+  humanVerification: handleAlibabaHumanVerification,
   sync: async () => {
     const seller = currentAlibabaWindow({ preferPosting: true });
     if (!isWindowAlive(seller)) return false;
@@ -724,6 +778,7 @@ globalThis.__KUA_YIPU_SELLER_BRIDGE = {
 };
 
 ipcMain.handle('auth:enter', async () => enterSystem());
+ipcMain.handle('alibaba:open-source', async (_event, url) => openAlibabaSourceWindow(url));
 app.on('before-quit', (event) => {
   if (shutdownStarted) return;
   shutdownStarted = true;

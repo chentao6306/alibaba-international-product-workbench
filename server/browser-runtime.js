@@ -216,6 +216,14 @@ export async function waitForHumanVerification(page, options = {}) {
     // A plain Alibaba login redirect is handled as an unavailable detail page
     // by the caller. Only an actual challenge should interrupt headless work.
     if (!challenge) return false;
+    const bridge = globalThis.__KUA_YIPU_SELLER_BRIDGE;
+    if (typeof bridge?.humanVerification === 'function') {
+      await bridge.humanVerification(page.url());
+      await syncAlibabaCookies(page.context());
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+      await page.waitForTimeout(800);
+      return true;
+    }
     const error = new Error('需要人工验证');
     error.code = 'HUMAN_VERIFICATION_REQUIRED';
     error.verificationUrl = page.url();

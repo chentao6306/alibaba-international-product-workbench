@@ -1923,10 +1923,10 @@ export class SellerPublisher {
     // session cookies are imported into this context instead.
     if (!this.sourceContext) {
       this.sourceContext = await launchPersistent(this.sourceProfileDir, {
-        // Alibaba serves richer product detail markup in a real Chromium
-        // context. launchPersistent keeps this window off-screen; it is only
-        // revealed when an actual human verification challenge is detected.
-        headless: false,
+        // Normal detail collection must not create a taskbar window. A real
+        // headed context is created only by completeSourceVerification when a
+        // human challenge actually needs to be shown.
+        headless: true,
         locale: 'en-US',
         extraHTTPHeaders: {
           'Accept-Language': 'en-US,en;q=0.9'
@@ -1966,7 +1966,10 @@ export class SellerPublisher {
     }
     await globalThis.__KUA_YIPU_SELLER_BRIDGE?.sync?.().catch(() => false);
     if (!this.context) {
-      this.context = await launchPersistent(this.profileDir, { headless: false });
+      // Keep normal publishing completely out of the desktop and taskbar.
+      // The shared Electron bridge reveals a real window only if Alibaba
+      // presents a CAPTCHA or login challenge.
+      this.context = await launchPersistent(this.profileDir, { headless: true });
       this.context.on('close', () => { this.context = null; this.page = null; });
     }
     await syncAlibabaCookies(this.context);
@@ -3626,14 +3629,14 @@ export class SellerPublisher {
     const validationErrors = validateProductData(product);
     if (validationErrors.length) throw new Error(`商品资料未通过上架检查：${validationErrors.join('；')}`);
     const page = await this.currentSellerPage();
-    // Publishing is intentionally observable: keep the actual automation
-    // page maximized so the user can inspect uploads, validation messages, and
-    // the final Alibaba response in real time. Collection remains hidden.
-    await revealPage(page);
-    this.visible = true;
+    // Normal publishing is headless and must not appear in the Windows taskbar.
+    // waitForHumanVerification raises a typed error for a real challenge; the
+    // caller can then use the headed verification flow without exposing every
+    // upload and form interaction.
+    await hidePage(page);
+    this.visible = false;
     await page.goto(publishPageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await settlePage(page);
-    await revealPage(page);
     await waitForHumanVerification(page, { timeout: 300000 });
     // Electron owns the authenticated browser partition. Refresh its exported
     // cookies once more before classifying a login redirect, then retry the
