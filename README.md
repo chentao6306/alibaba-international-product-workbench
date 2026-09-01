@@ -6,6 +6,15 @@
 
 > 重要说明：本系统通过浏览器自动化操作公开商品页和 My Alibaba 发布页，不使用阿里巴巴官方商品发布 API。Alibaba 页面结构、类目规则、账号权限或风控策略变化时，自动化流程可能需要同步适配。
 
+## 当前代码基线
+
+- GitHub 仓库：`chentao6306/alibaba-international-product-workbench`
+- 完整项目分支：`codex/full-project-20260901`
+- 当前应用版本：`1.2.12`
+- 源码语言：JavaScript（ES Modules）、JSX、HTML、CSS、PowerShell 和 Windows Batch
+
+仓库保存可复现构建所需的源码、锁定依赖清单、测试、构建配置、授权服务源码和维护脚本。`node_modules`、`dist`、内置 Chromium、安装包以及包含账号会话和业务商品的运行时数据不进入 Git；它们分别由依赖安装、构建、浏览器准备和应用运行产生。这样既能从源码完整重建程序，也不会把卖家 Cookie、密码或业务数据上传到 GitHub。
+
 ## 1. 系统功能
 
 > 桌面版说明：项目现在同时提供 Electron 桌面壳、Windows 安装包/便携包配置，以及独立的 Linux 授权服务。桌面版启动后先验证 Alibaba 账号授权，再进入现有工作台；授权服务地址通过打包环境变量 `KUA_YIPU_AUTH_URL` 配置。Electron 发布包自带 Chromium，不依赖用户电脑安装 Edge 或 Chrome。授权服务部署说明见 `auth-server/README.md`。
@@ -179,7 +188,7 @@ http://127.0.0.1:8787/
 6. 回到系统点击“绑定国际站发布页”。
 7. 建议先用 1 件商品执行“保存草稿”，人工检查资料后再使用批量直接发布。
 
-浏览器登录资料会保存在本地 `.data` 目录，正常情况下不需要每次重新登录。Electron 会在启动发布流程前同步桌面浏览器会话 Cookie；如果 Alibaba 要求重新登录或人工验证，程序会显示内置浏览器窗口，完成后继续任务。
+浏览器登录资料会保存在本地应用数据目录，正常情况下不需要每次重新登录。Electron 会在启动采集或发布流程前同步桌面浏览器会话 Cookie 和 Alibaba 本地存储；如果 Alibaba 要求重新登录或人工验证，程序才会最大化显示内置浏览器窗口，验证完成后继续任务并重新隐藏窗口和任务栏图标。
 
 ## 4. 日常启动
 
@@ -316,6 +325,18 @@ Express 服务负责：
 - 图片下载、格式验证、压缩和临时文件管理。
 - 执行结果和错误记录。
 
+主要后端模块的职责如下：
+
+| 模块 | 职责 |
+| --- | --- |
+| `server/index.js` | API、静态资源、任务编排和应用启动 |
+| `server/collector.js` | 店铺、普通分组、橱窗以及分组商品采集 |
+| `server/publisher.js` | 商品详情补全、资料完整性判定和 My Alibaba 发布自动化 |
+| `server/browser-runtime.js` | Chromium 启动、会话同步、隐藏窗口和验证码切换 |
+| `server/alibaba-source-data.js` | Alibaba 页面结构化数据提取和字段归一 |
+| `server/product-model.js` | 来源快照、工作副本、发布快照和审计记录 |
+| `server/store.js` | `workspace.json` 原子持久化和关联数据删除保护 |
+
 ### 7.3 浏览器自动化
 
 Electron 桌面版使用打包在安装目录 `resources/chromium` 下的 Chromium，通过持久化浏览器配置保存登录状态。采集浏览器与卖家发布浏览器使用不同资料目录，防止来源站点和卖家后台会话互相干扰。源码开发时运行 `npm run prepare:chromium` 将 Chromium 准备到 `vendor/chromium`；如果桌面版找不到内置浏览器，程序会明确提示安装包不完整，而不会偷偷切换到用户的外部浏览器。
@@ -366,16 +387,19 @@ Alibaba 不同类目的发布表单字段、可选值和必填规则并不相同
 
 ## 10. 数据目录与安全
 
-所有运行数据默认保存在项目根目录的 `.data` 中，主要包括：
+源码方式执行 `npm start` 时，运行数据默认保存在项目根目录的 `.data` 中。Electron 源码桌面端和已安装的 EXE 使用 Electron 的 `userData` 目录：Windows 通常为 `%APPDATA%\kua-yipu\`，具体目录由 Electron 根据应用标识决定，不位于安装目录。主要内容包括：
 
 ```text
 .data/
-├─ state.json              # 店铺、分组、商品、任务和设置
+├─ workspace.json          # 店铺、分组、商品、任务和设置
+├─ collector-profile/      # 采集浏览器资料
 ├─ seller-profile/         # My Alibaba 登录会话
 ├─ source-profile/         # 采集浏览器会话
 ├─ publish-images/         # 上架图片临时文件
 └─ publish-videos/         # 上架视频临时文件
 ```
+
+桌面登录窗口还会在同一 `userData` 目录保存 `alibaba-cookies.json`、`alibaba-storage.json` 和由 Windows DPAPI 加密的 `credentials.bin`。这些文件只用于本机保持登录和同步自动化会话，不属于源码，严禁提交到 GitHub。
 
 `.data` 已加入 `.gitignore`，不会提交到 GitHub。这个目录可能包含卖家登录会话和业务数据，**不要上传、不要发给他人、不要提交到代码仓库**。
 
@@ -402,6 +426,8 @@ Alibaba 不同类目的发布表单字段、可选值和必填规则并不相同
 
 ```text
 e_commerce_assistant_2/
+├─ auth-server/                 # 可独立部署的授权服务、数据库结构和管理页
+├─ electron/                    # Electron 主进程、预加载脚本和登录页
 ├─ src/                         # React 前端
 ├─ server/
 │  ├─ index.js                  # Express API 和任务编排
@@ -413,6 +439,7 @@ e_commerce_assistant_2/
 │  ├─ publisher.js              # My Alibaba 发布自动化
 │  └─ store.js                  # 本地 JSON 持久化
 ├─ test/                        # Node.js 自动化测试
+├─ tools/                       # Chromium 准备、构建产物清理和进程诊断脚本
 ├─ .data/                       # 本地业务数据，不进 Git
 ├─ dist/                        # 前端构建产物，不进 Git
 ├─ start.bat                    # 正常启动脚本
@@ -588,6 +615,21 @@ git ls-files .data
 
 第二条命令正常应无输出。GitHub 仓库即使是私密仓库，也不应保存卖家 Cookie、浏览器配置、商品业务数据或 API 密钥。
 
+### 16.1 完整性核对
+
+以下命令用于确认本地提交与远程完整项目分支完全相同：
+
+```powershell
+git fetch origin
+git status --short
+git rev-parse HEAD
+git rev-parse origin/codex/full-project-20260901
+git diff --exit-code HEAD origin/codex/full-project-20260901
+git ls-tree -r --name-only origin/codex/full-project-20260901
+```
+
+两个 `rev-parse` 结果应相同，`git status --short` 和 `git diff` 应无输出。受 Git 跟踪的项目范围应包括 `auth-server`、`electron`、`server`、`src`、`test`、`tools`、启动脚本、`package.json`、`package-lock.json`、Vite 配置和本 README。
+
 ---
 
 ## 17. Electron 桌面端与 EXE 打包
@@ -653,6 +695,31 @@ npm run dist:win
 ```powershell
 npm test
 npm run build
+```
+
+首次打包需要网络下载 Electron 和 Playwright Chromium。如果依赖和 `node_modules/electron/dist` 已经完整，但 Electron Builder 的远程下载临时失败，可使用本地 Electron 分发目录构建 NSIS 安装包：
+
+```powershell
+$env:CSC_IDENTITY_AUTO_DISCOVERY='false'
+npx electron-builder --win nsis --x64 `
+  --config.electronDist=node_modules/electron/dist `
+  --config.directories.output=release-installer `
+  --config.artifactName='kua-yipu-${version}-setup.${ext}' `
+  --publish never
+```
+
+标准安装包输出位置为：
+
+```text
+release-installer/kua-yipu-<版本>-setup.exe
+```
+
+交付前应校验文件大小和 SHA-256，避免把未完成或损坏的文件交给测试人员：
+
+```powershell
+Get-Item .\release-installer\kua-yipu-*-setup.exe |
+  Select-Object FullName, Length, LastWriteTime
+Get-FileHash .\release-installer\kua-yipu-*-setup.exe -Algorithm SHA256
 ```
 
 安装包和便携包只包含代码、依赖和内置 Chromium，不包含 `.data` 下的登录会话、Cookie、商品数据或任务记录；升级程序不会自动迁移或覆盖这些本地数据。
