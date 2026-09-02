@@ -169,6 +169,8 @@ async function fillAndVerify(locator, value, fieldName) {
 }
 
 function isUsableImageUrl(value) {
+  if (/^data:image\/(?:jpeg|jpg|png|webp);base64,/i.test(String(value || ''))) return true;
+  if (/^\/media\/[A-Za-z0-9._-]+$/i.test(String(value || ''))) return true;
   try {
     const url = new URL(String(value || ''));
     return /^https?:$/i.test(url.protocol)
@@ -1905,6 +1907,7 @@ async function switchToLegacyDetails(page) {
 
 export class SellerPublisher {
   constructor(dataDir) {
+    this.dataDir = dataDir;
     this.profileDir = path.join(dataDir, 'seller-profile');
     this.sourceProfileDir = path.join(dataDir, 'source-profile');
     this.imageDir = path.join(dataDir, 'publish-images');
@@ -2710,12 +2713,26 @@ export class SellerPublisher {
     const selectedUrls = distinctAlibabaImageUrls(urls).filter(isUsableImageUrl).slice(0, limit);
     const paths = await Promise.all(selectedUrls.map(async (url, index) => {
       try {
-        const response = await fetch(url, { headers: { referer: product.sourceUrl, 'user-agent': 'Mozilla/5.0' } });
-        if (!response.ok) return '';
-        const contentType = response.headers.get('content-type') || '';
+        let contentType = '';
+        let buffer;
+        if (/^data:image\//i.test(url)) {
+          const match = String(url).match(/^data:(image\/[^;]+);base64,(.+)$/i);
+          if (!match) return '';
+          contentType = match[1];
+          buffer = Buffer.from(match[2], 'base64');
+        } else if (/^\/media\//i.test(url)) {
+          const localPath = path.join(this.dataDir, 'media', path.basename(url));
+          if (!fs.existsSync(localPath)) return '';
+          contentType = `image/${path.extname(localPath).slice(1).toLowerCase() === 'png' ? 'png' : 'jpeg'}`;
+          buffer = fs.readFileSync(localPath);
+        } else {
+          const response = await fetch(url, { headers: { referer: product.sourceUrl, 'user-agent': 'Mozilla/5.0' } });
+          if (!response.ok) return '';
+          contentType = response.headers.get('content-type') || '';
+          buffer = Buffer.from(await response.arrayBuffer());
+        }
         if (!/^image\/(?:jpeg|jpg|png)/i.test(contentType)) return '';
         let extension = contentType.includes('png') ? 'png' : 'jpg';
-        let buffer = Buffer.from(await response.arrayBuffer());
         if (!buffer.length || buffer.length > 5 * 1024 * 1024) return '';
         if (prefix === 'detail') {
           const metadata = await sharp(buffer).metadata();
@@ -3102,10 +3119,13 @@ export class SellerPublisher {
   }
 
   async fillPriceFields(page, product) {
-    const validTiers = (product.priceTiers || [])
+    const fob = product.fobPrice && typeof product.fobPrice === 'object' ? product.fobPrice : {};
+    const sourceTiers = product.priceMode === 'fob-tier' && Array.isArray(fob.tiers) ? fob.tiers : (product.priceTiers || []);
+    const validTiers = sourceTiers
       .filter((tier) => numericValue(tier.price) > 0 && numericValue(tier.minQuantity) > 0)
       .sort((left, right) => numericValue(left.minQuantity) - numericValue(right.minQuantity));
-    const tiers = validTiers.length ? validTiers : [{ price: product.price, minQuantity: product.moq || 1 }];
+    const fallbackPrice = product.priceMode === 'fob-range' && numericValue(fob.minPrice) > 0 ? fob.minPrice : product.price;
+    const tiers = validTiers.length ? validTiers : [{ price: fallbackPrice, minQuantity: product.moq || 1 }];
     let priceInputs = page.locator('[role="input-price"]');
     let quantityInputs = page.locator('[role="input-quantity"]');
 

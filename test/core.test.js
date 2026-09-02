@@ -431,6 +431,17 @@ test('reports incomplete product data before draft or publishing', () => {
   ]);
 });
 
+test('validates FOB range and tier pricing modes', () => {
+  const base = {
+    title: 'Sample', mainImages: ['a', 'b', 'c', 'd'], detailImages: ['d'], attributes: [{ name: 'A', value: 'B' }, { name: 'C', value: 'D' }],
+    origin: 'China', packaging: { weight: 1, length: 1, width: 1, height: 1 }, description: 'Details', price: 10, salesUnit: 'Piece', priceMode: 'fob-range'
+  };
+  assert.equal(auditProduct({ ...base, fobPrice: { minPrice: 8, maxPrice: 12 } }).errors, 0);
+  assert.ok(auditProduct({ ...base, fobPrice: { minPrice: 12, maxPrice: 8 } }).issues.some((item) => item.code === 'trade.fob.range.invalid'));
+  assert.equal(auditProduct({ ...base, priceMode: 'fob-tier', fobPrice: { tiers: [{ minQuantity: 1, price: 9 }, { minQuantity: 100, price: 8 }] } }).errors, 0);
+  assert.ok(auditProduct({ ...base, priceMode: 'fob-tier', fobPrice: { tiers: [{ minQuantity: 100, price: 8 }, { minQuantity: 1, price: 9 }] } }).issues.some((item) => item.code === 'trade.fob.tiers.order'));
+});
+
 test('sanitizes source rich text before international publishing', () => {
   const html = sanitizeSourceDescriptionHtml('<h3>Product</h3><p>Contact us: sales@example.com</p><script>alert(1)</script><img src="https://example.com/a.jpg" onerror="bad()">');
   assert.match(html, /Product/);

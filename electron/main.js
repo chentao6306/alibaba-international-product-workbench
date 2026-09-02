@@ -19,6 +19,8 @@ const registeredAlibabaWindows = new WeakSet();
 let currentSession = null;
 let enterSystemPromise = null;
 let shutdownStarted = false;
+let skipQuitPrompt = false;
+let quitPromptOpen = false;
 const localGate = crypto.randomBytes(32).toString('hex');
 let hasSingleInstanceLock = false;
 
@@ -280,7 +282,28 @@ async function createMainWindow() {
   // The Alibaba and automation windows may be hidden rather than closed.
   // Closing the visible workbench must therefore quit the whole application,
   // otherwise those windows keep Electron alive and block the next installer.
-  window.on('close', () => { if (!shutdownStarted) app.quit(); });
+  window.on('close', (event) => {
+    if (shutdownStarted || skipQuitPrompt) return;
+    event.preventDefault();
+    if (quitPromptOpen) return;
+    quitPromptOpen = true;
+    dialog.showMessageBox(window, {
+      type: 'question',
+      title: '确认退出',
+      message: '确认退出跨易铺吗？',
+      detail: '退出后正在运行的采集或上架任务会停止。已保存的数据会保留。',
+      buttons: ['确认退出', '取消退出'],
+      defaultId: 1,
+      cancelId: 1,
+      checkboxLabel: '本次登录不再提示',
+      checkboxChecked: false
+    }).then(({ response, checkboxChecked }) => {
+      quitPromptOpen = false;
+      if (response !== 0) return;
+      if (checkboxChecked) skipQuitPrompt = true;
+      app.quit();
+    }).catch(() => { quitPromptOpen = false; });
+  });
   // Do not make the Alibaba login button wait for renderer lifecycle events.
   // Electron can delay did-finish-load while the page is already usable; the
   // workbench is shown immediately and the load is supervised in the background.

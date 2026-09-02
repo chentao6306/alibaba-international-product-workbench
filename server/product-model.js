@@ -90,6 +90,11 @@ export function auditProduct(product) {
   if (skusWithoutPublishedPrice.length && hasValidSourceRange) add('sku.price.not-published', 'variants', 'warning', 'skus', `来源仅公开${sourcePriceRange.formattedText || '价格区间'}，未公开逐SKU价格`);
   if (!positive(product.price) && !tiers.some((tier) => positive(tier.price)) && !hasValidSourceRange) add('trade.price.invalid', 'trade', 'error', 'price', '缺少有效销售价格');
   if (!tiers.length && product.priceMode === 'quantity-tier') add('trade.tiers.missing', 'trade', 'error', 'priceTiers', '来源采用数量阶梯定价，但缺少阶梯价格');
+  const fob = product.fobPrice && typeof product.fobPrice === 'object' ? product.fobPrice : {};
+  const fobTiers = list(fob.tiers);
+  if (product.priceMode === 'fob-range' && !(positive(fob.minPrice) && positive(fob.maxPrice) && Number(fob.maxPrice) >= Number(fob.minPrice))) add('trade.fob.range.invalid', 'trade', 'error', 'fobPrice', 'FOB区间价格无效');
+  if (product.priceMode === 'fob-tier' && !fobTiers.some((tier) => positive(tier.price) && positive(tier.minQuantity))) add('trade.fob.tiers.missing', 'trade', 'error', 'fobPrice', 'FOB阶梯价格不能为空');
+  if (fobTiers.some((tier, index) => index > 0 && Number(tier.minQuantity) <= Number(fobTiers[index - 1].minQuantity))) add('trade.fob.tiers.order', 'trade', 'error', 'fobPrice', 'FOB阶梯起订量必须严格递增');
   if (tiers.some((tier, index) => index > 0 && Number(tier.minQuantity) <= Number(tiers[index - 1].minQuantity))) add('trade.tiers.order', 'trade', 'error', 'priceTiers', '阶梯价起订量必须严格递增');
   if (!text(product.salesUnit)) add('trade.unit.missing', 'trade', 'warning', 'salesUnit', '缺少计量单位');
   if (!positive(packaging.weight)) add('logistics.weight.missing', 'logistics', 'error', 'packaging.weight', '缺少包装重量');

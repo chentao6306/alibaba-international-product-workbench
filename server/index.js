@@ -28,6 +28,20 @@ const staticCandidates = [
 const staticDir = staticCandidates.find((candidate) => fs.existsSync(candidate));
 const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(rootDir, '.data');
 fs.mkdirSync(dataDir, { recursive: true });
+const mediaDir = path.join(dataDir, 'media');
+fs.mkdirSync(mediaDir, { recursive: true });
+
+function directoryBytes(directory) {
+  if (!fs.existsSync(directory)) return 0;
+  try { if (fs.statSync(directory).isFile()) return fs.statSync(directory).size; } catch { return 0; }
+  let total = 0;
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const full = path.join(directory, entry.name);
+    if (entry.isDirectory()) total += directoryBytes(full);
+    else { try { total += fs.statSync(full).size; } catch {} }
+  }
+  return total;
+}
 
 const store = new JsonStore(path.join(dataDir, 'workspace.json'));
 const publisher = new SellerPublisher(dataDir);
@@ -170,7 +184,7 @@ store.update((state) => {
   }
 });
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '12mb' }));
 if (process.env.KUA_YIPU_DESKTOP === '1') {
   app.use('/api', (request, response, next) => {
     if (!process.env.KUA_YIPU_LOCAL_GATE || request.headers['x-kua-yipu-gate'] !== process.env.KUA_YIPU_LOCAL_GATE) {
@@ -179,6 +193,7 @@ if (process.env.KUA_YIPU_DESKTOP === '1') {
     next();
   });
 }
+app.use('/media', express.static(mediaDir, { fallthrough: false, maxAge: '1d' }));
 const activePublishJobs = new Set();
 
 function publicState() {
@@ -308,7 +323,7 @@ async function startCollectJob(jobId) {
     return;
   }
   const options = { ...(job.metadata?.options || {}), shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read().jobs.find((item) => item.id === jobId)?.status) };
-  store.patchJob(jobId, { status: 'running', message: `开始读取“${group.name}”，已保存的商品会保留` });
+  store.patchJob(jobId, { status: 'running', message: `开始采集“${group.name}”，已保存的商品会保留` });
   try {
     const products = await collector.collectGroup(group.url, (progress) => {
       if (progress.product) saveCollectedProduct(group.id, progress.product, options);
@@ -474,8 +489,11 @@ app.post('/api/products/batch-update', (request, response, next) => {
         if (patch.services) next.services = { ...(product.services || {}), ...patch.services };
         if (patch.regionalPricing) next.regionalPricing = { ...(product.regionalPricing || {}), ...patch.regionalPricing };
         if (patch.packaging) next.packaging = { ...(product.packaging || {}), ...patch.packaging };
-        if (patch.imageOperation === 'dedupe' || patch.imageOperation === 'copy-detail' || patch.imageOperation === 'clean') {
+        if (patch.imageOperation === 'dedupe' || patch.imageOperation === 'copy-detail' || patch.imageOperation === 'clean' || patch.imageOperation === 'clear-main' || /^delete-main-\d+$/.test(String(patch.imageOperation || ''))) {
           next.mainImages = [...new Set(product.mainImages || product.images || [])].filter(Boolean);
+          if (patch.imageOperation === 'clear-main') next.mainImages = [];
+          const deleteSlot = String(patch.imageOperation || '').match(/^delete-main-(\d+)$/);
+          if (deleteSlot) next.mainImages.splice(Number(deleteSlot[1]) - 1, 1);
           next.images = next.mainImages;
           next.mainImage = next.mainImages[0] || '';
           next.detailImages = patch.imageOperation === 'copy-detail'
@@ -775,6 +793,42 @@ app.use((error, _request, response, _next) => {
   const raw = String(error?.message || '');
   const safeMessage = raw || '操作失败，请稍后重试';
   response.status(error.status || 500).json({ error: safeMessage });
+});
+
+app.get('/api/storage', (_request, response) => {
+  const workspace = path.join(dataDir, 'workspace.json');
+  const images = path.join(dataDir, 'publish-images');
+  const videos = path.join(dataDir, 'publish-videos');
+  response.json({
+    root: dataDir,
+    workspace,
+    media: mediaDir,
+    images,
+    videos,
+    bytes: { root: directoryBytes(dataDir), workspace: directoryBytes(workspace), media: directoryBytes(mediaDir), images: directoryBytes(images), videos: directoryBytes(videos) }
+  });
+});
+
+app.post('/api/media/upload', (request, response, next) => {
+  try {
+    const data = String(request.body?.data || '');
+    const match = data.match(/^data:(image\/(?:jpeg|jpg|png|webp));base64,([A-Za-z0-9+/=]+)$/i);
+    if (!match) return response.status(400).json({ error: '仅支持 JPG、PNG 或 WebP 图片' });
+    const extension = match[1].toLowerCase().includes('png') ? 'png' : match[1].toLowerCase().includes('webp') ? 'webp' : 'jpg';
+    const fileName = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}.${extension}`;
+    fs.writeFileSync(path.join(mediaDir, fileName), Buffer.from(match[2], 'base64'), { mode: 0o600 });
+    response.status(201).json({ url: `/media/${fileName}`, name: String(request.body?.name || fileName) });
+  } catch (error) { next(error); }
+});
+
+app.delete('/api/media', (request, response, next) => {
+  try {
+    const url = String(request.body?.url || '');
+    const fileName = path.basename(url);
+    if (!/^\/media\/[A-Za-z0-9._-]+$/i.test(url) || !fileName) return response.status(400).json({ error: '媒体文件地址无效' });
+    fs.rmSync(path.join(mediaDir, fileName), { force: true });
+    response.json({ ok: true });
+  } catch (error) { next(error); }
 });
 
 if (staticDir && fs.existsSync(path.join(staticDir, 'index.html'))) {

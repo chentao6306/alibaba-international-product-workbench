@@ -8,6 +8,30 @@ import * as XLSX from 'xlsx';
 
 const EMPTY = { shops: [], groups: [], products: [], jobs: [], settings: {}, browser: {}, collectorBrowser: {} };
 
+const CATEGORY_OPTIONS = [
+  { path: 'Consumer Electronics >> Camera, Photo & Accessories >> Drones Accessories', id: '201346401' },
+  { path: 'Consumer Electronics >> Camera, Photo & Accessories >> Camera Accessories', id: '' },
+  { path: 'Consumer Electronics >> Cables & Commonly Used Accessories >> Microphones', id: '' },
+  { path: 'Consumer Electronics >> Mobile Phone & Radio >> Mobile Phones', id: '' },
+  { path: 'Consumer Electronics >> Computer Hardware & Software >> Webcams', id: '' },
+  { path: 'Power Transmission >> Motors >> Motor Controllers', id: '' },
+  { path: 'Business Services >> Certification, Inspection & Credit Management >> Inspection & Quality Control Services', id: '' },
+  { path: 'Other >> Other', id: '' }
+];
+
+function CategorySelect({ path, onChange, includeId = false }) {
+  const value = path || '';
+  const known = CATEGORY_OPTIONS.some((item) => item.path === value);
+  const options = known || !value ? CATEGORY_OPTIONS : [{ path: value, id: '' }, ...CATEGORY_OPTIONS];
+  return <>
+    <select value={known ? value : ''} onChange={(event) => { const option = CATEGORY_OPTIONS.find((item) => item.path === event.target.value); onChange(option || { path: '', id: '' }); }}>
+      <option value="">请选择 Alibaba 类目</option>
+      {options.map((item) => <option key={item.path} value={item.path}>{item.path}{includeId && item.id ? `（ID ${item.id}）` : ''}</option>)}
+    </select>
+    {!known && value && <small className="batch-help">当前类目来自已采集/已绑定数据，可保留或重新选择内置类目。</small>}
+  </>;
+}
+
 function displayError(message, status) {
   const text = String(message || '');
   if (/browserType\.launchPersistentContext|Target page, context or browser has been closed|user data directory is already in use|browser has been closed/i.test(text)) {
@@ -185,7 +209,7 @@ function SourceView({ state, refresh, notify, onMenu }) {
     </section>
     {collectJobs.map((job) => <div className="job-banner" key={job.id}><LoaderCircle className={job.status === 'paused' ? '' : 'spin'} size={18} /><div><strong>{job.metadata?.groupName ? `${job.metadata.groupName}：` : ''}{job.message}</strong><div className="progress"><i style={{ width: job.total ? `${job.progress / job.total * 100}%` : '32%' }} /></div></div><div className="job-banner-actions">{['queued', 'running'].includes(job.status) && <button className="icon-button" onClick={() => api(`/api/jobs/${job.id}/pause`, { method: 'POST' }).then(refresh).catch((error) => notify(error.message, 'error'))} title="暂停采集"><Pause size={16} /></button>}{job.status === 'pause_requested' && <button className="icon-button" disabled title="正在暂停"><LoaderCircle className="spin" size={16} /></button>}{job.status === 'paused' && <><button className="icon-button" onClick={() => controlCollect(job, 'resume')} title="继续采集"><Play size={16} /></button><button className="icon-button danger" onClick={() => controlCollect(job, 'cancel')} title="取消任务并保留已采集商品"><X size={16} /></button></>}</div></div>)}
     <section className="panel shop-list">
-      <div className="section-title"><div><h2>店铺与分组</h2><p>{state.groups.length ? '展开店铺后选择分组读取商品' : '读取店铺后，分组将显示在这里'}</p></div><div className="section-actions">{selectedGroups.length > 0 && <><button className="secondary-button" onClick={() => collectMany(state.groups.filter((group) => selectedGroups.includes(group.id)))}><RefreshCw size={15} />读取已选分组 {selectedGroups.length}</button><button className="secondary-button danger-button" onClick={deleteSelectedGroups}><Trash2 size={15} />删除分组 {selectedGroups.length}</button></>}{state.groups.length > 0 && <button className="secondary-button" onClick={() => collectMany(state.groups)}><RefreshCw size={15} />读取全部分组</button>}{selectedShops.length > 0 && <button className="secondary-button danger-button" onClick={deleteSelectedShops}><Trash2 size={15} />删除店铺 {selectedShops.length}</button>}</div></div>
+      <div className="section-title"><div><h2>店铺与分组</h2><p>{state.groups.length ? '展开店铺后选择分组采集商品' : '读取店铺后，分组将显示在这里'}</p></div><div className="section-actions">{selectedGroups.length > 0 && <><button className="secondary-button" onClick={() => collectMany(state.groups.filter((group) => selectedGroups.includes(group.id)))}><RefreshCw size={15} />采集已选分组 {selectedGroups.length}</button><button className="secondary-button danger-button" onClick={deleteSelectedGroups}><Trash2 size={15} />删除分组 {selectedGroups.length}</button></>}{state.groups.length > 0 && <button className="secondary-button" onClick={() => collectMany(state.groups)}><RefreshCw size={15} />采集全部分组</button>}{selectedShops.length > 0 && <button className="secondary-button danger-button" onClick={deleteSelectedShops}><Trash2 size={15} />删除店铺 {selectedShops.length}</button>}</div></div>
       {!state.shops.length ? <EmptyState icon={Store} title="还没有同行店铺" text="输入店铺链接开始读取分组" /> : visibleShops.map((shop) => {
         const groups = state.groups.filter((group) => group.shopId === shop.id);
         const expanded = Boolean(expandedShops[shop.id]);
@@ -197,7 +221,7 @@ function SourceView({ state, refresh, notify, onMenu }) {
           {expanded && <div className="group-list">{visibleGroups.map((group) => <div className="group-row" key={group.id}>
             <input type="checkbox" checked={selectedGroups.includes(group.id)} onChange={(event) => toggleSelected(setSelectedGroups, group.id, event.target.checked)} aria-label={`选择分组 ${group.name}`} />{group.externalId === 'featured' ? <Store className="featured-group-icon" size={18} /> : <FolderTree size={18} />}<div><strong>{group.name}</strong><small>{group.productCount != null ? `店铺显示 ${group.productCount} 件` : group.collectedCount ? `已读取 ${group.collectedCount} 件` : '等待读取'}</small></div>
             <span className={`group-state ${group.status}`}>{group.status === 'collecting' ? '读取中' : group.status === 'done' ? '已完成' : group.status === 'failed' ? '失败' : '未读取'}</span>
-            <button className="secondary-button" disabled={group.status === 'collecting'} onClick={() => collect(group)}>{group.status === 'collecting' ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{group.collectedCount ? '重新读取' : '读取商品'}</button>
+            <button className="secondary-button" disabled={group.status === 'collecting'} onClick={() => collect(group)}>{group.status === 'collecting' ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{group.collectedCount ? '重新采集' : '采集商品'}</button>
             <button className="icon-button danger" disabled={group.status === 'collecting'} onClick={() => deleteGroup(group)} title="删除分组"><Trash2 size={16} /></button>
           </div>)}{groupPageCount > 1 && <Pagination page={groupPage} pageCount={groupPageCount} onPage={(next) => setGroupPages((current) => ({ ...current, [shop.id]: next }))} compact />}</div>}
         </div>;
@@ -343,17 +367,20 @@ function ProductsView({ state, refresh, notify, onMenu }) {
       </table></div>}
       {products.length > pageSize && <Pagination page={page} pageCount={pageCount} onPage={setPage} label={`第 ${page}/${pageCount} 页 · 共 ${products.length} 件`} />}
     </section>
-    {editing && <ProductEditor product={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); refresh(); notify('商品修改已保存'); }} notify={notify} />}
-    {batchEditing && <BatchEditor products={selectedProducts} onClose={() => setBatchEditing(false)} onSaved={() => { setBatchEditing(false); refresh(); notify('批量修改已应用'); }} notify={notify} />}
+    {editing && <ProductEditor product={editing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); await refresh(); notify('商品修改已保存'); }} notify={notify} />}
+    {batchEditing && <BatchEditor products={selectedProducts} onClose={() => setBatchEditing(false)} onSaved={async () => { setBatchEditing(false); await refresh(); notify('批量修改已应用'); }} notify={notify} />}
   </>;
 }
 
 function BatchEditor({ products, onClose, onSaved, notify }) {
   const [tab, setTab] = useState('basic');
-  const [form, setForm] = useState({ titlePrefix: '', titleSuffix: '', subtitle: '', keywords: '', origin: '', brand: '', productType: '', category: '', categoryId: '', pricePercent: '0', priceFixed: '0', stock: '', moq: '', deliveryDays: '', weight: '', length: '', width: '', height: '', description: '', attrName: '', attrValue: '', attrMode: 'upsert', specName: '', specOption: '', specMode: 'upsert', skuPrice: '', skuStock: '', country: 'United States', countryPrice: '', imageAction: 'dedupe', skuRows: null });
+  const [locale, setLocale] = useState('zh');
+  const [form, setForm] = useState({ titlePrefix: '', titleSuffix: '', subtitle: '', keywords: '', origin: '', brand: '', productType: '', category: '', categoryId: '', pricePercent: '0', priceFixed: '0', stock: '', moq: '', deliveryDays: '', weight: '', length: '', width: '', height: '', description: '', attrName: '', attrValue: '', attrMode: 'upsert', specName: '', specOption: '', specMode: 'upsert', skuPrice: '', skuStock: '', fobMinPrice: '', fobMaxPrice: '', country: 'United States', countryPrice: '', imageAction: 'dedupe', skuRows: null });
   const tabs = [['basic', '基础信息'], ['category', '产品类目'], ['trade', '交易信息'], ['logistics', '物流信息'], ['description', '商品描述'], ['attributes', '商品属性'], ['custom', '自定义属性'], ['specs', '产品规格'], ['images', '产品图片'], ['detail', '详情描述'], ['service', '证书与服务'], ['regional', '国家/地区定价']];
+  const labels = { '标题前缀': 'Title prefix', '标题后缀': 'Title suffix', '统一副标题': 'Subtitle', '关键词（逗号或换行分隔）': 'Keywords (comma or line separated)', '产地': 'Origin', '品牌': 'Brand', '产品类型': 'Product type', '库存': 'Stock', '起订量': 'MOQ', '交期（天）': 'Lead time (days)', '毛重（kg）': 'Gross weight (kg)', '包装长（cm）': 'Package length (cm)', '包装宽（cm）': 'Package width (cm)', '包装高（cm）': 'Package height (cm)', '该地区价格': 'Regional price' };
+  const tabLabels = { basic: ['基础信息', 'Basic'], category: ['产品类目', 'Category'], trade: ['交易信息', 'Trade'], logistics: ['物流信息', 'Logistics'], description: ['商品描述', 'Description'], attributes: ['商品属性', 'Attributes'], custom: ['自定义属性', 'Custom'], specs: ['产品规格', 'Specifications'], images: ['产品图片', 'Images'], detail: ['详情描述', 'Details'], service: ['证书与服务', 'Services'], regional: ['国家/地区定价', 'Regional pricing'] };
   const update = (key) => (event) => setForm((value) => ({ ...value, [key]: event.target.value }));
-  function field(label, key, type = 'text', textarea = false) { return <label className="batch-field"><span>{label}</span>{textarea ? <textarea rows="4" value={form[key]} onChange={update(key)} /> : <input type={type} value={form[key]} onChange={update(key)} />}</label>; }
+  function field(label, key, type = 'text', textarea = false) { return <label className="batch-field"><span>{locale === 'en' ? (labels[label] || label) : label}</span>{textarea ? <textarea rows="4" value={form[key]} onChange={update(key)} /> : <input type={type} value={form[key]} onChange={update(key)} />}</label>; }
   function makePatch() {
     const patch = {};
     if (tab === 'basic') {
@@ -368,10 +395,12 @@ function BatchEditor({ products, onClose, onSaved, notify }) {
       if (form.categoryId) patch.categoryId = form.categoryId.trim();
     } else if (tab === 'trade') {
       patch.priceTransform = { percent: Number(form.pricePercent || 0), fixed: Number(form.priceFixed || 0) };
+      if (form.priceMode) patch.priceMode = form.priceMode;
       if (form.stock !== '') patch.stock = Number(form.stock);
       if (form.moq !== '') patch.moq = Number(form.moq);
       if (form.deliveryDays !== '') patch.deliveryTime = [['1', form.deliveryDays], ['999999', form.deliveryDays]];
       if (form.skuPrice !== '' || form.skuStock !== '') patch.skuTransform = { price: form.skuPrice === '' ? null : Number(form.skuPrice), stock: form.skuStock === '' ? null : Number(form.skuStock) };
+      if (form.fobMinPrice !== '' || form.fobMaxPrice !== '') patch.fobPrice = { minPrice: Number(form.fobMinPrice || 0), maxPrice: Number(form.fobMaxPrice || 0), currencySymbol: '$' };
       if (Array.isArray(form.skuRows) && form.skuRows.length) patch.skuRows = form.skuRows;
     } else if (tab === 'logistics') patch.packaging = { weight: form.weight === '' ? null : Number(form.weight), length: form.length === '' ? null : Number(form.length), width: form.width === '' ? null : Number(form.width), height: form.height === '' ? null : Number(form.height) };
     else if (tab === 'description' || tab === 'detail') patch.descriptionPrefix = form.description;
@@ -437,17 +466,17 @@ function BatchEditor({ products, onClose, onSaved, notify }) {
     reader.readAsArrayBuffer(file);
   }
   return <div className="drawer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><aside className="drawer batch-drawer">
-    <div className="drawer-header"><div><span>批量修改</span><h2>已选择 {products.length} 件商品</h2></div><button className="icon-button" onClick={onClose} title="关闭"><X size={20} /></button></div>
-    <div className="batch-tabs">{tabs.map(([value, label]) => <button key={value} className={tab === value ? 'active' : ''} onClick={() => setTab(value)}>{label}</button>)}</div>
+    <div className="drawer-header"><div><span>{locale === 'en' ? 'Batch edit' : '批量修改'}</span><h2>{locale === 'en' ? `${products.length} products selected` : `已选择 ${products.length} 件商品`}</h2></div><div className="drawer-header-actions"><div className="locale-switch"><button type="button" className={locale === 'zh' ? 'active' : ''} onClick={() => setLocale('zh')}>中文</button><button type="button" className={locale === 'en' ? 'active' : ''} onClick={() => setLocale('en')}>English</button></div><button className="icon-button" onClick={onClose} title="关闭"><X size={20} /></button></div></div>
+    <div className="batch-tabs">{tabs.map(([value]) => <button key={value} className={tab === value ? 'active' : ''} onClick={() => setTab(value)}>{tabLabels[value]?.[locale === 'en' ? 1 : 0] || value}</button>)}</div>
     <div className="batch-body">
       {tab === 'basic' && <>{field('标题前缀', 'titlePrefix')}{field('标题后缀', 'titleSuffix')}{field('统一副标题', 'subtitle')}{field('关键词（逗号或换行分隔）', 'keywords', 'text', true)}{field('产地', 'origin')}{field('品牌', 'brand')}{field('产品类型', 'productType')}</>}
-      {tab === 'category' && <><label className="batch-field"><span>新产品类目（使用 &gt;&gt; 分隔）</span><input value={form.category} onChange={update('category')} placeholder="Consumer Electronics >> Computer Hardware & Software >> Webcams" /></label>{field('国际站类目 ID', 'categoryId')}<div className="category-presets">{['Consumer Electronics >> Computer Hardware & Software >> Webcams', 'Consumer Electronics >> Mobile Phone & Radio >> Rugged phone', 'Power Transmission >> Motors >> Motor Controllers', 'Business Services >> Certification, Inspection & Credit Management >> Inspection & Quality Control Services'].map((category) => <button type="button" key={category} onClick={() => setForm((v) => ({ ...v, category }))}>{category}</button>)}</div></>}
-      {tab === 'trade' && <>{field('价格调整比例（%）', 'pricePercent', 'number')}{field('统一加减金额', 'priceFixed', 'number')}{field('统一库存', 'stock', 'number')}{field('统一起订量', 'moq', 'number')}{field('统一交期（天）', 'deliveryDays', 'number')}{field('SKU统一价格', 'skuPrice', 'number')}{field('SKU统一库存', 'skuStock', 'number')}<div className="batch-actions"><button type="button" className="secondary-button" onClick={exportSku}>导出 SKU Excel</button><label className="file-button secondary-button">导入 SKU Excel<input type="file" accept=".xlsx,.xls,.csv,.txt" onChange={importSku} /></label></div></>}
+      {tab === 'category' && <><label className="batch-field"><span>选择新产品类目</span><CategorySelect path={form.category} includeId onChange={(option) => setForm((v) => ({ ...v, category: option.path, categoryId: option.id || v.categoryId }))} /></label><label className="batch-field"><span>类目 ID（由选择或发布页绑定生成）</span><input value={form.categoryId} readOnly placeholder="选择类目后自动填充" /></label></>}
+      {tab === 'trade' && <><label className="batch-field"><span>定价模式</span><select value={form.priceMode || ''} onChange={update('priceMode')}><option value="">保持原模式</option><option value="fob-range">FOB区间价格</option><option value="fob-tier">FOB阶梯价格</option><option value="quantity-tier">数量阶梯价格</option><option value="sku">SKU定价</option></select></label>{field('价格调整比例（%）', 'pricePercent', 'number')}{field('统一加减金额', 'priceFixed', 'number')}{field('统一库存', 'stock', 'number')}{field('统一起订量', 'moq', 'number')}{field('统一交期（天）', 'deliveryDays', 'number')}<div className="form-grid">{field('FOB最低价', 'fobMinPrice', 'number')}{field('FOB最高价', 'fobMaxPrice', 'number')}</div>{field('SKU统一价格', 'skuPrice', 'number')}{field('SKU统一库存', 'skuStock', 'number')}<div className="batch-actions"><button type="button" className="secondary-button" onClick={exportSku}>导出 SKU Excel</button><label className="file-button secondary-button">导入 SKU Excel<input type="file" accept=".xlsx,.xls,.csv,.txt" onChange={importSku} /></label></div></>}
       {tab === 'logistics' && <>{field('毛重（kg）', 'weight', 'number')}{field('包装长（cm）', 'length', 'number')}{field('包装宽（cm）', 'width', 'number')}{field('包装高（cm）', 'height', 'number')}</>}
       {(tab === 'description' || tab === 'detail' || tab === 'service') && field('批量追加内容', 'description', 'text', true)}
       {(tab === 'attributes' || tab === 'custom') && <><label className="batch-field"><span>修改方式</span><select value={form.attrMode} onChange={update('attrMode')}><option value="upsert">更新同名属性，不存在则新增</option><option value="append">追加属性</option><option value="replace">清空后只保留本属性</option></select></label>{field('属性名称', 'attrName')}{field('属性值', 'attrValue')}</>}
       {tab === 'specs' && <><label className="batch-field"><span>修改方式</span><select value={form.specMode} onChange={update('specMode')}><option value="upsert">更新同名规格，不存在则新增</option><option value="append">追加规格</option><option value="replace">清空后只保留本规格</option></select></label>{field('规格名称', 'specName')}{field('规格选项（逗号分隔）', 'specOption')}</>}
-      {tab === 'images' && <><p className="batch-help">会对所有已选商品的主图和详情图执行批量处理，并保留原始图片地址。</p><button className="secondary-button" onClick={() => applyImage('dedupe')}>图片去重并排序</button><button className="secondary-button" onClick={() => applyImage('copy-detail')}>主图复制为详情图</button><button className="secondary-button" onClick={() => applyImage('clean')}>清理空图片</button></>}
+      {tab === 'images' && <><p className="batch-help">会对所有已选商品的主图和详情图执行批量处理，并保留原始来源快照。</p><button className="secondary-button" onClick={() => applyImage('dedupe')}>图片去重并排序</button><button className="secondary-button" onClick={() => applyImage('copy-detail')}>主图复制为详情图</button><button className="secondary-button" onClick={() => applyImage('clean')}>清理空图片</button><button className="secondary-button danger-button" onClick={() => applyImage('clear-main')}>清空全部主图</button><div className="batch-slot-actions"><span>批量删除指定主图：</span>{[1,2,3,4,5,6].map((slot) => <button key={slot} className="secondary-button danger-button" onClick={() => applyImage(`delete-main-${slot}`)}>主图 {slot}</button>)}</div></>}
       {tab === 'regional' && <>{field('国家/地区', 'country')}{field('该地区价格', 'countryPrice', 'number')}</>}
     </div>
     <div className="batch-preview"><div className="batch-preview-title"><strong>修改预览</strong><span>先确认每个商品的当前值和修改后值，再点击保存</span></div><div className="batch-preview-table"><div className="batch-preview-head"><span>商品名称</span><span>旧值-修改前</span><span>新值-修改后</span></div>{products.map((product) => { const row = previewFor(product); return <div className="batch-preview-row" key={product.id}><strong title={product.title}>{product.title || '未命名商品'}</strong><span title={row.current}>{row.current}</span><span className={row.next.includes('等待') || row.next.includes('请选择') ? 'pending' : ''} title={row.next}>{row.next}</span></div>; })}</div></div>
@@ -457,6 +486,7 @@ function BatchEditor({ products, onClose, onSaved, notify }) {
 
 function ProductEditor({ product, onClose, onSaved, notify }) {
   const initialMainImages = product.mainImages || product.images || (product.mainImage ? [product.mainImage] : []);
+  const initialFob = product.fobPrice && typeof product.fobPrice === 'object' ? product.fobPrice : {};
   const initialMoq = String(product.moq || '').match(/\d[\d,]*/)?.[0]?.replace(/,/g, '')
     || product.priceTiers?.[0]?.minQuantity || 1;
   const [form, setForm] = useState({
@@ -473,20 +503,52 @@ function ProductEditor({ product, onClose, onSaved, notify }) {
     salesUnit: product.salesUnit || 'Piece', paymentMethod: product.paymentMethod || '', priceMode: product.priceMode || 'quantity-tier',
     videoUrl: product.videoUrl || '', deliveryDays: String(product.deliveryTime?.[1]?.[1] || '').match(/\d+/)?.[0] || '7',
     freightTemplate: product.freightTemplate || '', services: product.services || {}, certificates: (product.certificates || []).map((item) => ({ ...item })),
-    regionalPricing: product.regionalPricing || {}
+    regionalPricing: product.regionalPricing || {},
+    fobMinPrice: initialFob.minPrice ?? '', fobMaxPrice: initialFob.maxPrice ?? '', fobTiers: (initialFob.tiers || []).map((tier) => ({ ...tier }))
   });
   const [saving, setSaving] = useState(false);
   const [tab, setTab] = useState('basic');
   const update = (key) => (event) => setForm((value) => ({ ...value, [key]: event.target.value }));
   const updateArray = (key, index, value) => setForm((current) => ({ ...current, [key]: current[key].map((item, itemIndex) => itemIndex === index ? value : item) }));
   const removeArray = (key, index) => setForm((current) => ({ ...current, [key]: current[key].filter((_, itemIndex) => itemIndex !== index) }));
+  function importLocalImages(event) {
+    const files = [...(event.target.files || [])].filter((file) => /^image\//i.test(file.type));
+    if (!files.length) return;
+    Promise.all(files.map((file) => new Promise((resolve) => { const reader = new FileReader(); reader.onload = async () => { try { const result = await api('/api/media/upload', { method: 'POST', body: JSON.stringify({ name: file.name, data: String(reader.result || '') }) }); resolve(result.url || ''); } catch (error) { notify(error.message, 'error'); resolve(''); } }; reader.onerror = () => resolve(''); reader.readAsDataURL(file); }))).then((urls) => setForm((value) => ({ ...value, mainImages: [...value.mainImages, ...urls.filter(Boolean)].slice(0, 6) })));
+    event.target.value = '';
+  }
+  function restoreSourceImages() {
+    const sourceImages = product.source?.snapshot?.mainImages || [];
+    if (!sourceImages.length) return notify('来源快照没有可还原的主图', 'error');
+    setForm((value) => ({ ...value, mainImages: sourceImages.slice(0, 6) }));
+    notify('已从来源图片库还原主图');
+  }
+  function addImageBankUrls() {
+    const value = window.prompt('请输入图片银行中的图片地址，可一行一个：');
+    if (!value) return;
+    const urls = value.split(/[\n,，]+/).map((item) => item.trim()).filter((item) => /^https?:\/\//i.test(item));
+    if (!urls.length) return notify('没有识别到有效图片地址', 'error');
+    setForm((current) => ({ ...current, mainImages: [...current.mainImages, ...urls].slice(0, 6) }));
+    notify(`已添加 ${Math.min(urls.length, Math.max(0, 6 - form.mainImages.length))} 张图片银行图片`);
+  }
+  async function watermarkImages(remove = false) {
+    const urls = remove ? (product.source?.snapshot?.mainImages || []) : form.mainImages;
+    if (!urls.length) return notify('没有可处理的主图', 'error');
+    try {
+      const result = await Promise.all(urls.map((url) => new Promise((resolve, reject) => { const image = new Image(); image.crossOrigin = 'anonymous'; image.onload = () => { const canvas = document.createElement('canvas'); canvas.width = image.naturalWidth || 1200; canvas.height = image.naturalHeight || 800; const context = canvas.getContext('2d'); context.drawImage(image, 0, 0, canvas.width, canvas.height); if (!remove) { context.fillStyle = 'rgba(255,255,255,.72)'; context.fillRect(18, canvas.height - 54, 270, 36); context.fillStyle = '#f06423'; context.font = 'bold 22px Microsoft YaHei'; context.fillText('跨易铺', 30, canvas.height - 28); } resolve(canvas.toDataURL('image/jpeg', .9)); }; image.onerror = () => reject(new Error('图片跨域或格式不支持')); image.src = url; })));
+      setForm((value) => ({ ...value, mainImages: result.slice(0, 6) }));
+      notify(remove ? '已从来源图片恢复（去除本地水印）' : '主图水印已添加');
+    } catch (error) { notify(`图片处理失败：${error.message}`, 'error'); }
+  }
   async function save(event) {
     event.preventDefault(); setSaving(true);
     try {
       const mainImages = form.mainImages.map((url) => url.trim()).filter(Boolean);
+      const fobPrice = { minPrice: Number(form.fobMinPrice || 0), maxPrice: Number(form.fobMaxPrice || 0), currencySymbol: product.currencySymbol || '$', tiers: form.fobTiers.map((tier) => ({ ...tier, minQuantity: Number(tier.minQuantity || 0), maxQuantity: tier.maxQuantity ? Number(tier.maxQuantity) : null, price: Number(tier.price || 0) })) };
       await api(`/api/products/${product.id}`, { method: 'PATCH', body: JSON.stringify({
         ...form, price: Number(form.price), stock: Number(form.stock), moq: Number(form.moq), mainImages,
         images: mainImages, mainImage: mainImages[0] || '', detailImages: form.detailImages.map((url) => url.trim()).filter(Boolean),
+        fobPrice,
         deliveryTime: [['1', form.deliveryDays], ['999999', form.deliveryDays]]
       }) }); onSaved();
     } catch (error) { notify(error.message, 'error'); setSaving(false); }
@@ -501,14 +563,15 @@ function ProductEditor({ product, onClose, onSaved, notify }) {
       <label><span>商品标题</span><textarea rows="3" value={form.title} onChange={update('title')} maxLength="120" required /><small>{form.title.length}/120</small></label>
       <label><span>副标题</span><input value={form.subtitle} onChange={update('subtitle')} maxLength="128" /></label>
       <label><span>商品关键词（逗号分隔）</span><textarea rows="3" value={form.keywords.join(', ')} onChange={(event) => setForm((value) => ({ ...value, keywords: event.target.value.split(/[,，\n]/).map((item) => item.trim()).filter(Boolean) }))} /></label>
-      <div className="form-grid"><label><span>目标类目路径</span><input value={form.categoryPath.join(' >> ')} onChange={(event) => setForm((value) => ({ ...value, categoryPath: event.target.value.split(/\s*>>\s*/).filter(Boolean) }))} /></label><label><span>目标类目 ID</span><input value={form.categoryId} onChange={update('categoryId')} /></label></div>
+      <div className="form-grid"><label><span>目标类目（请选择）</span><CategorySelect path={form.categoryPath.join(' >> ')} includeId onChange={(option) => setForm((value) => ({ ...value, categoryPath: option.path ? option.path.split(' >> ') : [], categoryId: option.id || value.categoryId }))} /></label><label><span>目标类目 ID</span><input value={form.categoryId} readOnly placeholder="由类目选择自动填充" /></label></div>
       <div className="form-grid"><label><span>基准销售价</span><div className="prefix-input"><b>{product.currencySymbol || '$'}</b><input type="number" min="0" step="0.01" value={form.price} onChange={update('price')} required /></div></label><label><span>默认库存</span><input type="number" min="0" value={form.stock} onChange={update('stock')} required /></label><label><span>起订量</span><input type="number" min="1" value={form.moq} onChange={update('moq')} required /></label><label><span>交期（天）</span><input type="number" min="1" value={form.deliveryDays} onChange={update('deliveryDays')} /></label></div>
       <label><span>商品详情</span><textarea rows="9" value={form.description} onChange={update('description')} placeholder="商品卖点、规格说明与采购信息" /></label>
       </div>
       <div className={`editor-tab-pane ${tab === 'media' ? '' : 'hidden'}`}>
       <h3 className="edit-section-title">主图与详情图</h3>
-      <div className="media-grid">{form.mainImages.map((url, index) => <div className="media-row" key={`main-${index}`}><div className="mini-preview">{url ? <img src={url} alt="" /> : <Boxes size={18} />}</div><input value={url} onChange={(event) => updateArray('mainImages', index, event.target.value)} aria-label={`主图 ${index + 1}`} /><button type="button" className="icon-button danger" onClick={() => removeArray('mainImages', index)} title="删除主图"><X size={15} /></button></div>)}</div>
-      <button type="button" className="secondary-button add-row-button" onClick={() => setForm((value) => ({ ...value, mainImages: [...value.mainImages, ''] }))}><Plus size={15} />添加主图地址</button>
+      <div className="image-toolbar"><label className="file-button secondary-button"><Plus size={15} />上传本地图片<input type="file" accept="image/*" multiple onChange={importLocalImages} /></label><button type="button" className="secondary-button" onClick={addImageBankUrls}>添加图片银行地址</button><button type="button" className="secondary-button" onClick={restoreSourceImages}>从来源图片库还原</button><button type="button" className="secondary-button" onClick={() => watermarkImages(false)}>添加水印</button><button type="button" className="secondary-button" onClick={() => watermarkImages(true)}>去除本工具水印</button><button type="button" className="secondary-button danger-button" onClick={() => setForm((value) => ({ ...value, mainImages: [] }))}>清空主图</button></div>
+      <div className="media-grid">{form.mainImages.map((url, index) => <div className="media-row" key={`main-${index}`}><strong className="media-index">主图 {index + 1}</strong><div className="mini-preview">{url ? <img src={url} alt="" /> : <Boxes size={18} />}</div><input value={url} onChange={(event) => updateArray('mainImages', index, event.target.value)} aria-label={`主图 ${index + 1}`} /><button type="button" className="icon-button danger" onClick={() => removeArray('mainImages', index)} title="删除主图"><X size={15} /></button></div>)}</div>
+      <button type="button" className="secondary-button add-row-button" disabled={form.mainImages.length >= 6} onClick={() => setForm((value) => ({ ...value, mainImages: [...value.mainImages, ''] }))}><Plus size={15} />添加本地/图片银行地址</button>
       <div className="media-grid">{form.detailImages.map((url, index) => <div className="media-row" key={`detail-${index}`}><div className="mini-preview">{url ? <img src={url} alt="" /> : <Boxes size={18} />}</div><input value={url} onChange={(event) => updateArray('detailImages', index, event.target.value)} aria-label={`详情图 ${index + 1}`} /><button type="button" className="icon-button danger" onClick={() => removeArray('detailImages', index)} title="删除详情图"><X size={15} /></button></div>)}</div>
       <button type="button" className="secondary-button add-row-button" onClick={() => setForm((value) => ({ ...value, detailImages: [...value.detailImages, ''] }))}><Plus size={15} />添加详情图地址</button>
       <label><span>商品视频地址</span><input value={form.videoUrl} onChange={update('videoUrl')} /></label>
@@ -535,7 +598,9 @@ function ProductEditor({ product, onClose, onSaved, notify }) {
       <div className="repeat-list">{form.priceTiers.map((tier, index) => <div className="tier-row" key={`tier-${index}`}><input type="number" min="1" value={tier.minQuantity || ''} onChange={(event) => updateArray('priceTiers', index, { ...tier, minQuantity: Number(event.target.value) })} /><input type="number" min="1" value={tier.maxQuantity ?? ''} placeholder="不限" onChange={(event) => updateArray('priceTiers', index, { ...tier, maxQuantity: event.target.value ? Number(event.target.value) : null })} /><input type="number" min="0" step="0.01" value={tier.price || ''} onChange={(event) => updateArray('priceTiers', index, { ...tier, price: event.target.value, currencySymbol: product.currencySymbol || '$' })} /><button type="button" className="icon-button danger" onClick={() => removeArray('priceTiers', index)} title="删除价格档"><X size={15} /></button></div>)}</div>
       <button type="button" className="secondary-button add-row-button" onClick={() => setForm((value) => ({ ...value, priceTiers: [...value.priceTiers, { minQuantity: 1, maxQuantity: null, price: value.price, currencySymbol: product.currencySymbol || '$' }] }))}><Plus size={15} />添加价格档</button>
       <div className="form-grid"><label><span>销售单位</span><input value={form.salesUnit || ''} onChange={update('salesUnit')} placeholder="Piece" /></label><label><span>付款方式</span><input value={form.paymentMethod || ''} onChange={update('paymentMethod')} /></label></div>
-      <label><span>定价模式</span><select value={form.priceMode} onChange={update('priceMode')}><option value="quantity-tier">按数量阶梯价</option><option value="sku">按SKU定价</option><option value="fob-range">FOB区间价</option><option value="source-range">来源公开区间价</option></select></label>
+      <label><span>定价模式</span><select value={form.priceMode} onChange={update('priceMode')}><option value="quantity-tier">按数量阶梯价</option><option value="sku">按SKU定价</option><option value="fob-range">FOB区间价格</option><option value="fob-tier">FOB阶梯价格</option><option value="source-range">来源公开区间价</option></select></label>
+      {form.priceMode === 'fob-range' && <div className="form-grid"><label><span>FOB最低价</span><input type="number" min="0" step="0.01" value={form.fobMinPrice} onChange={update('fobMinPrice')} /></label><label><span>FOB最高价</span><input type="number" min="0" step="0.01" value={form.fobMaxPrice} onChange={update('fobMaxPrice')} /></label></div>}
+      {form.priceMode === 'fob-tier' && <><h3 className="edit-section-title">FOB阶梯价格</h3><div className="tier-header"><span>起订量</span><span>结束量</span><span>FOB单价 {product.currencySymbol || '$'}</span><i /></div><div className="repeat-list">{form.fobTiers.map((tier, index) => <div className="tier-row" key={`fob-${index}`}><input type="number" min="1" value={tier.minQuantity || ''} onChange={(event) => updateArray('fobTiers', index, { ...tier, minQuantity: Number(event.target.value) })} /><input type="number" min="1" value={tier.maxQuantity ?? ''} placeholder="不限" onChange={(event) => updateArray('fobTiers', index, { ...tier, maxQuantity: event.target.value ? Number(event.target.value) : null })} /><input type="number" min="0" step="0.01" value={tier.price || ''} onChange={(event) => updateArray('fobTiers', index, { ...tier, price: event.target.value })} /><button type="button" className="icon-button danger" onClick={() => removeArray('fobTiers', index)} title="删除FOB价格档"><X size={15} /></button></div>)}</div><button type="button" className="secondary-button add-row-button" onClick={() => setForm((value) => ({ ...value, fobTiers: [...value.fobTiers, { minQuantity: 1, maxQuantity: null, price: value.price }] }))}><Plus size={15} />添加FOB价格档</button></>}
       </div>
       <div className={`editor-tab-pane ${tab === 'logistics' ? '' : 'hidden'}`}>
       <h3 className="edit-section-title">产品与包装</h3>
@@ -626,12 +691,14 @@ function JobHistory({ jobs, refresh, notify }) {
 
 function SettingsView({ state, refresh, notify, onMenu }) {
   const [form, setForm] = useState({ defaultStock: state.settings.defaultStock ?? 100, priceMarkup: state.settings.priceMarkup ?? 0 });
+  const [storage, setStorage] = useState(null);
+  useEffect(() => { api('/api/storage').then(setStorage).catch(() => {}); }, []);
   async function save(event) {
     event.preventDefault();
     try { await api('/api/settings', { method: 'PATCH', body: JSON.stringify({ defaultStock: Number(form.defaultStock), priceMarkup: Number(form.priceMarkup) }) }); await refresh(); notify('默认规则已保存'); }
     catch (error) { notify(error.message, 'error'); }
   }
-  return <><Header title="设置" subtitle="管理新采集商品的默认规则" onMenu={onMenu} /><section className="panel settings-panel"><div className="section-title"><div><h2>采集与定价</h2><p>仅应用于之后读取的新商品</p></div></div><form onSubmit={save} className="settings-form"><label><span>默认库存</span><input type="number" min="0" value={form.defaultStock} onChange={(event) => setForm({ ...form, defaultStock: event.target.value })} /></label><label><span>售价加价比例</span><div className="suffix-input"><input type="number" min="-99" step="0.1" value={form.priceMarkup} onChange={(event) => setForm({ ...form, priceMarkup: event.target.value })} /><b>%</b></div></label><button className="primary-button"><Save size={17} />保存规则</button></form></section><section className="panel security-panel"><div className="security-icon"><Eye size={20} /></div><div><h3>浏览器登录数据</h3><p>账号密码不写入商品数据库。My Alibaba 登录状态仅保存在本机独立浏览器目录中。</p></div></section></>;
+  return <><Header title="设置" subtitle="管理新采集商品的默认规则" onMenu={onMenu} /><section className="panel settings-panel"><div className="section-title"><div><h2>采集与定价</h2><p>仅应用于之后读取的新商品</p></div></div><form onSubmit={save} className="settings-form"><label><span>默认库存</span><input type="number" min="0" value={form.defaultStock} onChange={(event) => setForm({ ...form, defaultStock: event.target.value })} /></label><label><span>售价加价比例</span><div className="suffix-input"><input type="number" min="-99" step="0.1" value={form.priceMarkup} onChange={(event) => setForm({ ...form, priceMarkup: event.target.value })} /><b>%</b></div></label><button className="primary-button"><Save size={17} />保存规则</button></form></section><section className="panel storage-panel"><div className="section-title"><div><h2>图片与视频存储目录</h2><p>以下是当前实际使用的本地目录，磁盘不足时可在这里定位并清理临时文件</p></div></div>{storage ? <div className="storage-list"><div><strong>商品工作区</strong><code>{storage.workspace}</code><small>{Math.round((storage.bytes.workspace || 0) / 1024)} KB</small></div><div><strong>采集/上架图片</strong><code>{storage.images}</code><small>{Math.round((storage.bytes.images || 0) / 1024 / 1024 * 10) / 10} MB</small></div><div><strong>视频文件</strong><code>{storage.videos}</code><small>{Math.round((storage.bytes.videos || 0) / 1024 / 1024 * 10) / 10} MB</small></div><div><strong>媒体上传目录</strong><code>{storage.media}</code><small>{Math.round((storage.bytes.media || 0) / 1024 / 1024 * 10) / 10} MB</small></div><p className="batch-help">源码模式默认位于项目目录的 .data；桌面版/安装版位于 Electron userData 目录。删除图片或视频前请确认没有正在执行的上架任务。</p></div> : <div className="muted-row">正在读取存储目录…</div>}</section><section className="panel security-panel"><div className="security-icon"><Eye size={20} /></div><div><h3>浏览器登录数据</h3><p>账号密码不写入商品数据库。My Alibaba 登录状态仅保存在本机独立浏览器目录中。</p></div></section></>;
 }
 
 const NAV = [
