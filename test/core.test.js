@@ -51,13 +51,13 @@ test('find and replace searches nested editable product fields with optional cas
 });
 
 test('references only missing product data and leaves commercial content untouched', () => {
-  const target = { title: 'Unique target', price: 12, keywords: ['target'], detailImages: ['target-image'], origin: '', packaging: { weight: 0 }, attributes: [{ name: 'Color', value: '' }] };
-  const reference = { title: 'Published reference', price: 99, keywords: ['reference'], detailImages: ['reference-image'], origin: 'Guangdong, China', packaging: { weight: 1.2, length: 30 }, attributes: [{ name: 'Color', value: 'Black' }, { name: 'Material', value: 'Carbon' }], variantGroups: [{ name: 'Type', options: ['A'] }] };
+  const target = { title: 'Unique target', price: 12, keywords: ['target'], detailImages: ['target-image'], origin: '', packaging: { weight: 0 }, attributes: [{ name: 'Color', value: '' }], variantGroups: [{ name: 'Color', options: ['Black'] }] };
+  const reference = { title: 'Published reference', price: 99, keywords: ['reference'], detailImages: ['reference-image'], origin: 'Guangdong, China', packaging: { weight: 1.2, length: 30 }, attributes: [{ name: 'Color', value: 'Black' }, { name: 'Material', value: 'Carbon' }], variantGroups: [{ name: 'Color', options: ['Black', 'White'] }, { name: 'Type', options: ['A'] }] };
   const patch = copyMissingProductData(target, reference);
   assert.equal(patch.origin, 'Guangdong, China');
   assert.equal(patch.packaging.weight, 1.2);
   assert.deepEqual(patch.attributes, [{ name: 'Color', value: 'Black' }, { name: 'Material', value: 'Carbon' }]);
-  assert.deepEqual(patch.variantGroups, reference.variantGroups);
+  assert.deepEqual(patch.variantGroups, [{ name: 'Color', options: ['Black', 'White'] }, { name: 'Type', options: ['A'] }]);
   assert.equal(patch.title, undefined);
   assert.equal(patch.price, undefined);
   assert.equal(patch.detailImages, undefined);

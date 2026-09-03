@@ -98,6 +98,24 @@ export function copyMissingProductData(target, reference) {
     }
     if (changed) patch[field] = current;
   }
+  const currentGroups = Array.isArray(target?.variantGroups) ? target.variantGroups.map((group) => ({ ...group, options: [...(group.options || [])] })) : [];
+  const sourceGroups = Array.isArray(reference?.variantGroups) ? reference.variantGroups : [];
+  let groupsChanged = false;
+  for (const sourceGroup of sourceGroups) {
+    const name = String(sourceGroup?.name || '').trim();
+    if (!name) continue;
+    const existing = currentGroups.find((group) => String(group.name || '').trim().toLowerCase() === name.toLowerCase());
+    if (!existing) { currentGroups.push(clone(sourceGroup)); groupsChanged = true; continue; }
+    if (!Array.isArray(existing.options) || !existing.options.length) {
+      if (Array.isArray(sourceGroup.options) && sourceGroup.options.length) { existing.options = clone(sourceGroup.options); groupsChanged = true; }
+    } else if (Array.isArray(sourceGroup.options)) {
+      const knownOptions = new Set(existing.options.map((option) => String(option).trim().toLowerCase()));
+      for (const option of sourceGroup.options) {
+        if (!knownOptions.has(String(option).trim().toLowerCase())) { existing.options.push(clone(option)); knownOptions.add(String(option).trim().toLowerCase()); groupsChanged = true; }
+      }
+    }
+  }
+  if (groupsChanged) patch.variantGroups = currentGroups;
   return patch;
 }
 
