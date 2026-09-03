@@ -27,7 +27,7 @@ import {
   sourceDetailHasBrokenImages,
   validateProductData
 } from '../server/publisher.js';
-import { auditProduct, recordProductMutation, sourceSnapshotFingerprint, syncProductModel, verifySourceIntegrity } from '../server/product-model.js';
+import { auditProduct, copyMissingProductData, findAndReplaceProduct, recordProductMutation, sourceSnapshotFingerprint, syncProductModel, verifySourceIntegrity } from '../server/product-model.js';
 import { extractAlibabaSourceData, parseAlibabaDetailDataScript } from '../server/alibaba-source-data.js';
 import { deleteWorkspaceEntities, findWorkspaceJobs, JsonStore } from '../server/store.js';
 import { isExplicitHumanVerificationSignal, normalizeAlibabaCookies } from '../server/browser-runtime.js';
@@ -36,6 +36,32 @@ test('does not classify ordinary product text containing captcha as a challenge'
   assert.equal(isExplicitHumanVerificationSignal('Product description and captcha-compatible camera module'), false);
   assert.equal(isExplicitHumanVerificationSignal('Please drag the slider to verify'), true);
   assert.equal(isExplicitHumanVerificationSignal('请完成验证后继续访问'), true);
+});
+
+test('find and replace searches nested editable product fields with optional case sensitivity', () => {
+  const product = { title: 'Apple cable', keywords: ['apple accessory'], attributes: [{ name: 'Brand', value: 'Apple' }], price: 10, mainImages: ['apple-image'] };
+  const result = findAndReplaceProduct(product, 'apple', 'liangxiang');
+  assert.equal(result.count, 3);
+  assert.equal(result.patch.title, 'liangxiang cable');
+  assert.deepEqual(result.patch.keywords, ['liangxiang accessory']);
+  assert.equal(result.patch.attributes[0].value, 'liangxiang');
+  assert.equal(result.patch.price, undefined);
+  assert.equal(result.patch.mainImages, undefined);
+  assert.equal(findAndReplaceProduct(product, 'APPLE', 'x', { caseSensitive: true }).count, 0);
+});
+
+test('references only missing product data and leaves commercial content untouched', () => {
+  const target = { title: 'Unique target', price: 12, keywords: ['target'], detailImages: ['target-image'], origin: '', packaging: { weight: 0 }, attributes: [{ name: 'Color', value: '' }] };
+  const reference = { title: 'Published reference', price: 99, keywords: ['reference'], detailImages: ['reference-image'], origin: 'Guangdong, China', packaging: { weight: 1.2, length: 30 }, attributes: [{ name: 'Color', value: 'Black' }, { name: 'Material', value: 'Carbon' }], variantGroups: [{ name: 'Type', options: ['A'] }] };
+  const patch = copyMissingProductData(target, reference);
+  assert.equal(patch.origin, 'Guangdong, China');
+  assert.equal(patch.packaging.weight, 1.2);
+  assert.deepEqual(patch.attributes, [{ name: 'Color', value: 'Black' }, { name: 'Material', value: 'Carbon' }]);
+  assert.deepEqual(patch.variantGroups, reference.variantGroups);
+  assert.equal(patch.title, undefined);
+  assert.equal(patch.price, undefined);
+  assert.equal(patch.detailImages, undefined);
+  assert.equal(patch.keywords, undefined);
 });
 
 test('normalizes a 1688 shop home page to its product list', () => {

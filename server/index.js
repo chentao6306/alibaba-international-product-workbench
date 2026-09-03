@@ -11,7 +11,7 @@ import {
   sanitizeCollectedProduct,
   SellerPublisher
 } from './publisher.js';
-import { createPublishSnapshot, recordProductMutation, syncProductModel } from './product-model.js';
+import { copyMissingProductData, createPublishSnapshot, findAndReplaceProduct, recordProductMutation, syncProductModel } from './product-model.js';
 
 // In the packaged desktop build the server module is unpacked while the
 // frontend remains inside app.asar. APP_ROOT_DIR keeps both layouts working.
@@ -510,9 +510,15 @@ app.post('/api/products/batch-update', (request, response, next) => {
         delete next.sourceSnapshotHash;
         recordProductMutation(product, { ...next, status: 'ready' }, { actor: 'user', action: 'batch-edit' });
       });
+      if ((Array.isArray(patch.categoryPath) && patch.categoryPath.length) || patch.categoryId) {
+        // A category change invalidates the previously bound Alibaba form.
+        // Require an explicit bind-page action for the external form.
+        state.settings.publishCategory = '';
+        state.settings.publishPageUrl = '';
+      }
       return state.products.filter((product) => ids.has(product.id));
     });
-    response.json({ updated: updated.length });
+    response.json({ updated: updated.length, categoryBindingReset: Boolean((Array.isArray(patch.categoryPath) && patch.categoryPath.length) || patch.categoryId) });
   } catch (error) { next(error); }
 });
 
@@ -788,11 +794,52 @@ app.post('/api/jobs/:id/cancel', (request, response, next) => {
   response.json(updated);
 });
 
-app.use((error, _request, response, _next) => {
-  console.error(error);
-  const raw = String(error?.message || '');
-  const safeMessage = raw || '操作失败，请稍后重试';
-  response.status(error.status || 500).json({ error: safeMessage });
+app.post('/api/products/find-replace', (request, response, next) => {
+  try {
+    const ids = Array.isArray(request.body?.ids) && request.body.ids.length
+      ? new Set(request.body.ids) : null;
+    const search = String(request.body?.search ?? '');
+    if (!search) return next(Object.assign(new Error('请输入要查找的内容'), { status: 400 }));
+    const replacement = String(request.body?.replacement ?? '');
+    const caseSensitive = Boolean(request.body?.caseSensitive);
+    const dryRun = Boolean(request.body?.dryRun);
+    const result = store.update((state) => {
+      const matches = [];
+      let changedProducts = 0;
+      for (const product of state.products) {
+        if (ids && !ids.has(product.id)) continue;
+        const found = findAndReplaceProduct(product, search, replacement, { caseSensitive });
+        if (!found.count) continue;
+        if (!dryRun) recordProductMutation(product, found.patch, { actor: 'user', action: 'find-replace' });
+        matches.push({ id: product.id, title: product.title, count: found.count, fields: found.matches });
+        changedProducts += 1;
+      }
+      return { changedProducts, matches, total: matches.reduce((sum, item) => sum + item.count, 0) };
+    });
+    response.json(result);
+  } catch (error) { next(error); }
+});
+
+app.post('/api/products/reference', (request, response, next) => {
+  try {
+    const ids = new Set(Array.isArray(request.body?.ids) ? request.body.ids : []);
+    const referenceId = String(request.body?.referenceId || '');
+    if (!ids.size || !referenceId) return next(Object.assign(new Error('请选择待补全商品和引用商品'), { status: 400 }));
+    const result = store.update((state) => {
+      const reference = state.products.find((item) => item.id === referenceId && item.status === 'published');
+      if (!reference) throw Object.assign(new Error('只能引用已成功上架的商品'), { status: 400 });
+      const changed = [];
+      for (const product of state.products) {
+        if (!ids.has(product.id) || product.id === reference.id) continue;
+        const patch = copyMissingProductData(product, reference);
+        if (!Object.keys(patch).length) continue;
+        recordProductMutation(product, patch, { actor: 'user', action: 'reference-published-product' });
+        changed.push({ id: product.id, title: product.title, fields: Object.keys(patch) });
+      }
+      return { referenceId, changed };
+    });
+    response.json(result);
+  } catch (error) { next(error); }
 });
 
 app.get('/api/storage', (_request, response) => {
@@ -835,6 +882,13 @@ if (staticDir && fs.existsSync(path.join(staticDir, 'index.html'))) {
   app.use(express.static(staticDir));
   app.get('/{*splat}', (_request, response) => response.sendFile(path.join(staticDir, 'index.html')));
 }
+
+app.use((error, _request, response, _next) => {
+  console.error(error);
+  const raw = String(error?.message || '');
+  const safeMessage = raw || '操作失败，请稍后重试';
+  response.status(error.status || 500).json({ error: safeMessage });
+});
 
 const port = Number(process.env.PORT || 8787);
 let listener = null;

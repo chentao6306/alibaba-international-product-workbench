@@ -190,6 +190,16 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--orange); }
 .batch-field span { color: #465158; font-size: 12px; font-weight: 600; }
 .batch-field input, .batch-field textarea, .batch-field select { border: 1px solid #cfd6da; border-radius: 5px; padding: 10px 11px; outline: none; resize: vertical; background: #fff; }
 .batch-help { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.7; }
+.find-replace-form, .reference-list { display: grid; gap: 14px; }
+.find-replace-form { padding: 18px 0; border-bottom: 1px solid #e7ebed; }
+.checkbox-label { display: flex; align-items: center; gap: 8px; color: var(--ink); }
+.checkbox-label input { width: 16px; height: 16px; }
+.find-preview { margin: 16px 0; padding: 14px; border: 1px solid #d7e5e5; background: #f5fbfa; border-radius: 5px; }
+.find-preview-list { display: grid; gap: 8px; margin-top: 12px; max-height: 220px; overflow: auto; }
+.find-preview-list div, .reference-list div { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid #e7ebed; }
+.find-preview-list span, .reference-list small { color: var(--muted); font-size: 11px; }
+.reference-help { margin: 18px 0; padding: 12px; color: #805d1f; background: #fff8e8; border: 1px solid #f1dfb4; border-radius: 5px; line-height: 1.6; }
+.reference-list { margin-top: 18px; max-height: 240px; overflow: auto; }
 .batch-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .file-button { position: relative; overflow: hidden; cursor: pointer; display: inline-flex; align-items: center; }
 .file-button input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }

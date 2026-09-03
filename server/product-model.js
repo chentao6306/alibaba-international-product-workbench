@@ -7,6 +7,100 @@ const list = (value) => Array.isArray(value) ? value : [];
 const text = (value) => String(value ?? '').trim();
 const positive = (value) => Number(value) > 0;
 
+// These are editable text/data fields. Source identity, prices, media and
+// publish state are intentionally excluded from find-and-replace operations.
+const FIND_REPLACE_FIELDS = [
+  'title', 'subtitle', 'keywords', 'attributes', 'customAttributes', 'categoryPath', 'categoryId',
+  'origin', 'model', 'brand', 'productType', 'variantGroups', 'skus',
+  'description', 'descriptionHtml', 'structuredDescription', 'services',
+  'certificates', 'salesUnit', 'paymentMethod', 'freightTemplate',
+  'deliveryCountry', 'deliveryOptions', 'shipping', 'packaging', 'deliveryTime'
+];
+
+const isBlank = (value) => value == null || (typeof value === 'string' && !value.trim()) || (Array.isArray(value) && value.length === 0);
+
+function replaceTextValue(value, search, replacement, caseSensitive, path, matches) {
+  if (typeof value === 'string') {
+    const flags = caseSensitive ? 'g' : 'gi';
+    const expression = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
+    const count = [...value.matchAll(expression)].length;
+    if (!count) return { value, changed: false };
+    matches.push({ field: path, count, before: value.slice(0, 180) });
+    return { value: value.replace(expression, () => replacement), changed: true };
+  }
+  if (Array.isArray(value)) {
+    let changed = false;
+    const next = value.map((item, index) => {
+      const result = replaceTextValue(item, search, replacement, caseSensitive, `${path}[${index}]`, matches);
+      changed ||= result.changed;
+      return result.value;
+    });
+    return { value: changed ? next : value, changed };
+  }
+  if (value && typeof value === 'object') {
+    let changed = false;
+    const next = { ...value };
+    for (const [key, item] of Object.entries(value)) {
+      const result = replaceTextValue(item, search, replacement, caseSensitive, path ? `${path}.${key}` : key, matches);
+      changed ||= result.changed;
+      if (result.changed) next[key] = result.value;
+    }
+    return { value: changed ? next : value, changed };
+  }
+  return { value, changed: false };
+}
+
+export function findAndReplaceProduct(product, search, replacement, options = {}) {
+  const needle = String(search ?? '');
+  const replacementText = String(replacement ?? '');
+  const caseSensitive = Boolean(options.caseSensitive);
+  const matches = [];
+  const patch = {};
+  if (!needle) return { patch, matches, count: 0 };
+  for (const field of FIND_REPLACE_FIELDS) {
+    if (!Object.hasOwn(product, field)) continue;
+    const result = replaceTextValue(product[field], needle, replacementText, caseSensitive, field, matches);
+    if (result.changed) patch[field] = result.value;
+  }
+  return { patch, matches, count: matches.reduce((total, item) => total + item.count, 0) };
+}
+
+function clone(value) {
+  return value == null ? value : structuredClone(value);
+}
+
+export function copyMissingProductData(target, reference) {
+  const patch = {};
+  const copyWhenBlank = ['origin', 'model', 'productType', 'deliveryTime', 'variantGroups', 'skus', 'salesUnit', 'freightTemplate', 'services', 'certificates'];
+  for (const field of copyWhenBlank) {
+    if (isBlank(target?.[field]) && !isBlank(reference?.[field])) patch[field] = clone(reference[field]);
+  }
+  const targetPackaging = target?.packaging && typeof target.packaging === 'object' ? target.packaging : {};
+  const referencePackaging = reference?.packaging && typeof reference.packaging === 'object' ? reference.packaging : {};
+  const packaging = { ...targetPackaging };
+  let packagingChanged = false;
+  for (const [key, value] of Object.entries(referencePackaging)) {
+    const targetValueMissing = isBlank(packaging[key]) || (['weight', 'length', 'width', 'height'].includes(key) && Number(packaging[key]) <= 0);
+    if (targetValueMissing && !isBlank(value)) { packaging[key] = clone(value); packagingChanged = true; }
+  }
+  if (packagingChanged) patch.packaging = packaging;
+  for (const field of ['attributes', 'customAttributes']) {
+    const current = Array.isArray(target?.[field]) ? target[field].map((item) => ({ ...item })) : [];
+    const source = Array.isArray(reference?.[field]) ? reference[field] : [];
+    const known = new Map(current.map((item, index) => [String(item.name || '').trim().toLowerCase(), index]));
+    let changed = false;
+    for (const item of source) {
+      const name = String(item?.name || '').trim();
+      if (!name) continue;
+      const index = known.get(name.toLowerCase());
+      if (index == null) { current.push(clone(item)); known.set(name.toLowerCase(), current.length - 1); changed = true; continue; }
+      if (isBlank(current[index].value) && !isBlank(item.value)) { current[index] = { ...current[index], value: clone(item.value) }; changed = true; }
+    }
+    if (changed) patch[field] = current;
+  }
+  return patch;
+}
+
 function snapshotFields(product) {
   return structuredClone({
     sourceId: product.sourceId || '', sourceUrl: product.sourceUrl || '', sourceTitle: product.sourceTitle || '',

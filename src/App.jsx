@@ -289,6 +289,8 @@ function ProductsView({ state, refresh, notify, onMenu }) {
   const [pageSize, setPageSize] = useState(10);
   const [editing, setEditing] = useState(null);
   const [batchEditing, setBatchEditing] = useState(false);
+  const [findReplaceOpen, setFindReplaceOpen] = useState(false);
+  const [referenceOpen, setReferenceOpen] = useState(false);
   const [refreshingId, setRefreshingId] = useState('');
   const products = useMemo(() => state.products.filter((product) => {
     const matchesQuery = !query || product.title?.toLowerCase().includes(query.toLowerCase()) || product.sourceId?.includes(query);
@@ -347,9 +349,11 @@ function ProductsView({ state, refresh, notify, onMenu }) {
     <Header title="商品工作台" subtitle="检查、修改并选择待上架商品" onMenu={onMenu} />
     <div className="toolbar">
       <div className="input-with-icon search-box"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索标题或商品 ID" /></div>
-      <div className="segmented">{[['all', '全部'], ['selected', '已选择'], ['incomplete', '资料待补'], ['ready', '待上架'], ['drafted', '已存草稿']].map(([value, label]) => <button key={value} className={filter === value ? 'active' : ''} onClick={() => setFilter(value)}>{label}</button>)}</div>
+      <div className="segmented">{[['all', '全部'], ['selected', '已选择'], ['incomplete', '资料待补'], ['ready', '待上架'], ['drafted', '已存草稿'], ['published', '上架成功'], ['publish_failed', '上架失败']].map(([value, label]) => <button key={value} className={filter === value ? 'active' : ''} onClick={() => setFilter(value)}>{label}</button>)}</div>
       <button className="secondary-button" disabled={!state.products.length} onClick={() => selectAllProducts(!allProductsSelected)} title={allProductsSelected ? '取消全部商品的选择' : '选择商品资料库中的全部商品'}><Check size={15} />{allProductsSelected ? '取消全选' : `全选全部商品 ${state.products.length}`}</button>
+      <button className="secondary-button" disabled={!state.products.length} onClick={() => setFindReplaceOpen(true)}><Search size={15} />查找替换</button>
       {selectedProducts.length > 0 && <button className="primary-button" onClick={() => setBatchEditing(true)}><Pencil size={15} />批量修改 {selectedProducts.length}</button>}
+      {selectedProducts.some((product) => !productCompleteness(product).complete) && state.products.some((product) => product.status === 'published') && <button className="secondary-button" onClick={() => setReferenceOpen(true)}><ClipboardList size={15} />引用成功商品资料</button>}
       {selectedProducts.length > 0 && <button className="secondary-button danger-button" onClick={removeSelected}><Trash2 size={15} />删除已勾选 {selectedProducts.length}</button>}
       <label className="page-size"><span>每页</span><select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}><option value="10">10</option><option value="20">20</option><option value="50">50</option></select></label>
       <span className="result-count">共 {products.length} 件</span>
@@ -361,15 +365,51 @@ function ProductsView({ state, refresh, notify, onMenu }) {
           <td className="check-cell"><input type="checkbox" checked={Boolean(product.selected)} onChange={(event) => select([product.id], event.target.checked)} /></td>
           <td><div className="product-main"><div className="thumb">{product.mainImage ? <img src={product.mainImage} alt="" /> : <Boxes size={20} />}</div><div><strong>{product.title || '未命名商品'}</strong><small>ID {product.sourceId}</small></div></div></td>
           <td><span className={`data-status ${completeness.complete ? 'complete' : ''}`} title={completeness.missing.length ? `阻断项：${completeness.missing.join('、')}` : completeness.review ? '来源未公开部分逐SKU数据，需要发布前确认' : '可进入发布检查'}>{!completeness.complete ? `资料阻断 ${completeness.score}` : completeness.review ? `资料待确认 ${completeness.score}` : `可发布 ${completeness.score}`}</span><small className="data-counts">主 {completeness.main} · 详 {completeness.detail} · 属 {completeness.attributes} · SKU {completeness.skus} · 价 {completeness.tiers || (completeness.hasPriceRange ? '区间' : 0)}</small>{completeness.warnings > 0 && <small className="data-warning">另有 {completeness.warnings} 项待确认</small>}{!completeness.complete && <small className="data-missing">{completeness.missing.join('；')}</small>}</td>
-          <td><b className="price">{product.sourcePriceRange?.formattedText || `${product.currencySymbol || '¥'}${product.price || '-'}`}</b></td><td>{product.stock ?? '-'}</td><td><StatusBadge status={product.status} message={product.publishResult?.message} /></td>
+          <td><b className="price">{product.sourcePriceRange?.formattedText || `${product.currencySymbol || '¥'}${product.price || '-'}`}</b></td><td>{product.stock ?? '-'}</td><td><StatusBadge status={product.status} message={product.publishResult?.message} />{product.status === 'publish_failed' && <small className="data-missing" title={product.publishResult?.message || ''}>{product.publishResult?.message || '未记录失败原因'}</small>}</td>
           <td className="action-cell"><button className="icon-button" disabled={refreshingId === product.id} onClick={() => refreshDetail(product)} title="重新采集完整资料">{refreshingId === product.id ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}</button><button className="icon-button" onClick={() => setEditing(product)} title="编辑完整资料"><Pencil size={17} /></button><button className="icon-button danger" onClick={() => remove(product)} title="删除商品"><Trash2 size={17} /></button></td>
         </tr>; })}</tbody>
       </table></div>}
       {products.length > pageSize && <Pagination page={page} pageCount={pageCount} onPage={setPage} label={`第 ${page}/${pageCount} 页 · 共 ${products.length} 件`} />}
     </section>
     {editing && <ProductEditor product={editing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); await refresh(); notify('商品修改已保存'); }} notify={notify} />}
-    {batchEditing && <BatchEditor products={selectedProducts} onClose={() => setBatchEditing(false)} onSaved={async () => { setBatchEditing(false); await refresh(); notify('批量修改已应用'); }} notify={notify} />}
+    {batchEditing && <BatchEditor products={selectedProducts} onClose={() => setBatchEditing(false)} onSaved={async (result) => { setBatchEditing(false); await refresh(); notify(result?.categoryBindingReset ? '批量修改已应用，请重新绑定修改后类目的国际站发布表单' : '批量修改已应用'); }} notify={notify} />}
+    {findReplaceOpen && <FindReplaceDialog products={selectedProducts.length ? selectedProducts : state.products} onClose={() => setFindReplaceOpen(false)} onSaved={async (result) => { setFindReplaceOpen(false); await refresh(); notify(`已替换 ${result.changedProducts} 件商品，共 ${result.total} 处`); }} notify={notify} />}
+    {referenceOpen && <ReferenceDialog products={selectedProducts.filter((product) => !productCompleteness(product).complete)} references={state.products.filter((product) => product.status === 'published')} onClose={() => setReferenceOpen(false)} onSaved={async (result) => { setReferenceOpen(false); await refresh(); notify(`已引用成功商品资料，补全 ${result.changed.length} 件商品`); }} notify={notify} />}
   </>;
+}
+
+function FindReplaceDialog({ products, onClose, onSaved, notify }) {
+  const [search, setSearch] = useState('');
+  const [replacement, setReplacement] = useState('');
+  const [caseSensitive, setCaseSensitive] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const [busy, setBusy] = useState(false);
+  async function inspect() {
+    if (!search.trim()) return notify('请输入要查找的内容', 'error');
+    setBusy(true);
+    try { setPreview(await api('/api/products/find-replace', { method: 'POST', body: JSON.stringify({ ids: products.map((item) => item.id), search, replacement, caseSensitive, dryRun: true }) })); }
+    catch (error) { notify(error.message, 'error'); }
+    finally { setBusy(false); }
+  }
+  async function apply() {
+    if (!preview?.total) return notify('请先查找并确认匹配结果', 'error');
+    setBusy(true);
+    try { const result = await api('/api/products/find-replace', { method: 'POST', body: JSON.stringify({ ids: products.map((item) => item.id), search, replacement, caseSensitive }) }); onSaved(result); }
+    catch (error) { notify(error.message, 'error'); setBusy(false); }
+  }
+  return <div className="drawer-backdrop"><aside className="drawer batch-drawer"><div className="drawer-header"><div><span>查找与替换</span><h2>{products.length} 件商品</h2></div><button className="icon-button" onClick={onClose} title="关闭"><X size={20} /></button></div><div className="find-replace-form"><label><span>查找内容</span><input value={search} onChange={(event) => { setSearch(event.target.value); setPreview(null); }} placeholder="例如 apple" autoFocus /></label><label><span>替换为</span><input value={replacement} onChange={(event) => setReplacement(event.target.value)} placeholder="例如 liangxiang" /></label><label className="checkbox-label"><input type="checkbox" checked={caseSensitive} onChange={(event) => setCaseSensitive(event.target.checked)} /><span>区分大小写</span></label><button className="secondary-button" disabled={busy || !search.trim()} onClick={inspect}><Search size={16} />查找匹配</button></div>{preview && <div className="find-preview"><strong>找到 {preview.total} 处，涉及 {preview.changedProducts} 件商品</strong>{preview.matches.length ? <div className="find-preview-list">{preview.matches.map((item) => <div key={item.id}><b>{item.title || item.id}</b><span>{item.fields.map((field) => `${field.field}（${field.count}处）`).join('、')}</span></div>)}</div> : <p>没有匹配内容</p>}</div>}<div className="drawer-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="button" className="primary-button" disabled={busy || !preview?.total} onClick={apply}><Save size={17} />执行替换</button></div></aside></div>;
+}
+
+function ReferenceDialog({ products, references, onClose, onSaved, notify }) {
+  const [referenceId, setReferenceId] = useState(references[0]?.id || '');
+  const [busy, setBusy] = useState(false);
+  async function apply() {
+    if (!referenceId) return notify('请选择已成功上架的引用商品', 'error');
+    setBusy(true);
+    try { onSaved(await api('/api/products/reference', { method: 'POST', body: JSON.stringify({ ids: products.map((item) => item.id), referenceId }) })); }
+    catch (error) { notify(error.message, 'error'); setBusy(false); }
+  }
+  return <div className="drawer-backdrop"><aside className="drawer batch-drawer"><div className="drawer-header"><div><span>引用成功商品资料</span><h2>补全 {products.length} 件资料不完整商品</h2></div><button className="icon-button" onClick={onClose} title="关闭"><X size={20} /></button></div><div className="reference-help">仅补入缺失的产地、包装、规格、属性、发货期等资料；不会覆盖商品标题、关键词、价格、主图或详情图。</div><label className="batch-field"><span>选择已上架成功的商品</span><select value={referenceId} onChange={(event) => setReferenceId(event.target.value)}><option value="">请选择引用商品</option>{references.map((item) => <option key={item.id} value={item.id}>{item.title || item.id}（{item.sourceId}）</option>)}</select></label><div className="reference-list">{products.map((item) => <div key={item.id}><strong>{item.title || item.id}</strong><small>{productCompleteness(item).missing.join('、') || '资料待确认'}</small></div>)}</div><div className="drawer-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="button" className="primary-button" disabled={busy || !referenceId} onClick={apply}><ClipboardList size={17} />开始引用</button></div></aside></div>;
 }
 
 function BatchEditor({ products, onClose, onSaved, notify }) {
@@ -414,7 +454,7 @@ function BatchEditor({ products, onClose, onSaved, notify }) {
   async function apply() {
     const patch = makePatch();
     if (!Object.keys(patch).length) return notify('请填写批量修改内容', 'error');
-    try { await api('/api/products/batch-update', { method: 'POST', body: JSON.stringify({ ids: products.map((p) => p.id), patch }) }); onSaved(); }
+    try { const result = await api('/api/products/batch-update', { method: 'POST', body: JSON.stringify({ ids: products.map((p) => p.id), patch }) }); onSaved(result); }
     catch (error) { notify(error.message, 'error'); }
   }
   async function applyImage(action) {
