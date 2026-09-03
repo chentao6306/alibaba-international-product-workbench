@@ -1,4 +1,4 @@
-# 跨易铺授权服务
+# 抄得快授权服务
 
 授权服务部署在 Linux 服务器，生产环境必须使用 HTTPS、PostgreSQL 和随机的 `KUA_YIPU_AUTH_SECRET`（至少 32 个字符）。
 

@@ -171,7 +171,7 @@ export async function launchPersistent(profileDir, options = {}) {
     }
     if (/Target page, context or browser has been closed|browser has been closed/i.test(message)) {
       const browserName = path.basename(executablePath);
-      throw new Error(`内置浏览器启动后立即退出（${browserName}，配置目录：${profileDir}）。请关闭旧的跨易铺进程后重试。原始原因：${message.slice(0, 240)}`);
+      throw new Error(`内置浏览器启动后立即退出（${browserName}，配置目录：${profileDir}）。请关闭旧的抄得快进程后重试。原始原因：${message.slice(0, 240)}`);
     }
     throw new Error('采集浏览器启动失败，请检查本机浏览器后重试');
   }

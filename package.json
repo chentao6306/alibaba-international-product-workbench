@@ -1,9 +1,9 @@
 {
   "name": "alibaba-international-product-workbench",
-  "version": "1.2.13",
+  "version": "1.2.14",
   "main": "electron/main.js",
-  "description": "跨易铺 Alibaba.com 国际站商品采集与发布工作台",
-  "author": "跨易铺",
+  "description": "抄得快 Alibaba.com 国际站商品采集与发布工作台",
+  "author": "抄得快",
   "private": true,
   "type": "module",
   "scripts": {
@@ -16,7 +16,7 @@
     "desktop:dev": "concurrently -k \"npm:dev:server\" \"npm:dev:web\" \"npm:desktop\"",
     "prepare:chromium": "node tools/prepare-chromium.mjs",
     "dist:win": "npm run build && npm run prepare:chromium && electron-builder --win",
-    "dist:win:installer": "npm run build && npm run prepare:chromium && electron-builder --win nsis --x64 --config.directories.output=release-installer --config.artifactName=\"kua-yipu-${version}-setup.${ext}\" --publish never",
+    "dist:win:installer": "npm run build && npm run prepare:chromium && electron-builder --win nsis --x64 --config.directories.output=release-installer --config.artifactName=\"chaodekuai-${version}-setup.${ext}\" --publish never",
     "dist:win:portable": "npm run build && npm run prepare:chromium && electron-builder --win portable --x64 --publish never",
     "test": "node --test"
   },
@@ -40,8 +40,8 @@
   },
   "build": {
     "appId": "com.kua-yipu.workbench",
-    "productName": "跨易铺",
-    "artifactName": "跨易铺-${version}-${os}-${arch}.${ext}",
+    "productName": "抄得快",
+    "artifactName": "chaodekuai-${version}-${os}-${arch}.${ext}",
     "directories": {
       "output": "release"
     },

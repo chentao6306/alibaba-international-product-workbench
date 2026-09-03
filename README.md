@@ -1,4 +1,4 @@
-# 阿里巴巴国际站商品工作台
+# 抄得快：阿里巴巴国际站商品工作台
 
 这是一个运行在 Windows 本机的阿里巴巴国际站商品采集、资料整理和批量上架工具。系统读取同行店铺的分组及公开商品资料，将商品保存到本地工作台，支持人工编辑、批量修改、资料完整性检查，并通过已登录的 My Alibaba 浏览器保存草稿或提交发布。
 
@@ -10,7 +10,7 @@
 
 - GitHub 仓库：`chentao6306/alibaba-international-product-workbench`
 - 完整项目分支：`codex/full-project-20260901`
-- 当前应用版本：`1.2.12`
+- 当前应用版本：`1.2.14`
 - 源码语言：JavaScript（ES Modules）、JSX、HTML、CSS、PowerShell 和 Windows Batch
 
 仓库保存可复现构建所需的源码、锁定依赖清单、测试、构建配置、授权服务源码和维护脚本。`node_modules`、`dist`、内置 Chromium、安装包以及包含账号会话和业务商品的运行时数据不进入 Git；它们分别由依赖安装、构建、浏览器准备和应用运行产生。这样既能从源码完整重建程序，也不会把卖家 Cookie、密码或业务数据上传到 GitHub。
@@ -499,11 +499,9 @@ npm run build
 
 ## 13. 已知边界与生产风险
 
-### 13.1 图片银行空间已满
+### 13.1 图片与详情图存储
 
-当 Alibaba 图片银行已满时，新的详情图片无法继续上传。当前系统会关闭上传弹层，并尽可能复用已经上传的主图生成可提交的详情内容。这是一种**降级策略**，不等于原商品详情图片完整复制。
-
-如果业务要求详情与来源图片严格一致，应先在 My Alibaba 清理图片银行空间，再重新执行该商品。不要把降级结果当成完整资料。
+编辑器支持主图和详情图的本地上传、来源快照还原、清空、删除以及本工具水印处理。上传文件保存在设置中显示的本地媒体目录；删除编辑器中的详情图不会删除来源快照，可随时点击“从来源图片库还原详情图”恢复。系统不提供图片银行地址录入功能，发布时仍由 Alibaba 页面按账号权限处理图片上传。
 
 ### 13.2 来源页不公开完整 SKU 商业数据
 
@@ -710,22 +708,22 @@ $env:CSC_IDENTITY_AUTO_DISCOVERY='false'
 npx electron-builder --win nsis --x64 `
   --config.electronDist=node_modules/electron/dist `
   --config.directories.output=release-installer `
-  --config.artifactName='kua-yipu-${version}-setup.${ext}' `
+  --config.artifactName='chaodekuai-${version}-setup.${ext}' `
   --publish never
 ```
 
 标准安装包输出位置为：
 
 ```text
-release-installer/kua-yipu-<版本>-setup.exe
+release-installer/chaodekuai-<版本>-setup.exe
 ```
 
 交付前应校验文件大小和 SHA-256，避免把未完成或损坏的文件交给测试人员：
 
 ```powershell
-Get-Item .\release-installer\kua-yipu-*-setup.exe |
+Get-Item .\release-installer\chaodekuai-*-setup.exe |
   Select-Object FullName, Length, LastWriteTime
-Get-FileHash .\release-installer\kua-yipu-*-setup.exe -Algorithm SHA256
+Get-FileHash .\release-installer\chaodekuai-*-setup.exe -Algorithm SHA256
 ```
 
 安装包和便携包只包含代码、依赖和内置 Chromium，不包含 `.data` 下的登录会话、Cookie、商品数据或任务记录；升级程序不会自动迁移或覆盖这些本地数据。

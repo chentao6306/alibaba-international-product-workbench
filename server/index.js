@@ -188,7 +188,7 @@ app.use(express.json({ limit: '12mb' }));
 if (process.env.KUA_YIPU_DESKTOP === '1') {
   app.use('/api', (request, response, next) => {
     if (!process.env.KUA_YIPU_LOCAL_GATE || request.headers['x-kua-yipu-gate'] !== process.env.KUA_YIPU_LOCAL_GATE) {
-      return response.status(401).json({ error: '请从跨易铺登录后进入工作台' });
+      return response.status(401).json({ error: '请从抄得快登录后进入工作台' });
     }
     next();
   });

@@ -225,6 +225,7 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--orange); }
 .media-row { display: grid; grid-template-columns: 52px 42px minmax(0, 1fr) 34px; gap: 8px; align-items: center; }
 .media-index { color: #69747d; font-size: 10px; white-space: nowrap; }
 .image-toolbar, .batch-slot-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.media-section-title { margin: 18px 0 10px; font-size: 15px; color: #334047; }
 .batch-slot-actions > span { color: #69747d; font-size: 11px; }
 .media-row input, .edit-data-row input, .tier-row input { min-width: 0; }
 .mini-preview { width: 42px; height: 42px; overflow: hidden; border: 1px solid #dce2e4; border-radius: 4px; background: #f2f4f5; display: grid; place-items: center; color: #8a959a; }

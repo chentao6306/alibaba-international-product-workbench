@@ -511,33 +511,27 @@ function ProductEditor({ product, onClose, onSaved, notify }) {
   const update = (key) => (event) => setForm((value) => ({ ...value, [key]: event.target.value }));
   const updateArray = (key, index, value) => setForm((current) => ({ ...current, [key]: current[key].map((item, itemIndex) => itemIndex === index ? value : item) }));
   const removeArray = (key, index) => setForm((current) => ({ ...current, [key]: current[key].filter((_, itemIndex) => itemIndex !== index) }));
-  function importLocalImages(event) {
+  function importLocalImages(event, target = 'mainImages', max = target === 'mainImages' ? 6 : 30) {
     const files = [...(event.target.files || [])].filter((file) => /^image\//i.test(file.type));
     if (!files.length) return;
-    Promise.all(files.map((file) => new Promise((resolve) => { const reader = new FileReader(); reader.onload = async () => { try { const result = await api('/api/media/upload', { method: 'POST', body: JSON.stringify({ name: file.name, data: String(reader.result || '') }) }); resolve(result.url || ''); } catch (error) { notify(error.message, 'error'); resolve(''); } }; reader.onerror = () => resolve(''); reader.readAsDataURL(file); }))).then((urls) => setForm((value) => ({ ...value, mainImages: [...value.mainImages, ...urls.filter(Boolean)].slice(0, 6) })));
+    Promise.all(files.map((file) => new Promise((resolve) => { const reader = new FileReader(); reader.onload = async () => { try { const result = await api('/api/media/upload', { method: 'POST', body: JSON.stringify({ name: file.name, data: String(reader.result || '') }) }); resolve(result.url || ''); } catch (error) { notify(error.message, 'error'); resolve(''); } }; reader.onerror = () => resolve(''); reader.readAsDataURL(file); }))).then((urls) => setForm((value) => ({ ...value, [target]: [...value[target], ...urls.filter(Boolean)].slice(0, max) })));
     event.target.value = '';
   }
-  function restoreSourceImages() {
-    const sourceImages = product.source?.snapshot?.mainImages || [];
-    if (!sourceImages.length) return notify('来源快照没有可还原的主图', 'error');
-    setForm((value) => ({ ...value, mainImages: sourceImages.slice(0, 6) }));
-    notify('已从来源图片库还原主图');
+  function restoreSourceImages(target = 'mainImages') {
+    const sourceImages = product.source?.snapshot?.[target] || [];
+    const max = target === 'mainImages' ? 6 : 30;
+    if (!sourceImages.length) return notify(`来源快照没有可还原的${target === 'mainImages' ? '主图' : '详情图'}`, 'error');
+    setForm((value) => ({ ...value, [target]: sourceImages.slice(0, max) }));
+    notify(`已从来源图片库还原${target === 'mainImages' ? '主图' : '详情图'}`);
   }
-  function addImageBankUrls() {
-    const value = window.prompt('请输入图片银行中的图片地址，可一行一个：');
-    if (!value) return;
-    const urls = value.split(/[\n,，]+/).map((item) => item.trim()).filter((item) => /^https?:\/\//i.test(item));
-    if (!urls.length) return notify('没有识别到有效图片地址', 'error');
-    setForm((current) => ({ ...current, mainImages: [...current.mainImages, ...urls].slice(0, 6) }));
-    notify(`已添加 ${Math.min(urls.length, Math.max(0, 6 - form.mainImages.length))} 张图片银行图片`);
-  }
-  async function watermarkImages(remove = false) {
-    const urls = remove ? (product.source?.snapshot?.mainImages || []) : form.mainImages;
-    if (!urls.length) return notify('没有可处理的主图', 'error');
+  async function watermarkImages(target = 'mainImages', remove = false) {
+    const label = target === 'mainImages' ? '主图' : '详情图';
+    const urls = remove ? (product.source?.snapshot?.[target] || []) : form[target];
+    if (!urls.length) return notify(`没有可处理的${label}`, 'error');
     try {
-      const result = await Promise.all(urls.map((url) => new Promise((resolve, reject) => { const image = new Image(); image.crossOrigin = 'anonymous'; image.onload = () => { const canvas = document.createElement('canvas'); canvas.width = image.naturalWidth || 1200; canvas.height = image.naturalHeight || 800; const context = canvas.getContext('2d'); context.drawImage(image, 0, 0, canvas.width, canvas.height); if (!remove) { context.fillStyle = 'rgba(255,255,255,.72)'; context.fillRect(18, canvas.height - 54, 270, 36); context.fillStyle = '#f06423'; context.font = 'bold 22px Microsoft YaHei'; context.fillText('跨易铺', 30, canvas.height - 28); } resolve(canvas.toDataURL('image/jpeg', .9)); }; image.onerror = () => reject(new Error('图片跨域或格式不支持')); image.src = url; })));
-      setForm((value) => ({ ...value, mainImages: result.slice(0, 6) }));
-      notify(remove ? '已从来源图片恢复（去除本地水印）' : '主图水印已添加');
+      const result = await Promise.all(urls.map((url) => new Promise((resolve, reject) => { const image = new Image(); image.crossOrigin = 'anonymous'; image.onload = () => { const canvas = document.createElement('canvas'); canvas.width = image.naturalWidth || 1200; canvas.height = image.naturalHeight || 800; const context = canvas.getContext('2d'); context.drawImage(image, 0, 0, canvas.width, canvas.height); if (!remove) { context.fillStyle = 'rgba(255,255,255,.72)'; context.fillRect(18, canvas.height - 54, 270, 36); context.fillStyle = '#f06423'; context.font = 'bold 22px Microsoft YaHei'; context.fillText('抄得快', 30, canvas.height - 28); } resolve(canvas.toDataURL('image/jpeg', .9)); }; image.onerror = () => reject(new Error('图片跨域或格式不支持')); image.src = url; })));
+      setForm((value) => ({ ...value, [target]: result.slice(0, target === 'mainImages' ? 6 : 30) }));
+      notify(remove ? `已从来源图片恢复${label}（去除本工具水印）` : `${label}水印已添加`);
     } catch (error) { notify(`图片处理失败：${error.message}`, 'error'); }
   }
   async function save(event) {
@@ -569,10 +563,13 @@ function ProductEditor({ product, onClose, onSaved, notify }) {
       </div>
       <div className={`editor-tab-pane ${tab === 'media' ? '' : 'hidden'}`}>
       <h3 className="edit-section-title">主图与详情图</h3>
-      <div className="image-toolbar"><label className="file-button secondary-button"><Plus size={15} />上传本地图片<input type="file" accept="image/*" multiple onChange={importLocalImages} /></label><button type="button" className="secondary-button" onClick={addImageBankUrls}>添加图片银行地址</button><button type="button" className="secondary-button" onClick={restoreSourceImages}>从来源图片库还原</button><button type="button" className="secondary-button" onClick={() => watermarkImages(false)}>添加水印</button><button type="button" className="secondary-button" onClick={() => watermarkImages(true)}>去除本工具水印</button><button type="button" className="secondary-button danger-button" onClick={() => setForm((value) => ({ ...value, mainImages: [] }))}>清空主图</button></div>
+      <h4 className="media-section-title">主图（最多 6 张）</h4>
+      <div className="image-toolbar"><label className="file-button secondary-button"><Plus size={15} />上传本地图片<input type="file" accept="image/*" multiple onChange={(event) => importLocalImages(event, 'mainImages', 6)} /></label><button type="button" className="secondary-button" onClick={() => restoreSourceImages('mainImages')}>从来源图片库还原</button><button type="button" className="secondary-button" onClick={() => watermarkImages('mainImages', false)}>添加水印</button><button type="button" className="secondary-button" onClick={() => watermarkImages('mainImages', true)}>去除本工具水印</button><button type="button" className="secondary-button danger-button" onClick={() => setForm((value) => ({ ...value, mainImages: [] }))}>清空主图</button></div>
       <div className="media-grid">{form.mainImages.map((url, index) => <div className="media-row" key={`main-${index}`}><strong className="media-index">主图 {index + 1}</strong><div className="mini-preview">{url ? <img src={url} alt="" /> : <Boxes size={18} />}</div><input value={url} onChange={(event) => updateArray('mainImages', index, event.target.value)} aria-label={`主图 ${index + 1}`} /><button type="button" className="icon-button danger" onClick={() => removeArray('mainImages', index)} title="删除主图"><X size={15} /></button></div>)}</div>
-      <button type="button" className="secondary-button add-row-button" disabled={form.mainImages.length >= 6} onClick={() => setForm((value) => ({ ...value, mainImages: [...value.mainImages, ''] }))}><Plus size={15} />添加本地/图片银行地址</button>
-      <div className="media-grid">{form.detailImages.map((url, index) => <div className="media-row" key={`detail-${index}`}><div className="mini-preview">{url ? <img src={url} alt="" /> : <Boxes size={18} />}</div><input value={url} onChange={(event) => updateArray('detailImages', index, event.target.value)} aria-label={`详情图 ${index + 1}`} /><button type="button" className="icon-button danger" onClick={() => removeArray('detailImages', index)} title="删除详情图"><X size={15} /></button></div>)}</div>
+      <button type="button" className="secondary-button add-row-button" disabled={form.mainImages.length >= 6} onClick={() => setForm((value) => ({ ...value, mainImages: [...value.mainImages, ''] }))}><Plus size={15} />添加主图地址</button>
+      <h4 className="media-section-title">详情图（支持本地上传与来源还原）</h4>
+      <div className="image-toolbar"><label className="file-button secondary-button"><Plus size={15} />上传本地详情图<input type="file" accept="image/*" multiple onChange={(event) => importLocalImages(event, 'detailImages', 30)} /></label><button type="button" className="secondary-button" onClick={() => restoreSourceImages('detailImages')}>从来源图片库还原详情图</button><button type="button" className="secondary-button" onClick={() => watermarkImages('detailImages', false)}>添加水印</button><button type="button" className="secondary-button" onClick={() => watermarkImages('detailImages', true)}>去除本工具水印</button><button type="button" className="secondary-button danger-button" onClick={() => setForm((value) => ({ ...value, detailImages: [] }))}>清空详情图</button></div>
+      <div className="media-grid">{form.detailImages.map((url, index) => <div className="media-row" key={`detail-${index}`}><strong className="media-index">详情图 {index + 1}</strong><div className="mini-preview">{url ? <img src={url} alt="" /> : <Boxes size={18} />}</div><input value={url} onChange={(event) => updateArray('detailImages', index, event.target.value)} aria-label={`详情图 ${index + 1}`} /><button type="button" className="icon-button danger" onClick={() => removeArray('detailImages', index)} title="删除详情图"><X size={15} /></button></div>)}</div>
       <button type="button" className="secondary-button add-row-button" onClick={() => setForm((value) => ({ ...value, detailImages: [...value.detailImages, ''] }))}><Plus size={15} />添加详情图地址</button>
       <label><span>商品视频地址</span><input value={form.videoUrl} onChange={update('videoUrl')} /></label>
       </div>

@@ -164,7 +164,7 @@ function registerAlibabaWindow(window) {
 }
 
 function createLoginWindow() {
-  loginWindow = new BrowserWindow({ width: 520, height: 620, resizable: false, show: false, title: '跨易铺登录', autoHideMenuBar: true, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false } });
+  loginWindow = new BrowserWindow({ width: 520, height: 620, resizable: false, show: false, title: '抄得快登录', autoHideMenuBar: true, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false } });
   loginWindow.once('ready-to-show', () => loginWindow?.show());
   const loginFile = path.join(__dirname, 'login.html');
   const loginUrl = pathToFileURL(loginFile).href;
@@ -177,7 +177,7 @@ function createLoginWindow() {
         await new Promise((resolve) => setTimeout(resolve, 600));
         return loadLogin(attempt + 1);
       }
-      dialog.showErrorBox('跨易铺启动失败', `登录界面加载失败：${error.message}`);
+      dialog.showErrorBox('抄得快启动失败', `登录界面加载失败：${error.message}`);
     }
   };
   loadLogin();
@@ -259,17 +259,17 @@ function showWorkbenchError(window, error) {
   if (!isWindowAlive(window)) return;
   const message = String(error?.message || '工作台页面加载失败').replace(/[<>&"']/g, (value) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;' }[value]));
   const retryUrl = mainWindowUrl();
-  const html = `<!doctype html><meta charset="utf-8"><title>跨易铺启动失败</title><style>body{font-family:Microsoft YaHei,sans-serif;margin:0;background:#f4f6f7;color:#182028;display:grid;place-items:center;height:100vh}.box{background:#fff;border:1px solid #dfe4e7;border-radius:8px;padding:32px 38px;box-shadow:0 8px 26px #18202822;max-width:620px}h1{font-size:22px;margin:0 0 12px;color:#f06423}p{line-height:1.7;color:#59666c;word-break:break-word}button{height:40px;padding:0 22px;border:0;border-radius:5px;background:#f06423;color:#fff;font-weight:700;cursor:pointer}</style><main class="box"><h1>工作台暂时未能打开</h1><p>${message}</p><button onclick="location.href=${JSON.stringify(retryUrl)}">重新加载</button></main>`;
+  const html = `<!doctype html><meta charset="utf-8"><title>抄得快启动失败</title><style>body{font-family:Microsoft YaHei,sans-serif;margin:0;background:#f4f6f7;color:#182028;display:grid;place-items:center;height:100vh}.box{background:#fff;border:1px solid #dfe4e7;border-radius:8px;padding:32px 38px;box-shadow:0 8px 26px #18202822;max-width:620px}h1{font-size:22px;margin:0 0 12px;color:#f06423}p{line-height:1.7;color:#59666c;word-break:break-word}button{height:40px;padding:0 22px;border:0;border-radius:5px;background:#f06423;color:#fff;font-weight:700;cursor:pointer}</style><main class="box"><h1>工作台暂时未能打开</h1><p>${message}</p><button onclick="location.href=${JSON.stringify(retryUrl)}">重新加载</button></main>`;
   window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`).catch(() => {});
 }
 
 function workbenchLoadingUrl() {
-  const html = '<!doctype html><meta charset="utf-8"><title>跨易铺</title><style>body{font-family:Microsoft YaHei,sans-serif;margin:0;background:#f4f6f7;color:#59666c;display:grid;place-items:center;height:100vh}.box{text-align:center}.spinner{width:28px;height:28px;border:3px solid #dfe4e7;border-top-color:#f06423;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 16px}@keyframes spin{to{transform:rotate(360deg)}}</style><main class="box"><div class="spinner"></div><div>正在启动工作台，请稍候…</div></main>';
+  const html = '<!doctype html><meta charset="utf-8"><title>抄得快</title><style>body{font-family:Microsoft YaHei,sans-serif;margin:0;background:#f4f6f7;color:#59666c;display:grid;place-items:center;height:100vh}.box{text-align:center}.spinner{width:28px;height:28px;border:3px solid #dfe4e7;border-top-color:#f06423;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 16px}@keyframes spin{to{transform:rotate(360deg)}}</style><main class="box"><div class="spinner"></div><div>正在启动工作台，请稍候…</div></main>';
   return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
 }
 
 async function createMainWindow() {
-  mainWindow = new BrowserWindow({ width: 1440, height: 960, minWidth: 1100, minHeight: 720, title: '跨易铺', autoHideMenuBar: true, show: false, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false } });
+  mainWindow = new BrowserWindow({ width: 1440, height: 960, minWidth: 1100, minHeight: 720, title: '抄得快', autoHideMenuBar: true, show: false, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false } });
   const window = mainWindow;
   window.webContents.session.webRequest.onBeforeSendHeaders({ urls: [`http://127.0.0.1:${localPort}/api/*`] }, (details, callback) => {
     details.requestHeaders['X-Kua-Yipu-Gate'] = localGate;
@@ -290,7 +290,7 @@ async function createMainWindow() {
     dialog.showMessageBox(window, {
       type: 'question',
       title: '确认退出',
-      message: '确认退出跨易铺吗？',
+      message: '确认退出抄得快吗？',
       detail: '退出后正在运行的采集或上架任务会停止。已保存的数据会保留。',
       buttons: ['确认退出', '取消退出'],
       defaultId: 1,
@@ -833,7 +833,7 @@ app.whenReady().then(() => {
   createLoginWindow();
   ensureLocalServer().catch((error) => {
     if (isWindowAlive(loginWindow)) {
-      dialog.showErrorBox('跨易铺启动失败', `本地工作台服务启动失败：${error.message}`);
+      dialog.showErrorBox('抄得快启动失败', `本地工作台服务启动失败：${error.message}`);
     }
   });
 });
