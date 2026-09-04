@@ -68,6 +68,26 @@ test('routes selected products into automatic exact-leaf category groups', () =>
   assert.equal(resolvePublishRoute(products[0], settings).automatic, true);
 });
 
+test('exact category ID ignores a stale binding from another leaf ID', () => {
+  const product = {
+    id: 'battery',
+    sourceCategoryId: '100010001',
+    sourceCategoryPath: ['Consumer Electronics', 'Chargers, Batteries & Power Supplies', 'Battery Chargers']
+  };
+  const route = resolvePublishRoute(product, {
+    publishBindings: {
+      stale: {
+        categoryId: '100010999',
+        category: 'Consumer Electronics >> Chargers, Batteries & Power Supplies >> Battery Chargers',
+        url: buildAlibabaPublishUrl('100010999')
+      }
+    }
+  });
+  assert.equal(route.categoryId, '100010001');
+  assert.equal(route.url, buildAlibabaPublishUrl('100010001'));
+  assert.equal(route.source, 'generated');
+});
+
 test('routes thousands of unbound products by exact leaf category without manual pages', () => {
   const products = Array.from({ length: 3000 }, (_, index) => ({
     id: `product-${index}`,
@@ -257,6 +277,21 @@ test('does not treat a single descriptive source value as a required SKU variant
   assert.equal(findBlockingUnmappedVariant(product, ['compatible model: General']), '');
 });
 
+test('keeps a single image-backed source model as a required SKU variant', () => {
+  const product = {
+    variantGroups: [{
+      name: 'model number',
+      type: 'IMAGE',
+      options: ['MF1604-2PCS/PAIR'],
+      optionImages: { 'MF1604-2PCS/PAIR': 'https://example.com/model.jpg' }
+    }]
+  };
+  assert.equal(
+    findBlockingUnmappedVariant(product, ['model number: MF1604-2PCS/PAIR']),
+    'model number: MF1604-2PCS/PAIR'
+  );
+});
+
 test('keeps a multi-option SKU variant blocking when the target category cannot represent it', () => {
   const product = { variantGroups: [{ name: 'Compatible model', options: ['Model A', 'Model B'] }] };
   assert.equal(findBlockingUnmappedVariant(product, ['Compatible model: Model B']), 'Compatible model: Model B');
@@ -318,6 +353,9 @@ test('treats translated category names as the same category', () => {
   assert.equal(categoryMismatchMessage({
     sourceCategoryPath: ['Consumer Electronics', 'Camera, Photo & Accessories', 'Drones Accessories']
   }, '消费电子 >> 相机，无人机配件 >> 无人机配件'), '');
+  assert.equal(categoryMismatchMessage({
+    sourceCategoryPath: ['Consumer Electronics', 'Chargers, Batteries & Power Supplies', 'Battery Chargers']
+  }, '消费电子 >> 充电器，电池和电源 >> 电池充电器'), '');
 });
 
 test('preserves source delivery quantity ranges separately from lead days', () => {

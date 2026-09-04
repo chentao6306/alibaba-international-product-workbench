@@ -40,7 +40,10 @@ export function canonicalCategoryPart(value) {
     'rugged phone': 'rugged phone',
     '电机控制器': 'motor controllers',
     'motor controller': 'motor controllers',
-    'motor controllers': 'motor controllers'
+    'motor controllers': 'motor controllers',
+    '电池充电器': 'battery chargers',
+    'battery charger': 'battery chargers',
+    'battery chargers': 'battery chargers'
   })[normalized] || normalized;
 }
 
@@ -109,10 +112,10 @@ export function resolvePublishRoute(product, settings = {}) {
   let binding = category.id
     ? bindings.find((item) => item.categoryId === category.id)
     : null;
-  if (!binding && category.pathKey) {
+  if (!category.id && !binding && category.pathKey) {
     binding = bindings.find((item) => categoryPathKey(item.category) === category.pathKey);
   }
-  if (!binding && category.path.length) {
+  if (!category.id && !binding && category.path.length) {
     const leaf = categoryLeafKey(category.path);
     binding = bindings.find((item) => leaf && categoryLeafKey(item.category) === leaf);
   }
