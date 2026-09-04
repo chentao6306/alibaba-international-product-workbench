@@ -1959,6 +1959,65 @@ async function clearSaleAttributeSelections(page) {
   }).catch(() => false);
 }
 
+async function clearEmptySaleAttributeSelections(page) {
+  const selectedIds = await page.evaluate(() => {
+    const root = document.querySelector('#saleAttributesItems');
+    if (!root) return [];
+    const ids = new Set([...root.querySelectorAll('input[type="checkbox"]:checked')]
+      .filter((input) => !input.disabled)
+      .map((input) => String(input.value || '').trim())
+      .filter(Boolean));
+    const fiberKey = Object.getOwnPropertyNames(root).find((key) => key.startsWith('__reactFiber'));
+    let fiber = fiberKey ? root[fiberKey] : null;
+    for (let depth = 0; fiber && depth < 12; depth += 1, fiber = fiber.return) {
+      const props = fiber.memoizedProps || fiber.stateNode?.props;
+      if (props?.id !== 'saleAttributesItems' || !Array.isArray(props.value)) continue;
+      for (const item of props.value) {
+        const id = String(item?.value || '').trim();
+        if (id) ids.add(id);
+      }
+      break;
+    }
+    return [...ids];
+  }).catch(() => []);
+  const cleared = [];
+  for (const id of selectedIds) {
+    const row = await visibleSaleSpecRow(page, id);
+    const hasValue = row ? await row.evaluate((node) => {
+      const visible = (item) => Boolean(item && (item.offsetWidth || item.offsetHeight || item.getClientRects().length));
+      const editable = [...node.querySelectorAll('input, textarea, select')].filter((item) => {
+        const type = String(item.type || '').toLowerCase();
+        return visible(item) && !['hidden', 'file', 'button', 'submit', 'reset'].includes(type);
+      });
+      if (editable.some((item) => ['checkbox', 'radio'].includes(String(item.type || '').toLowerCase())
+        ? item.checked : String(item.value || '').trim())) return true;
+      return [...node.querySelectorAll('[data-value], .next-tag-body, [class*="tag-body"], [class*="selected-value"]')]
+        .some((item) => visible(item) && String(item.getAttribute?.('data-value') || item.textContent || '').trim());
+    }).catch(() => false) : false;
+    if (hasValue) continue;
+    if (await ensureSaleAttributeCleared(page, id)) cleared.push(id);
+  }
+  return cleared;
+}
+
+async function visibleEmptyAttributeLabels(page) {
+  return page.evaluate(() => {
+    const clean = (value) => String(value || '').replace(/\s+/g, ' ').replace(/^[*＊]\s*/, '').trim();
+    const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
+    const labels = [];
+    for (const error of document.querySelectorAll('[class*="error"], [class*="invalid"], [aria-invalid="true"]')) {
+      if (!visible(error) || !/属性值不能为空|必填项不能为空|required|不能为空/i.test(clean(error.textContent) + ' ' + (error.getAttribute?.('itemmessage') || ''))) continue;
+      let row = error;
+      for (let level = 0; row && level < 7; level += 1, row = row.parentElement) {
+        const label = [...row.querySelectorAll('label, legend, [class*="label"]')]
+          .map((node) => clean(node.textContent)).find((text) => text && text.length <= 80 && !/属性值不能为空|必填项不能为空|required|不能为空/i.test(text));
+        if (label) { labels.push(label); break; }
+      }
+    }
+    return [...new Set(labels)].slice(0, 8);
+  }).catch(() => []);
+}
+
 async function specControlIsChecked(control) {
   if (!control) return false;
   const { wrapper, input } = control;
@@ -4407,6 +4466,11 @@ export class SellerPublisher {
       }
     }
 
+    // Saving drafts and uploading media can restore a stale, checked sales
+    // attribute without any value. Alibaba reports only "属性值不能为空" for
+    // that state, so remove those empty optional selections before submit.
+    await clearEmptySaleAttributeSelections(page);
+
     const agreementText = page.getByText(/请再次检查并确认提交的信息真实、合法和有效/).last();
     if (await agreementText.isVisible().catch(() => false)) {
       const agreementContainer = agreementText.locator('xpath=ancestor::*[.//input[@type="checkbox"]][1]');
@@ -4439,6 +4503,19 @@ export class SellerPublisher {
         const cleared = await clearMainImagesForRetry(page);
         if (!cleared) throw error;
         await this.uploadMainImages(page, product);
+        let retryAction = null;
+        for (const text of buttonTexts) {
+          const candidate = page.getByRole('button', { name: text, exact: false }).last();
+          if (await candidate.isVisible().catch(() => false) && !await candidate.isDisabled().catch(() => false)) { retryAction = candidate; break; }
+        }
+        if (!retryAction) throw error;
+        verification = await waitForActionResult(page, retryAction, mode, originalUrl);
+      } else if (/属性值不能为空|attribute value.*(?:empty|required)/i.test(actionError)) {
+        const emptyLabels = await visibleEmptyAttributeLabels(page);
+        const cleared = await clearEmptySaleAttributeSelections(page);
+        if (!cleared.length) {
+          throw new Error(`${actionError}${emptyLabels.length ? `（空字段：${emptyLabels.join('、')}）` : '；国际站未返回具体属性名称，请在当前发布表单查看红色标记字段'}`);
+        }
         let retryAction = null;
         for (const text of buttonTexts) {
           const candidate = page.getByRole('button', { name: text, exact: false }).last();

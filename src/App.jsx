@@ -302,6 +302,15 @@ function ProductsView({ state, refresh, notify, onMenu }) {
   const allChecked = pagedProducts.length > 0 && pagedProducts.every((item) => item.selected);
   const allProductsSelected = state.products.length > 0 && state.products.every((item) => item.selected);
   const selectedProducts = state.products.filter((item) => item.selected);
+  const incompleteSelectedProducts = selectedProducts.filter((product) => !productCompleteness(product).complete);
+  const publishedReferenceProducts = state.products.filter((product) => product.status === 'published');
+  const referenceUnavailableReason = !selectedProducts.length
+    ? '请先勾选需要补全资料的商品'
+    : !incompleteSelectedProducts.length
+      ? '已勾选商品的资料完整，无需引用'
+      : !publishedReferenceProducts.length
+        ? '当前没有上架成功的商品可供引用'
+        : '引用上架成功商品中的缺失资料';
 
   useEffect(() => { setPage(1); }, [query, filter, pageSize]);
   useEffect(() => { if (page > pageCount) setPage(pageCount); }, [page, pageCount]);
@@ -353,7 +362,7 @@ function ProductsView({ state, refresh, notify, onMenu }) {
       <button className="secondary-button" disabled={!state.products.length} onClick={() => selectAllProducts(!allProductsSelected)} title={allProductsSelected ? '取消全部商品的选择' : '选择商品资料库中的全部商品'}><Check size={15} />{allProductsSelected ? '取消全选' : `全选全部商品 ${state.products.length}`}</button>
       <button className="secondary-button" disabled={!state.products.length} onClick={() => setFindReplaceOpen(true)}><Search size={15} />查找替换</button>
       {selectedProducts.length > 0 && <button className="primary-button" onClick={() => setBatchEditing(true)}><Pencil size={15} />批量修改 {selectedProducts.length}</button>}
-      {selectedProducts.some((product) => !productCompleteness(product).complete) && state.products.some((product) => product.status === 'published') && <button className="secondary-button" onClick={() => setReferenceOpen(true)}><ClipboardList size={15} />引用成功商品资料</button>}
+      <button className="secondary-button" disabled={!incompleteSelectedProducts.length || !publishedReferenceProducts.length} title={referenceUnavailableReason} onClick={() => setReferenceOpen(true)}><ClipboardList size={15} />引用成功商品资料</button>
       {selectedProducts.length > 0 && <button className="secondary-button danger-button" onClick={removeSelected}><Trash2 size={15} />删除已勾选 {selectedProducts.length}</button>}
       <label className="page-size"><span>每页</span><select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}><option value="10">10</option><option value="20">20</option><option value="50">50</option></select></label>
       <span className="result-count">共 {products.length} 件</span>
@@ -374,7 +383,7 @@ function ProductsView({ state, refresh, notify, onMenu }) {
     {editing && <ProductEditor product={editing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); await refresh(); notify('商品修改已保存'); }} notify={notify} />}
     {batchEditing && <BatchEditor products={selectedProducts} onClose={() => setBatchEditing(false)} onSaved={async (result) => { setBatchEditing(false); await refresh(); notify(result?.categoryBindingReset ? '批量修改已应用，请重新绑定修改后类目的国际站发布表单' : '批量修改已应用'); }} notify={notify} />}
     {findReplaceOpen && <FindReplaceDialog products={selectedProducts.length ? selectedProducts : state.products} onClose={() => setFindReplaceOpen(false)} onSaved={async (result) => { setFindReplaceOpen(false); await refresh(); notify(`已替换 ${result.changedProducts} 件商品，共 ${result.total} 处`); }} notify={notify} />}
-    {referenceOpen && <ReferenceDialog products={selectedProducts.filter((product) => !productCompleteness(product).complete)} references={state.products.filter((product) => product.status === 'published')} onClose={() => setReferenceOpen(false)} onSaved={async (result) => { setReferenceOpen(false); await refresh(); notify(`已引用成功商品资料，补全 ${result.changed.length} 件商品`); }} notify={notify} />}
+    {referenceOpen && <ReferenceDialog products={incompleteSelectedProducts} references={publishedReferenceProducts} onClose={() => setReferenceOpen(false)} onSaved={async (result) => { setReferenceOpen(false); await refresh(); notify(`已引用成功商品资料，补全 ${result.changed.length} 件商品`); }} notify={notify} />}
   </>;
 }
 
