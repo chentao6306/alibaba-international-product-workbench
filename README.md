@@ -10,7 +10,7 @@
 
 - GitHub 仓库：`chentao6306/alibaba-international-product-workbench`
 - 完整项目分支：`codex/full-project-20260901`
-- 当前应用版本：`1.2.19`
+- 当前应用版本：`1.2.20`
 - 源码语言：JavaScript（ES Modules）、JSX、HTML、CSS、PowerShell 和 Windows Batch
 
 仓库保存可复现构建所需的源码、锁定依赖清单、测试、构建配置、授权服务源码和维护脚本。`node_modules`、`dist`、内置 Chromium、安装包以及包含账号会话和业务商品的运行时数据不进入 Git；它们分别由依赖安装、构建、浏览器准备和应用运行产生。这样既能从源码完整重建程序，也不会把卖家 Cookie、密码或业务数据上传到 GitHub。
