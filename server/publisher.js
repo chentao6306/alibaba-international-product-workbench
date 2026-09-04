@@ -5,6 +5,7 @@ import { load } from 'cheerio';
 import { hasExplicitHumanChallenge, hidePage, launchPersistent, revealPage, settlePage, syncAlibabaCookies, waitForHumanVerification } from './browser-runtime.js';
 import { extractAlibabaSourceData, parseAlibabaDetailDataScript } from './alibaba-source-data.js';
 import { SOURCE_LANGUAGE_HEADERS, withSourceLocale } from './source-locale.js';
+import { categoryIdFromUrl, normalizeCategoryId } from './category-routing.js';
 
 const WORKBENCH_URL = 'https://i.alibaba.com/';
 const TITLE_SELECTORS = [
@@ -36,7 +37,13 @@ export function sanitizeCollectedProduct(product) {
   const keywords = (Array.isArray(product.keywords) ? product.keywords : []).filter((value) => !isPromotionalText(value));
   const subtitle = isPromotionalText(product.subtitle) ? '' : product.subtitle;
   const description = String(product.description || '').replace(/供应商的产品说明\s*报告可疑活动/gi, '').trim();
-  return { ...product, ...(categoryPath.length ? { sourceCategoryPath: categoryPath } : {}), productType, keywords, subtitle, description };
+  const sourceCategoryId = normalizeCategoryId(product.sourceCategoryId || product.categoryId);
+  return {
+    ...product,
+    ...(categoryPath.length ? { sourceCategoryPath: categoryPath } : {}),
+    ...(sourceCategoryId ? { sourceCategoryId, categoryId: product.categoryId || sourceCategoryId } : {}),
+    productType, keywords, subtitle, description
+  };
 }
 
 const CATEGORY_LEAF_ALIASES = new Map([
@@ -44,7 +51,9 @@ const CATEGORY_LEAF_ALIASES = new Map([
   ['camera photo accessories', 'camera photo accessories'], ['相机照片配件', 'camera photo accessories'],
   ['other consumer electronics', 'other consumer electronics'], ['其他消费电子产品', 'other consumer electronics'],
   ['rugged phone', 'rugged phone'], ['坚固型手机', 'rugged phone'],
-  ['motor controllers', 'motor controllers'], ['motor controller', 'motor controllers'], ['电机控制器', 'motor controllers']
+  ['motor controllers', 'motor controllers'], ['motor controller', 'motor controllers'], ['电机控制器', 'motor controllers'],
+  ['microphones', 'microphones'], ['microphone', 'microphones'], ['麦克风', 'microphones'],
+  ['motor drivers', 'motor drivers'], ['motor driver', 'motor drivers'], ['电机驱动器', 'motor drivers']
 ]);
 
 export function canonicalCategoryLeaf(value) {
@@ -90,6 +99,10 @@ export function categoryMismatchMessage(product, category) {
     if (expectedLeaf && actualLeaf && expectedLeaf !== actualLeaf) {
       return `当前发布类目“${category}”与商品目标类目“${expectedPath.join(' >> ')}”不一致，请绑定目标类目的国际站发布表单`;
     }
+    // Alibaba's UI is localized; compare the full path only when leaves are
+    // not covered by a known translation alias. A translated leaf match is
+    // sufficient because the platform's catId is the authoritative route.
+    if (expectedLeaf && actualLeaf && expectedLeaf === actualLeaf) return '';
   }
   const electronics = /\b(phone|smartphone|mobile|tablet|pad)\b/i.test(title);
   const serviceCategory = /商务服务|认证、检验|检验和质量控制|business service|inspection service/i.test(category || '');
@@ -2079,7 +2092,7 @@ export class SellerPublisher {
       }
       const bodyText = await page.locator('body').innerText().catch(() => '');
       const category = bodyText.match(/当前类目：\s*([^\n]+)/)?.[1]?.trim() || '';
-      return { url, title: await page.title(), category };
+      return { url, title: await page.title(), category, categoryId: categoryIdFromUrl(url) };
     } finally {
       // Binding is complete (or rejected); never leave the seller browser
       // visible while the workbench is idle.
@@ -2533,9 +2546,22 @@ export class SellerPublisher {
         productJson?.offers?.price,
         bodyText.match(/(?:¥|￥|\$)\s*[\d,.]+\s*(?:\d+\s*[-–]\s*\d+|≥\s*[\d,]+)?/g)?.join(' ')
       ].filter(Boolean).join(' '));
-      const categoryPath = [...document.querySelectorAll('nav a, [data-testid*="breadcrumb"] a')]
+      const categoryLinks = [...document.querySelectorAll('nav a, [data-testid*="breadcrumb"] a, a[href*="categoryId="], a[href*="catId="]')];
+      const categoryPath = categoryLinks
         .map((node) => clean(node.textContent)).filter((text) => text && text.length < 80
           && !/(?:Alibaba\s*Lens|免费比价插件|寻找价格更低|相似商品|下载扩展程序|Accio\s*Work|报告可疑活动|report suspicious activity)/i.test(text)).slice(0, 8);
+      const categoryIdCandidates = [];
+      const addCategoryId = (value) => {
+        const match = String(value || '').match(/(?:categoryId|catId|leafCategoryId)["'=:\s%]*(\d{4,})/i)
+          || String(value || '').match(/\b(\d{6,})\b/);
+        if (match?.[1] && !categoryIdCandidates.includes(match[1])) categoryIdCandidates.push(match[1]);
+      };
+      for (const link of categoryLinks) addCategoryId(link.href || link.getAttribute('href'));
+      for (const meta of document.querySelectorAll('meta[name*="category" i], meta[property*="category" i]')) addCategoryId(meta.content);
+      for (const script of document.scripts) {
+        const text = script.textContent || '';
+        if (/categoryId|catId|leafCategoryId/i.test(text)) addCategoryId(text);
+      }
       const highlights = [...document.querySelectorAll('[data-module-name*="highlight"] li, [data-module-name*="highlight"] p')]
         .map((node) => clean(node.textContent)).filter(Boolean).slice(0, 12);
       const descriptionHtml = (descriptionModule?.innerHTML || '').replace(/<script[\s\S]*?<\/script>/gi, '').slice(0, 90000);
@@ -2583,7 +2609,7 @@ export class SellerPublisher {
         origin: attrMap['产地'] || attrMap['原产地'] || attrMap['place of origin'] || attrMap['country/region of manufacture'] || '',
         model: attrMap['型号'] || attrMap['model number'] || '',
         brand: attrMap['品牌名称'] || attrMap['品牌'] || attrMap['brand name'] || attrMap['brand'] || '',
-        productType: categoryPath.at(-1) || '', categoryPath, priceText, subtitle, keywords,
+        productType: categoryPath.at(-1) || '', categoryPath, categoryId: categoryIdCandidates[0] || '', priceText, subtitle, keywords,
         salesUnit, paymentMethod, shippingText, services: { sourceTexts: sourceServices, customizations }, certificates,
         descriptionHtml,
         description: highlights.join('\n') || clean(descriptionModule?.innerText).slice(0, 12000),
@@ -2692,6 +2718,8 @@ export class SellerPublisher {
       brand: detail.brand,
       productType: detail.productType,
       sourceCategoryPath: detail.categoryPath,
+      sourceCategoryId: structuredSource?.sourceCategoryId || detail.categoryId || base.sourceCategoryId || base.categoryId || '',
+      categoryId: base.categoryId || structuredSource?.sourceCategoryId || detail.categoryId || base.sourceCategoryId || '',
       description: detail.description,
       videoUrl: detail.videoUrl,
       dataCompleteness: {
@@ -3716,12 +3744,23 @@ export class SellerPublisher {
       await waitForHumanVerification(page, { timeout: 300000 });
     }
     if (/login|passport/i.test(page.url())) throw new Error('阿里巴巴国际站登录状态已失效，请重新登录');
+    const expectedCategoryId = normalizeCategoryId(product.categoryId || product.sourceCategoryId);
+    const actualCategoryId = categoryIdFromUrl(page.url()) || categoryIdFromUrl(publishPageUrl);
+    if (expectedCategoryId && actualCategoryId && expectedCategoryId !== actualCategoryId) {
+      throw new Error(`国际站实际打开类目 ID ${actualCategoryId}，与商品目标类目 ID ${expectedCategoryId} 不一致，已停止发布`);
+    }
     if (/\/product\/(?:easyListing|category)\.htm/i.test(new URL(page.url()).pathname)) {
       throw new Error('绑定的是商品类目选择页，不是商品填写表单。请先完成类目选择后重新绑定');
     }
 
     const titleInput = await waitForFirstVisible(page, TITLE_SELECTORS, 30000);
     if (!titleInput) throw new Error('等待 30 秒后仍未识别到标题输入框，请确认国际站表单已加载完成');
+    const postingText = compactText(await page.locator('body').innerText().catch(() => ''), 5000);
+    const visibleCategory = postingText.match(/当前类目\s*[:：]\s*(.+?)(?=切换类目|基本信息|商品图片|$)/)?.[1]?.trim() || '';
+    const visibleMismatch = visibleCategory ? categoryMismatchMessage(product, visibleCategory) : '';
+    if (visibleMismatch) {
+      throw new Error(`国际站发布表单实际类目为“${visibleCategory}”：${visibleMismatch}`);
+    }
     await fillAndVerify(titleInput, product.title, '商品标题');
 
     if (product.subtitle) {

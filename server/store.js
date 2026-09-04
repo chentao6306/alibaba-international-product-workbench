@@ -11,6 +11,7 @@ const EMPTY_STATE = {
   settings: {
     publishPageUrl: '',
     publishCategory: '',
+    publishBindings: {},
     defaultStock: 100,
     priceMarkup: 0,
     publishMode: 'draft'

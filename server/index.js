@@ -12,6 +12,7 @@ import {
   SellerPublisher
 } from './publisher.js';
 import { copyMissingProductData, createPublishSnapshot, findAndReplaceProduct, recordProductMutation, syncProductModel } from './product-model.js';
+import { buildAlibabaPublishUrl, createPublishPlan, normalizeCategoryId, productCategory, publishBindings, rememberPublishBinding, resolvePublishRoute } from './category-routing.js';
 
 // In the packaged desktop build the server module is unpacked while the
 // frontend remains inside app.asar. APP_ROOT_DIR keeps both layouts working.
@@ -47,7 +48,9 @@ const store = new JsonStore(path.join(dataDir, 'workspace.json'));
 const publisher = new SellerPublisher(dataDir);
 const collector = new ShopCollector(dataDir, (products, onProgress) => publisher.enrichSourceProducts(products, onProgress));
 store.update((state) => {
-  state.version = 3;
+  state.version = 5;
+  if (!state.settings || typeof state.settings !== 'object') state.settings = {};
+  if (!state.settings.publishBindings || typeof state.settings.publishBindings !== 'object' || Array.isArray(state.settings.publishBindings)) state.settings.publishBindings = {};
   if (state.settings.publishPageUrl && /^https?:\/\/(?:[^/]+\.)?1688\.com(?:\/|$)/i.test(state.settings.publishPageUrl)) {
     state.settings.publishPageUrl = '';
   }
@@ -55,6 +58,11 @@ store.update((state) => {
   if (invalidCategoryBinding) state.settings.publishPageUrl = '';
   if (invalidCategoryBinding) state.settings.publishCategory = '';
   for (const product of state.products) {
+    if (!product.sourceCategoryId && product.categoryId) product.sourceCategoryId = product.categoryId;
+    if (!product.categoryId && product.sourceCategoryId) product.categoryId = product.sourceCategoryId;
+    const inferredCategory = productCategory(product);
+    if (!product.categoryId && inferredCategory.id) product.categoryId = inferredCategory.id;
+    if (!product.sourceCategoryId && inferredCategory.id) product.sourceCategoryId = inferredCategory.id;
     if (product.source?.snapshot) continue;
     if (!/Alibaba Manufacturer Directory|Suppliers, Manufacturers, Exporters/i.test(product.title || '')) continue;
     const slug = product.sourceUrl?.match(/\/product-detail\/([^/?#]+?)_\d{8,}\.html/i)?.[1];
@@ -62,6 +70,13 @@ store.update((state) => {
     product.title = slug.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
     product.sourceTitle = product.title;
     product.updatedAt = new Date().toISOString();
+  }
+  if (state.settings.publishPageUrl) {
+    rememberPublishBinding(state.settings, {
+      url: state.settings.publishPageUrl,
+      category: state.settings.publishCategory,
+      source: 'legacy'
+    });
   }
   // Never sanitize or rewrite a product that already has a source snapshot.
   // Its snapshot is the immutable capture of the source page; edits belong to
@@ -510,15 +525,9 @@ app.post('/api/products/batch-update', (request, response, next) => {
         delete next.sourceSnapshotHash;
         recordProductMutation(product, { ...next, status: 'ready' }, { actor: 'user', action: 'batch-edit' });
       });
-      if ((Array.isArray(patch.categoryPath) && patch.categoryPath.length) || patch.categoryId) {
-        // A category change invalidates the previously bound Alibaba form.
-        // Require an explicit bind-page action for the external form.
-        state.settings.publishCategory = '';
-        state.settings.publishPageUrl = '';
-      }
       return state.products.filter((product) => ids.has(product.id));
     });
-    response.json({ updated: updated.length, categoryBindingReset: Boolean((Array.isArray(patch.categoryPath) && patch.categoryPath.length) || patch.categoryId) });
+    response.json({ updated: updated.length, categoryBindingReset: false });
   } catch (error) { next(error); }
 });
 
@@ -582,7 +591,7 @@ app.post('/api/products/delete', (request, response, next) => {
 });
 
 app.patch('/api/settings', (request, response) => {
-  const allowed = ['publishPageUrl', 'publishCategory', 'defaultStock', 'priceMarkup', 'publishMode'];
+  const allowed = ['publishPageUrl', 'publishCategory', 'publishBindings', 'defaultStock', 'priceMarkup', 'publishMode'];
   const settings = store.update((state) => {
     for (const key of allowed) if (Object.hasOwn(request.body, key)) state.settings[key] = request.body[key];
     return state.settings;
@@ -598,8 +607,7 @@ app.post('/api/seller/bind-page', async (_request, response, next) => {
   try {
     const bound = await publisher.bindCurrentPage();
     store.update((state) => {
-      state.settings.publishPageUrl = bound.url;
-      state.settings.publishCategory = bound.category;
+      rememberPublishBinding(state.settings, { ...bound, source: 'verified' });
     });
     response.json(bound);
   } catch (error) { next(error); }
@@ -667,8 +675,11 @@ async function runPublishJob(jobId) {
           product = { ...product, ...enriched };
         }
         const settings = store.read().settings;
-        const publishSnapshot = createPublishSnapshot(product, { mode, category: settings.publishCategory });
-        const result = await publisher.publishProduct(product, settings.publishPageUrl, mode, settings.publishCategory);
+        const route = resolvePublishRoute(product, settings);
+        if (route.error || !route.url) throw new Error(route.error || '该商品没有可用的国际站发布页');
+        const publishSnapshot = createPublishSnapshot(product, { mode, category: route.category, categoryId: route.categoryId, publishPageUrl: route.url });
+        store.patchJob(jobId, { message: `正在处理 ${index + 1}/${total}：${product.title}（${route.category || '未识别类目'}）` });
+        const result = await publisher.publishProduct(product, route.url, mode, route.category);
         // Keep the real publishing page visible for inspection. The user
         // explicitly requested to see the browser while an item is being
         // uploaded and submitted; collection still uses the hidden context.
@@ -685,6 +696,7 @@ async function runPublishJob(jobId) {
             target.publishHistory.unshift({ ...publishSnapshot, result });
             syncProductModel(target);
           }
+          rememberPublishBinding(draft.settings, { ...route, verifiedAt: new Date().toISOString(), source: 'verified' });
         });
         store.patchJob(jobId, { progress: index + 1, total, message: `已处理 ${index + 1}/${total}：${product.title}` });
       } catch (error) {
@@ -699,7 +711,8 @@ async function runPublishJob(jobId) {
             const result = { status: 'failed', message };
             Object.assign(target, { status: 'publish_failed', publishResult: result, updatedAt: new Date().toISOString() });
             target.publishHistory = Array.isArray(target.publishHistory) ? target.publishHistory : [];
-            target.publishHistory.unshift({ ...createPublishSnapshot(target, { mode, category: store.read().settings.publishCategory }), result });
+            const failureRoute = resolvePublishRoute(target, store.read().settings);
+            target.publishHistory.unshift({ ...createPublishSnapshot(target, { mode, category: failureRoute.category, categoryId: failureRoute.categoryId, publishPageUrl: failureRoute.url }), result });
             syncProductModel(target);
           }
         });
@@ -741,7 +754,15 @@ app.post('/api/publish', (request, response, next) => {
   const products = state.products.filter((item) => ids.has(item.id));
   if (!products.length) return next(Object.assign(new Error('请至少选择一件商品'), { status: 400 }));
   const mode = request.body.mode === 'submit' ? 'submit' : 'draft';
-  const job = store.createJob('publish', { productIds: products.map((item) => item.id), mode });
+  const plan = createPublishPlan(products, state.settings);
+  const unresolved = plan.filter((group) => group.error || !group.url);
+  if (unresolved.length) {
+    return next(Object.assign(new Error(`有 ${unresolved.length} 个商品类目无法自动路由：${unresolved.map((group) => group.error || group.category || group.categoryId).join('；')}`), { status: 400 }));
+  }
+  const job = store.createJob('publish', {
+    productIds: products.map((item) => item.id), mode,
+    categoryGroups: plan.map((group) => ({ categoryId: group.categoryId, category: group.category, productIds: group.products.map((item) => item.id) }))
+  });
   store.patchJob(job.id, { total: products.length });
   response.status(202).json({ ...job, total: products.length });
   setImmediate(() => runPublishJob(job.id));
@@ -817,6 +838,15 @@ app.post('/api/products/find-replace', (request, response, next) => {
       return { changedProducts, matches, total: matches.reduce((sum, item) => sum + item.count, 0) };
     });
     response.json(result);
+  } catch (error) { next(error); }
+});
+
+app.get('/api/publish/plan', (request, response, next) => {
+  try {
+    const state = store.read();
+    const ids = new Set(Array.isArray(request.query.ids) ? request.query.ids : String(request.query.ids || '').split(',').filter(Boolean));
+    const products = ids.size ? state.products.filter((item) => ids.has(item.id)) : state.products.filter((item) => item.selected);
+    response.json({ groups: createPublishPlan(products, state.settings), bindings: publishBindings(state.settings) });
   } catch (error) { next(error); }
 });
 

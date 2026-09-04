@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 
-export const PRODUCT_SCHEMA_VERSION = 4;
+export const PRODUCT_SCHEMA_VERSION = 5;
 
 const nowIso = () => new Date().toISOString();
 const list = (value) => Array.isArray(value) ? value : [];
@@ -130,6 +130,7 @@ function snapshotFields(product) {
     collectedDetailAt: product.collectedDetailAt || '', dataCompleteness: product.dataCompleteness || null,
     title: product.title || '', subtitle: product.subtitle || '', keywords: list(product.keywords),
     categoryPath: list(product.categoryPath || product.sourceCategoryPath), categoryId: product.categoryId || '',
+    sourceCategoryPath: list(product.sourceCategoryPath), sourceCategoryId: product.sourceCategoryId || '',
     mainImages: list(product.mainImages || product.images), detailImages: list(product.detailImages),
     videos: list(product.videos), videoUrl: product.videoUrl || '', attributes: list(product.attributes),
     customAttributes: list(product.customAttributes), variantGroups: list(product.variantGroups), skus: list(product.skus),
@@ -279,6 +280,7 @@ export function createPublishSnapshot(product, context = {}) {
   return {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     createdAt: nowIso(), mode: context.mode || 'draft', target: 'alibaba.com',
-    category: context.category || '', data: snapshotFields(product), quality: auditProduct(product)
+    category: context.category || '', categoryId: context.categoryId || '', publishPageUrl: context.publishPageUrl || '',
+    data: snapshotFields(product), quality: auditProduct(product)
   };
 }

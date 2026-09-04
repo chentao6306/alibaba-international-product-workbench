@@ -5,6 +5,47 @@ const asNumber = (value) => {
 
 const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
 
+// Alibaba has used several names for the leaf category field over time.  Keep
+// the explicit product fields first, then fall back to a bounded recursive
+// search so category IDs survive minor detailData shape changes.
+export function extractAlibabaCategoryId(detailData) {
+  const product = detailData?.globalData?.product || {};
+  const explicit = [
+    product.leafCategoryId,
+    product.productCategoryId,
+    product.categoryId,
+    product.catId,
+    product.category?.leafCategoryId,
+    product.category?.id,
+    detailData?.globalData?.global?.leafCategoryId,
+    detailData?.globalData?.global?.categoryId,
+    detailData?.globalData?.categoryId
+  ];
+  const normalize = (value) => String(value ?? '').match(/\d{4,}/)?.[0] || '';
+  for (const value of explicit) {
+    const id = normalize(value);
+    if (id) return id;
+  }
+  const preferredKeys = ['leafCategoryId', 'productCategoryId', 'categoryId', 'catId'];
+  const seen = new Set();
+  let visited = 0;
+  function walk(value) {
+    if (!value || typeof value !== 'object' || seen.has(value) || visited > 50000) return '';
+    seen.add(value);
+    visited += 1;
+    for (const key of preferredKeys) {
+      const id = normalize(value[key]);
+      if (id) return id;
+    }
+    for (const child of Object.values(value)) {
+      const id = walk(child);
+      if (id) return id;
+    }
+    return '';
+  }
+  return walk(detailData);
+}
+
 function findAssignedObject(scriptText, assignmentName) {
   const source = String(scriptText || '');
   const marker = new RegExp(`(?:window\\.)?${assignmentName}\\s*=\\s*`).exec(source);
@@ -137,6 +178,7 @@ function structuredVariants(detailData) {
 export function extractAlibabaSourceData(detailData) {
   if (!detailData) return null;
   const product = detailData.globalData?.product || {};
+  const categoryId = extractAlibabaCategoryId(detailData);
   const pricing = structuredPrice(detailData);
   const variants = structuredVariants(detailData);
   return {
@@ -148,6 +190,7 @@ export function extractAlibabaSourceData(detailData) {
     sourcePriceText: pricing.sourcePriceRange?.formattedText || pricing.formattedText || '',
     salesUnit: pricing.unit,
     priceMode: pricing.tiers.length ? 'quantity-tier' : pricing.sourcePriceRange ? 'source-range' : '',
+    sourceCategoryId: categoryId,
     variantGroups: variants.variantGroups,
     skus: variants.skus,
     sourceTradeAvailability: {
@@ -156,6 +199,6 @@ export function extractAlibabaSourceData(detailData) {
       exactSkuPricesPublished: variants.skus.length > 0 && variants.skus.every((sku) => Number(sku.price) > 0),
       exactSkuStockPublished: variants.skus.length > 0 && variants.skus.every((sku) => Number.isFinite(Number(sku.stock)))
     },
-    evidence: { method: 'detailData', firstSkuId: variants.firstSkuId }
+    evidence: { method: 'detailData', firstSkuId: variants.firstSkuId, categoryId }
   };
 }

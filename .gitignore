@@ -10,3 +10,4 @@ dist/
 vendor/chromium/
 release-installer/
 release-installer-2/
+.e2e-category-routing/

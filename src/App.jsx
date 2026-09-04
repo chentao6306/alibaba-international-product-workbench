@@ -665,10 +665,16 @@ function PublishView({ state, refresh, notify, onMenu }) {
   const selected = state.products.filter((item) => item.selected);
   const [mode, setMode] = useState(state.settings.publishMode || 'draft');
   const [busy, setBusy] = useState(false);
+  const [plan, setPlan] = useState({ groups: [], bindings: [] });
   const publishing = state.jobs.find((job) => job.type === 'publish' && ['queued', 'running', 'pause_requested'].includes(job.status));
   const pausedJob = state.jobs.find((job) => job.type === 'publish' && job.status === 'paused');
   const currentJob = publishing || pausedJob;
-  const categoryMismatch = selected.some((product) => hasCategoryMismatch(product, state.settings.publishCategory));
+  useEffect(() => {
+    const ids = selected.map((item) => item.id).join(',');
+    api(`/api/publish/plan${ids ? `?ids=${encodeURIComponent(ids)}` : ''}`).then(setPlan).catch(() => setPlan({ groups: [], bindings: [] }));
+  }, [state.products]);
+  const unresolvedGroups = plan.groups.filter((group) => group.error || !group.url);
+  const automaticGroups = plan.groups.filter((group) => !group.error && group.url);
 
   async function run(action, success) {
     setBusy(true);
@@ -694,19 +700,19 @@ function PublishView({ state, refresh, notify, onMenu }) {
       <div className="publish-main">
         <section className="panel connection-panel"><div className="connection-top"><div className={`connection-icon ${state.browser.browserOpen ? 'online' : ''}`}><Store size={22} /></div><div><h2>阿里巴巴国际站卖家后台</h2><p>{state.browser.browserOpen ? 'My Alibaba 浏览器已打开' : '尚未打开登录浏览器'}</p></div><span className={`connection-dot ${state.browser.browserOpen ? 'online' : ''}`}>{state.browser.browserOpen ? '浏览器已连接' : '未连接'}</span></div>
           <div className="connection-actions"><button className="secondary-button" disabled={busy} onClick={() => run(() => api('/api/seller/open', { method: 'POST' }), '已打开 My Alibaba 登录浏览器')}><ExternalLink size={16} />打开 My Alibaba</button><button className="secondary-button" disabled={busy || !state.browser.browserOpen} onClick={() => run(() => api('/api/seller/bind-page', { method: 'POST' }), '国际站发布页已绑定')}><Link2 size={16} />绑定国际站发布页</button></div>
-          <div className="bound-url"><span>发布页</span><code>{state.settings.publishPageUrl || '尚未绑定'}</code>{state.settings.publishPageUrl && <Check size={16} />}</div>
-          {state.settings.publishCategory && <div className="bound-url category-row"><span>类目</span><code>{state.settings.publishCategory}</code>{!categoryMismatch && <Check size={16} />}</div>}
-          {categoryMismatch && <div className="category-warning"><CircleAlert size={17} /><span>当前国际站发布类目与已选择商品不匹配，请先打开对应商品类目的发布表单并重新绑定</span></div>}
+          <div className="bound-url"><span>发布路由</span><code>{selected.length ? `${automaticGroups.length} 个类目自动处理${unresolvedGroups.length ? `，${unresolvedGroups.length} 个需确认` : ''}` : '尚未选择商品'}</code>{selected.length && !unresolvedGroups.length && <Check size={16} />}</div>
+          {automaticGroups.length > 0 && <div className="bound-url category-row"><span>类目任务</span><code>{automaticGroups.map((group) => `${group.category || group.categoryId}（${group.products.length}件）`).join('；')}</code><Check size={16} /></div>}
+          {unresolvedGroups.map((group) => <div className="category-warning" key={group.key}><CircleAlert size={17} /><span>{group.error || `类目 ${group.category || group.categoryId} 尚未绑定，请打开对应发布表单并绑定一次`}</span></div>)}
         </section>
         <section className="panel queue-panel"><div className="section-title"><div><h2>待上架商品</h2><p>来自商品工作台的勾选结果</p></div><strong className="queue-count">{selected.length} 件</strong></div>
           {!selected.length ? <EmptyState icon={PackageCheck} title="上架队列为空" text="到商品工作台勾选需要上架的商品" /> : <div className="queue-list">{selected.map((product) => <div className="queue-item" key={product.id}><div className="mini-thumb">{product.mainImage ? <img src={product.mainImage} alt="" /> : <Boxes size={18} />}</div><div><strong>{product.title}</strong><small>{product.publishResult?.message || `${product.currencySymbol || '¥'}${product.price} · 库存 ${product.stock}`}</small></div><StatusBadge status={product.status} message={product.publishResult?.message} /></div>)}</div>}
         </section>
       </div>
       <aside className="publish-side"><section className="panel launch-panel"><h2>执行方式</h2><div className="mode-picker"><button className={mode === 'draft' ? 'active' : ''} onClick={() => setMode('draft')}><ClipboardList size={18} /><span><strong>保存草稿</strong><small>逐条填充并保存</small></span>{mode === 'draft' && <Check size={17} />}</button><button className={mode === 'submit' ? 'active warning' : ''} onClick={() => setMode('submit')}><CloudUpload size={18} /><span><strong>直接提交</strong><small>填充后自动发布</small></span>{mode === 'submit' && <Check size={17} />}</button></div>
-          <dl><div><dt>已选择</dt><dd>{selected.length} 件</dd></div><div><dt>发布页</dt><dd>{state.settings.publishPageUrl ? '已绑定' : '未绑定'}</dd></div><div><dt>执行模式</dt><dd>{mode === 'draft' ? '保存草稿' : '直接提交'}</dd></div></dl>
+          <dl><div><dt>已选择</dt><dd>{selected.length} 件</dd></div><div><dt>类目任务</dt><dd>{plan.groups.length ? `${plan.groups.length} 组` : '未生成'}</dd></div><div><dt>执行模式</dt><dd>{mode === 'draft' ? '保存草稿' : '直接提交'}</dd></div></dl>
           {pausedJob
             ? <><button className="primary-button publish-button" disabled={busy} onClick={() => resume(pausedJob)}><Play size={18} />继续处理剩余 {Math.max(0, pausedJob.total - pausedJob.progress)} 件</button><button className="secondary-button pause-button" disabled={busy} onClick={() => cancel(pausedJob)}><X size={17} />取消任务</button></>
-            : <button className="primary-button publish-button" disabled={!selected.length || !state.settings.publishPageUrl || categoryMismatch || Boolean(publishing)} onClick={publish}>{publishing ? <LoaderCircle className="spin" size={18} /> : <CloudUpload size={18} />}{publishing ? '任务执行中' : `开始处理 ${selected.length} 件`}</button>}
+            : <button className="primary-button publish-button" disabled={!selected.length || Boolean(unresolvedGroups.length) || Boolean(publishing) || !plan.groups.length} onClick={publish}>{publishing ? <LoaderCircle className="spin" size={18} /> : <CloudUpload size={18} />}{publishing ? '任务执行中' : `开始处理 ${selected.length} 件`}</button>}
           {publishing && <button className="secondary-button pause-button" disabled={busy || publishing.status === 'pause_requested'} onClick={() => pause(publishing)}><Pause size={17} />{publishing.status === 'pause_requested' ? '正在暂停' : '暂停任务'}</button>}
           {currentJob && <div className="compact-progress"><div><span>{currentJob.message}</span><b>{currentJob.progress}/{currentJob.total}</b></div><div className="progress"><i style={{ width: currentJob.total ? `${currentJob.progress / currentJob.total * 100}%` : '10%' }} /></div></div>}
         </section></aside>

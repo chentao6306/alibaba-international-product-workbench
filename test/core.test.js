@@ -28,7 +28,8 @@ import {
   validateProductData
 } from '../server/publisher.js';
 import { auditProduct, copyMissingProductData, findAndReplaceProduct, recordProductMutation, sourceSnapshotFingerprint, syncProductModel, verifySourceIntegrity } from '../server/product-model.js';
-import { extractAlibabaSourceData, parseAlibabaDetailDataScript } from '../server/alibaba-source-data.js';
+import { extractAlibabaCategoryId, extractAlibabaSourceData, parseAlibabaDetailDataScript } from '../server/alibaba-source-data.js';
+import { buildAlibabaPublishUrl, categoryPathKey, createPublishPlan, resolvePublishRoute } from '../server/category-routing.js';
 import { deleteWorkspaceEntities, findWorkspaceJobs, JsonStore } from '../server/store.js';
 import { isExplicitHumanVerificationSignal, normalizeAlibabaCookies } from '../server/browser-runtime.js';
 
@@ -48,6 +49,29 @@ test('find and replace searches nested editable product fields with optional cas
   assert.equal(result.patch.price, undefined);
   assert.equal(result.patch.mainImages, undefined);
   assert.equal(findAndReplaceProduct(product, 'APPLE', 'x', { caseSensitive: true }).count, 0);
+});
+
+test('routes selected products into automatic exact-leaf category groups', () => {
+  const settings = { publishBindings: {} };
+  const products = [
+    { id: 'a', title: 'drone', sourceCategoryPath: ['Consumer Electronics', 'Camera, Photo & Accessories', 'Drones Accessories'], sourceCategoryId: '201346401' },
+    { id: 'b', title: 'motor', sourceCategoryPath: ['Power Transmission', 'Motors', 'Motor Controllers'], sourceCategoryId: '201346402' },
+    { id: 'c', title: 'drone 2', sourceCategoryPath: ['Consumer Electronics', 'Camera, Photo & Accessories', 'Drones Accessories'], sourceCategoryId: '201346401' }
+  ];
+  const plan = createPublishPlan(products, settings);
+  assert.equal(plan.length, 2);
+  assert.equal(plan[0].products.length, 2);
+  assert.equal(plan[0].url, buildAlibabaPublishUrl('201346401'));
+  assert.equal(plan[1].url, buildAlibabaPublishUrl('201346402'));
+  assert.equal(resolvePublishRoute(products[0], settings).automatic, true);
+});
+
+test('extracts Alibaba leaf category IDs from stable and nested detailData fields', () => {
+  assert.equal(extractAlibabaCategoryId({ globalData: { product: { leafCategoryId: 201346401 } } }), '201346401');
+  assert.equal(extractAlibabaCategoryId({ nodeMap: { breadcrumb: { categoryId: '201346402' } } }), '201346402');
+  const source = extractAlibabaSourceData({ globalData: { product: { categoryId: 201346403, sku: {} } } });
+  assert.equal(source.sourceCategoryId, '201346403');
+  assert.equal(source.evidence.categoryId, '201346403');
 });
 
 test('references only missing product data and leaves commercial content untouched', () => {
@@ -510,7 +534,7 @@ test('keeps source-language metadata and legitimate source text unchanged', () =
 
 test('audits and records product source versus working changes', () => {
   const product = syncProductModel({ id: 'p1', sourceId: '1601', title: 'Demo', mainImages: ['1', '2', '3', '4'], detailImages: ['d'], attributes: [{ name: 'Material', value: 'Steel' }, { name: 'Origin', value: 'China' }], origin: 'China', price: 10, priceTiers: [{ minQuantity: 1, price: 10 }], packaging: { weight: 1 }, description: 'Demo' }, { captureSource: true });
-  assert.equal(product.schemaVersion, 4);
+  assert.equal(product.schemaVersion, 5);
   assert.equal(product.source.snapshot.title, 'Demo');
   recordProductMutation(product, { title: 'Edited' }, { action: 'test-edit' });
   assert.equal(product.source.snapshot.title, 'Demo');
