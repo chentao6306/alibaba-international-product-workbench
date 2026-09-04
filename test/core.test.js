@@ -25,6 +25,7 @@ import {
   sanitizeCollectedProduct,
   sanitizeSourceDescriptionHtml,
   sourceDetailHasBrokenImages,
+  SellerPublisher,
   validateProductData
 } from '../server/publisher.js';
 import { auditProduct, copyMissingProductData, findAndReplaceProduct, recordProductMutation, sourceSnapshotFingerprint, syncProductModel, verifySourceIntegrity } from '../server/product-model.js';
@@ -32,6 +33,7 @@ import { extractAlibabaCategoryId, extractAlibabaSourceData, parseAlibabaDetailD
 import { buildAlibabaPublishUrl, categoryPathKey, createPublishPlan, resolvePublishRoute } from '../server/category-routing.js';
 import { deleteWorkspaceEntities, findWorkspaceJobs, JsonStore } from '../server/store.js';
 import { isExplicitHumanVerificationSignal, normalizeAlibabaCookies } from '../server/browser-runtime.js';
+import { userFacingError } from '../server/browser-error.js';
 
 test('does not classify ordinary product text containing captcha as a challenge', () => {
   assert.equal(isExplicitHumanVerificationSignal('Product description and captcha-compatible camera module'), false);
@@ -64,6 +66,36 @@ test('routes selected products into automatic exact-leaf category groups', () =>
   assert.equal(plan[0].url, buildAlibabaPublishUrl('201346401'));
   assert.equal(plan[1].url, buildAlibabaPublishUrl('201346402'));
   assert.equal(resolvePublishRoute(products[0], settings).automatic, true);
+});
+
+test('routes thousands of unbound products by exact leaf category without manual pages', () => {
+  const products = Array.from({ length: 3000 }, (_, index) => ({
+    id: `product-${index}`,
+    title: `product ${index}`,
+    sourceCategoryPath: ['Catalog', `Leaf ${index % 37}`],
+    sourceCategoryId: String(200000000 + (index % 37))
+  }));
+  const plan = createPublishPlan(products, { publishBindings: {} });
+  assert.equal(plan.length, 37);
+  assert.equal(plan.reduce((total, group) => total + group.products.length, 0), 3000);
+  assert.ok(plan.every((group) => group.automatic && group.url.includes(`catId=${group.categoryId}`)));
+});
+
+test('publish pause invokes the active page stop hook immediately', () => {
+  const publisher = new SellerPublisher(os.tmpdir());
+  let stopped = false;
+  publisher.publishStops.set('job-1', () => { stopped = true; });
+  assert.equal(publisher.requestPublishStop('job-1'), true);
+  assert.equal(stopped, true);
+  publisher.clearPublishStop('job-1');
+  assert.equal(publisher.requestPublishStop('job-1'), false);
+});
+
+test('browser automation errors are reduced to readable business messages', () => {
+  const message = userFacingError(new Error("locator.click: Timeout 30000ms exceeded\n<div class=\"next-overlay-backdrop\"> intercepts pointer events\n--disable-sync\nPID 16152"));
+  assert.equal(message, '国际站编辑器切换失败：页面仍有弹窗遮罩，请关闭提示后重试');
+  const startup = userFacingError(new Error('--disable-sync\nPID 16152\ntaskkill failed'));
+  assert.equal(startup, '浏览器操作失败，请重试');
 });
 
 test('extracts Alibaba leaf category IDs from stable and nested detailData fields', () => {

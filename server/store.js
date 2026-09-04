@@ -14,7 +14,7 @@ const EMPTY_STATE = {
     publishBindings: {},
     defaultStock: 100,
     priceMarkup: 0,
-    publishMode: 'draft'
+    publishMode: 'submit'
   }
 };
 

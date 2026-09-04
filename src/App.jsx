@@ -663,7 +663,7 @@ function ProductEditor({ product, onClose, onSaved, notify }) {
 
 function PublishView({ state, refresh, notify, onMenu }) {
   const selected = state.products.filter((item) => item.selected);
-  const [mode, setMode] = useState(state.settings.publishMode || 'draft');
+  const [mode, setMode] = useState(state.settings.publishMode || 'submit');
   const [busy, setBusy] = useState(false);
   const [plan, setPlan] = useState({ groups: [], bindings: [] });
   const publishing = state.jobs.find((job) => job.type === 'publish' && ['queued', 'running', 'pause_requested'].includes(job.status));
@@ -699,7 +699,7 @@ function PublishView({ state, refresh, notify, onMenu }) {
     <div className="publish-layout">
       <div className="publish-main">
         <section className="panel connection-panel"><div className="connection-top"><div className={`connection-icon ${state.browser.browserOpen ? 'online' : ''}`}><Store size={22} /></div><div><h2>阿里巴巴国际站卖家后台</h2><p>{state.browser.browserOpen ? 'My Alibaba 浏览器已打开' : '尚未打开登录浏览器'}</p></div><span className={`connection-dot ${state.browser.browserOpen ? 'online' : ''}`}>{state.browser.browserOpen ? '浏览器已连接' : '未连接'}</span></div>
-          <div className="connection-actions"><button className="secondary-button" disabled={busy} onClick={() => run(() => api('/api/seller/open', { method: 'POST' }), '已打开 My Alibaba 登录浏览器')}><ExternalLink size={16} />打开 My Alibaba</button><button className="secondary-button" disabled={busy || !state.browser.browserOpen} onClick={() => run(() => api('/api/seller/bind-page', { method: 'POST' }), '国际站发布页已绑定')}><Link2 size={16} />绑定国际站发布页</button></div>
+          <div className="connection-actions"><button className="secondary-button" disabled={busy} onClick={() => run(() => api('/api/seller/open', { method: 'POST' }), '已打开 My Alibaba 登录浏览器')}><ExternalLink size={16} />打开 My Alibaba</button><button className="secondary-button" disabled={busy || !state.browser.browserOpen} onClick={() => run(() => api('/api/seller/bind-page', { method: 'POST' }), '国际站发布页已绑定')}><Link2 size={16} />旧数据手动绑定</button></div>
           <div className="bound-url"><span>发布路由</span><code>{selected.length ? `${automaticGroups.length} 个类目自动处理${unresolvedGroups.length ? `，${unresolvedGroups.length} 个需确认` : ''}` : '尚未选择商品'}</code>{selected.length && !unresolvedGroups.length && <Check size={16} />}</div>
           {automaticGroups.length > 0 && <div className="bound-url category-row"><span>类目任务</span><code>{automaticGroups.map((group) => `${group.category || group.categoryId}（${group.products.length}件）`).join('；')}</code><Check size={16} /></div>}
           {unresolvedGroups.map((group) => <div className="category-warning" key={group.key}><CircleAlert size={17} /><span>{group.error || `类目 ${group.category || group.categoryId} 尚未绑定，请打开对应发布表单并绑定一次`}</span></div>)}

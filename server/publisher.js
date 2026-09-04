@@ -1908,13 +1908,13 @@ export async function enableSpecImageUpload(page, product, colorGroup, downloadI
 async function switchToLegacyDetails(page) {
   const oldMode = page.getByRole('button', { name: '返回老版', exact: true }).first();
   if (await oldMode.isVisible().catch(() => false)) {
-    await oldMode.click();
+    await oldMode.click({ force: true });
     await page.waitForTimeout(350);
     const confirm = page.getByRole('button', { name: '继续返回旧版', exact: true }).first();
-    if (await confirm.isVisible().catch(() => false)) await confirm.click();
+    if (await confirm.isVisible().catch(() => false)) await confirm.click({ force: true });
   }
   const normalEditor = page.getByText('普通编辑', { exact: true }).last();
-  if (await normalEditor.isVisible().catch(() => false)) await normalEditor.click().catch(() => {});
+  if (await normalEditor.isVisible().catch(() => false)) await normalEditor.click({ force: true }).catch(() => {});
   await page.waitForTimeout(600);
 }
 
@@ -1929,6 +1929,7 @@ export class SellerPublisher {
     this.sourceContext = null;
     this.page = null;
     this.visible = false;
+    this.publishStops = new Map();
   }
 
   async sourceBrowser() {
@@ -2028,6 +2029,17 @@ export class SellerPublisher {
     await Promise.allSettled(contexts.map((context) => context.close()));
   }
 
+  requestPublishStop(jobId) {
+    const stop = this.publishStops.get(String(jobId || ''));
+    if (!stop) return false;
+    stop();
+    return true;
+  }
+
+  clearPublishStop(jobId) {
+    this.publishStops.delete(String(jobId || ''));
+  }
+
   async hide() {
     if (this.page) await hidePage(this.page);
     this.visible = false;
@@ -2109,10 +2121,10 @@ export class SellerPublisher {
     if (detailMode === 'old') {
       const oldMode = page.getByRole('button', { name: '返回老版', exact: true }).first();
       if (await oldMode.isVisible().catch(() => false)) {
-        await oldMode.click();
+        await oldMode.click({ force: true });
         await page.waitForTimeout(400);
         const confirmOldMode = page.getByRole('button', { name: '继续返回旧版', exact: true }).first();
-        if (await confirmOldMode.isVisible().catch(() => false)) await confirmOldMode.click();
+        if (await confirmOldMode.isVisible().catch(() => false)) await confirmOldMode.click({ force: true });
         await page.waitForTimeout(1200);
       }
     }
@@ -3716,7 +3728,7 @@ export class SellerPublisher {
     return inserted ? urls.length : 0;
   }
 
-  async publishProduct(product, publishPageUrl, mode = 'draft', publishCategory = '') {
+  async publishProduct(product, publishPageUrl, mode = 'draft', publishCategory = '', jobId = '') {
     if (!publishPageUrl) throw new Error('尚未绑定阿里巴巴国际站商品发布页面');
     if (!isProductPostingUrl(publishPageUrl)) throw new Error('绑定地址不是阿里巴巴国际站商品发布页');
     const mismatch = categoryMismatchMessage(product, publishCategory);
@@ -3724,6 +3736,8 @@ export class SellerPublisher {
     const validationErrors = validateProductData(product);
     if (validationErrors.length) throw new Error(`商品资料未通过上架检查：${validationErrors.join('；')}`);
     const page = await this.currentSellerPage();
+    const stopKey = String(jobId || '');
+    if (stopKey) this.publishStops.set(stopKey, () => { page.close().catch(() => {}); });
     // Normal publishing is headless and must not appear in the Windows taskbar.
     // waitForHumanVerification raises a typed error for a real challenge; the
     // caller can then use the headed verification flow without exposing every

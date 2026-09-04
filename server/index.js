@@ -13,6 +13,7 @@ import {
 } from './publisher.js';
 import { copyMissingProductData, createPublishSnapshot, findAndReplaceProduct, recordProductMutation, syncProductModel } from './product-model.js';
 import { buildAlibabaPublishUrl, createPublishPlan, normalizeCategoryId, productCategory, publishBindings, rememberPublishBinding, resolvePublishRoute } from './category-routing.js';
+import { userFacingError } from './browser-error.js';
 
 // In the packaged desktop build the server module is unpacked while the
 // frontend remains inside app.asar. APP_ROOT_DIR keeps both layouts working.
@@ -48,9 +49,11 @@ const store = new JsonStore(path.join(dataDir, 'workspace.json'));
 const publisher = new SellerPublisher(dataDir);
 const collector = new ShopCollector(dataDir, (products, onProgress) => publisher.enrichSourceProducts(products, onProgress));
 store.update((state) => {
-  state.version = 5;
+  const previousVersion = Number(state.version || 0);
+  state.version = 6;
   if (!state.settings || typeof state.settings !== 'object') state.settings = {};
   if (!state.settings.publishBindings || typeof state.settings.publishBindings !== 'object' || Array.isArray(state.settings.publishBindings)) state.settings.publishBindings = {};
+  if (previousVersion < 6) state.settings.publishMode = 'submit';
   if (state.settings.publishPageUrl && /^https?:\/\/(?:[^/]+\.)?1688\.com(?:\/|$)/i.test(state.settings.publishPageUrl)) {
     state.settings.publishPageUrl = '';
   }
@@ -396,7 +399,7 @@ async function startCollectJob(jobId) {
       });
       return;
     }
-    store.patchJob(jobId, { status: 'failed', message: error.message });
+    store.patchJob(jobId, { status: 'failed', message: userFacingError(error) });
     store.update((draft) => { const target = draft.groups.find((item) => item.id === group.id); if (target) target.status = 'failed'; });
   }
 }
@@ -679,7 +682,7 @@ async function runPublishJob(jobId) {
         if (route.error || !route.url) throw new Error(route.error || '该商品没有可用的国际站发布页');
         const publishSnapshot = createPublishSnapshot(product, { mode, category: route.category, categoryId: route.categoryId, publishPageUrl: route.url });
         store.patchJob(jobId, { message: `正在处理 ${index + 1}/${total}：${product.title}（${route.category || '未识别类目'}）` });
-        const result = await publisher.publishProduct(product, route.url, mode, route.category);
+        const result = await publisher.publishProduct(product, route.url, mode, route.category, jobId);
         // Keep the real publishing page visible for inspection. The user
         // explicitly requested to see the browser while an item is being
         // uploaded and submitted; collection still uses the hidden context.
@@ -698,14 +701,17 @@ async function runPublishJob(jobId) {
           }
           rememberPublishBinding(draft.settings, { ...route, verifiedAt: new Date().toISOString(), source: 'verified' });
         });
+        publisher.clearPublishStop(jobId);
         store.patchJob(jobId, { progress: index + 1, total, message: `已处理 ${index + 1}/${total}：${product.title}` });
       } catch (error) {
-        const message = String(error.message || '');
+        const message = userFacingError(error);
         const requiresHuman = /captcha|verify|人机验证|安全验证|滑块|登录失效|人工验证/i.test(message);
+        const currentJobStatus = store.read().jobs.find((item) => item.id === jobId)?.status;
+        const pauseRequested = ['pause_requested', 'paused'].includes(currentJobStatus) || error.code === 'PUBLISH_PAUSED';
         // Preserve the visible publishing page on both success and failure so
         // the user can inspect Alibaba's exact validation state. It can be
         // hidden later through the normal seller-browser lifecycle.
-        store.update((draft) => {
+        if (!pauseRequested) store.update((draft) => {
           const target = draft.products.find((item) => item.id === product.id);
           if (target) {
             const result = { status: 'failed', message };
@@ -716,6 +722,11 @@ async function runPublishJob(jobId) {
             syncProductModel(target);
           }
         });
+        publisher.clearPublishStop(jobId);
+        if (pauseRequested) {
+          store.patchJob(jobId, { status: 'paused', progress: index, total, message: `已立即暂停，当前商品未继续操作，已完成 ${index}/${total} 件` });
+          return;
+        }
         if (requiresHuman) {
           store.patchJob(jobId, {
             status: 'paused', progress: index, total,
@@ -740,7 +751,7 @@ async function runPublishJob(jobId) {
       message: failedCount ? `上架任务完成，成功 ${total - failedCount} 件，失败 ${failedCount} 件（可查看每件商品的具体原因）` : `上架任务完成，共处理 ${total} 件`
     });
   } catch (error) {
-    store.patchJob(jobId, { status: 'failed', message: error.message });
+    store.patchJob(jobId, { status: 'failed', message: userFacingError(error) });
   } finally {
     activePublishJobs.delete(jobId);
   }
@@ -776,8 +787,10 @@ app.post('/api/jobs/:id/pause', (request, response, next) => {
     return next(Object.assign(new Error('当前任务不能暂停'), { status: 409 }));
   }
   const status = job.status === 'queued' ? 'paused' : 'pause_requested';
-  const message = status === 'paused' ? `已暂停，已处理 ${job.progress}/${job.total || 0} 件，已完成数据已保存` : '正在暂停，当前商品处理完成后停止，已完成数据会保存';
-  response.json(store.patchJob(job.id, { status, message }));
+  const message = status === 'paused' ? `已暂停，已处理 ${job.progress}/${job.total || 0} 件，已完成数据已保存` : '正在立即暂停，正在关闭当前商品操作，已完成数据会保存';
+  const updated = store.patchJob(job.id, { status, message });
+  if (status === 'pause_requested' && job.type === 'publish') publisher.requestPublishStop(job.id);
+  response.json(updated);
 });
 
 app.post('/api/jobs/:id/resume', (request, response, next) => {
@@ -915,8 +928,7 @@ if (staticDir && fs.existsSync(path.join(staticDir, 'index.html'))) {
 
 app.use((error, _request, response, _next) => {
   console.error(error);
-  const raw = String(error?.message || '');
-  const safeMessage = raw || '操作失败，请稍后重试';
+  const safeMessage = userFacingError(error);
   response.status(error.status || 500).json({ error: safeMessage });
 });
 
