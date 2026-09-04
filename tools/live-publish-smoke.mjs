@@ -11,7 +11,14 @@ if (!query) throw new Error('请提供商品 ID、来源 ID 或标题关键词')
 
 const store = new JsonStore(path.join(dataDir, 'workspace.json'));
 const state = store.read();
-const product = state.products.find((item) => [item.id, item.sourceId].includes(query))
+const sourceUrl = /^https?:\/\//i.test(query) ? query : '';
+const sourceId = sourceUrl.match(/_(\d+)\.html/i)?.[1] || '';
+const product = sourceUrl ? {
+  id: `live-${sourceId || Date.now()}`,
+  sourceId,
+  sourceUrl,
+  title: sourceId || sourceUrl
+} : state.products.find((item) => [item.id, item.sourceId].includes(query))
   || state.products.find((item) => String(item.title || '').toLowerCase().includes(query.toLowerCase()));
 if (!product) throw new Error(`没有找到测试商品：${query}`);
 
@@ -50,8 +57,10 @@ try {
       diagnostics: diagnostics ? {
         mainImageState: diagnostics.mainImageState,
         saleSpecControls: diagnostics.saleSpecControls,
+        variantRows: diagnostics.variantRows,
         visibleCheckboxControls: diagnostics.visibleCheckboxControls?.filter((item) => item.checked),
         errors: diagnostics.errors,
+        imageEngine: diagnostics.formEngineDetails?.components?.find((item) => item.id === 'imageMedia'),
         mainImageHtml: diagnostics.mainImageHtml,
         fileInputs: diagnostics.fileInputs?.map((item) => ({ accept: item.accept, multiple: item.multiple, ancestors: item.ancestors?.slice(0, 2) }))
       } : null

@@ -19,6 +19,7 @@ import {
   isProductPostingUrl,
   mainImageSlotsComplete,
   needsColorSaleSpecification,
+  shouldUseColorSaleSpecification,
   normalizePriceTiers,
   parsePriceTiers,
   sanitizeCategoryPath,
@@ -286,10 +287,7 @@ test('keeps a single image-backed source model as a required SKU variant', () =>
       optionImages: { 'MF1604-2PCS/PAIR': 'https://example.com/model.jpg' }
     }]
   };
-  assert.equal(
-    findBlockingUnmappedVariant(product, ['model number: MF1604-2PCS/PAIR']),
-    'model number: MF1604-2PCS/PAIR'
-  );
+  assert.equal(findBlockingUnmappedVariant(product, ['model number: MF1604-2PCS/PAIR']), 'model number: MF1604-2PCS/PAIR');
 });
 
 test('keeps a multi-option SKU variant blocking when the target category cannot represent it', () => {
@@ -301,6 +299,8 @@ test('keeps the source color as a target sales specification, including one-colo
   assert.equal(needsColorSaleSpecification({ options: ['Black'] }), true);
   assert.equal(needsColorSaleSpecification({ options: ['Black', 'Black'] }), true);
   assert.equal(needsColorSaleSpecification({ options: ['Black', 'Red'] }), true);
+  assert.equal(shouldUseColorSaleSpecification({ options: ['Black'] }, true), true);
+  assert.equal(shouldUseColorSaleSpecification({ options: ['Black'] }, false), false);
 });
 
 test('does not treat Alibaba feature notices as a publish result', () => {

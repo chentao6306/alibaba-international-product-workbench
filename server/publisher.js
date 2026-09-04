@@ -554,7 +554,7 @@ async function currentFormDiagnostics(page) {
           keys: Object.getOwnPropertyNames(engine || {}).slice(0, 150),
           methods: Object.getOwnPropertyNames(Object.getPrototypeOf(engine || {}) || {})
             .filter((key) => typeof engine?.[key] === 'function').slice(0, 120),
-          components: ['saleAttributesItems', 'p-191288010', 'p-210218404', 'p-200399262'].map(componentDetails)
+          components: ['saleAttributesItems', 'imageMedia', 'p-3', 'p-191288010', 'p-210218404', 'p-200399262'].map(componentDetails)
         };
       }
       return {};
@@ -585,7 +585,10 @@ async function currentFormDiagnostics(page) {
       .map((editor) => ({ id: editor.id || '', hidden: Boolean(editor.hidden), contentLength: editor.getContent?.().length || 0 }));
     const saleAttributesHtml = document.querySelector('#saleAttributesItems')?.outerHTML?.slice(0, 30000) || '';
     const structSaleAttributesHtml = document.querySelector('#struct-saleAttributesItems')?.outerHTML?.slice(0, 30000) || '';
-    return { colorInputs, colorSpecContainers, saleSpecControls, colorValueControls, visibleCheckboxControls, exactColorNodes, keySpecNodes, reactDetails, saleAttributeFiberTree, formEngineDetails, saleAttributesHtml, structSaleAttributesHtml, textareas, iframes, fileInputs, overlays, ordinaryLabels, errors, editors };
+    const variantRows = [...document.querySelectorAll('#struct-specification [id^="p-"]')]
+      .filter(visible)
+      .map((node) => ({ id: node.id || '', text: clean(node.innerText).slice(0, 3000), html: node.outerHTML.slice(0, 20000) }));
+    return { colorInputs, colorSpecContainers, saleSpecControls, colorValueControls, visibleCheckboxControls, exactColorNodes, keySpecNodes, reactDetails, saleAttributeFiberTree, formEngineDetails, saleAttributesHtml, structSaleAttributesHtml, variantRows, textareas, iframes, fileInputs, overlays, ordinaryLabels, errors, editors };
   });
   main.frameBodies = [];
   for (const frame of page.frames()) {
@@ -994,6 +997,26 @@ async function mainImageFormState(page) {
   }).catch(() => ({ total: 0, empty: 0, uploading: 0, occupied: 0, previews: 0 }));
 }
 
+async function clearMainImagesForRetry(page) {
+  const deleteAll = page.getByRole('button', { name: /删除全部图片|清空.*图片|delete all images/i }).last();
+  if (!await deleteAll.isVisible().catch(() => false)) return false;
+  await deleteAll.click({ force: true });
+  await page.waitForTimeout(250);
+  for (const pattern of [/^确定$/, /^确认$/, /^删除$/, /确认删除|confirm|delete/i]) {
+    const confirm = page.getByRole('button', { name: pattern }).last();
+    if (!await confirm.isVisible().catch(() => false)) continue;
+    await confirm.click({ force: true }).catch(() => {});
+    break;
+  }
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    const state = await mainImageFormState(page);
+    if (!state.uploading && state.occupied === 0 && state.empty >= 4) return true;
+    await page.waitForTimeout(250);
+  }
+  return (await mainImageFormState(page)).occupied === 0;
+}
+
 export function distinctAlibabaImageUrls(urls = []) {
   const seen = new Set();
   const result = [];
@@ -1018,12 +1041,10 @@ export function findBlockingUnmappedVariant(product, unmappedAttributes = []) {
   for (const group of product?.variantGroups || []) {
     if (!group?.name || /颜色|colou?r/i.test(group.name)) continue;
     const options = [...new Set((group.options || []).map((value) => englishSpecText(value)).filter(Boolean))];
-    // A single descriptive value (for example "compatible model: General")
-    // does not create a SKU choice. A single image-backed source value is
-    // different: it is a real source SKU dimension and the target form can
-    // require that specification and its image.
     const imageBacked = String(group.type || '').toUpperCase() === 'IMAGE'
       && Object.values(group.optionImages || {}).some(Boolean);
+    // Some category forms require at least one sales specification. Preserve
+    // a source-declared image SKU as that specification, including its image.
     if (options.length < 2 && !imageBacked) continue;
     for (const option of options) required.add(`${group.name}: ${option}`.toLowerCase());
   }
@@ -1038,6 +1059,10 @@ export function needsColorSaleSpecification(colorGroup) {
   // even when the source has one SKU. Keep the source's single value instead
   // of clearing the control and triggering the generic required-field error.
   return values.length > 0;
+}
+
+export function shouldUseColorSaleSpecification(colorGroup, targetSupportsColor) {
+  return Boolean(targetSupportsColor) && needsColorSaleSpecification(colorGroup);
 }
 
 const LOGISTICS_FIELD_LABELS = {
@@ -1506,10 +1531,8 @@ export async function ensureColorSpecImageSwitch(page, row) {
 }
 
 async function fillVariantSpecs(page, variantGroups) {
-  // A single source option is a product attribute, not a selectable SKU
-  // dimension unless the source explicitly publishes it as an image-backed
-  // SKU. Image-backed model values must remain a sale specification because
-  // Alibaba requires at least one specification for these category forms.
+  // A single image-backed source SKU can satisfy categories that require one
+  // sales specification and must keep the source specification image.
   const groups = (variantGroups || []).filter((group) => group?.name
     && !/颜色|colou?r/i.test(group.name)
     && ([...new Set(group.options || [])].filter(Boolean).length > 1
@@ -1539,6 +1562,19 @@ async function fillVariantSpecs(page, variantGroups) {
     return null;
   };
   const selectExactValue = async (row, value) => {
+    const existingValue = await row.evaluate((node, expected) => {
+      const normalize = (text) => String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const target = normalize(expected);
+      for (const input of node.querySelectorAll('input, textarea')) {
+        if (normalize(input.value) !== target) continue;
+        if (!['checkbox', 'radio'].includes(String(input.type || '').toLowerCase()) || input.checked) return true;
+      }
+      return [...node.querySelectorAll('label, [class*="tag"], [class*="value"], [class*="item"]')]
+        .some((item) => normalize(item.textContent) === target
+          && (!item.querySelector('input[type="checkbox"], input[type="radio"]')
+            || item.querySelector('input[type="checkbox"]:checked, input[type="radio"]:checked')));
+    }, value).catch(() => false);
+    if (existingValue) return true;
     const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const labels = row.locator('label').filter({ hasText: new RegExp(`^${escaped}$`, 'i') });
     const count = await labels.count().catch(() => 0);
@@ -1556,41 +1592,41 @@ async function fillVariantSpecs(page, variantGroups) {
     return false;
   };
   const addCustomVariantValue = async (row, value) => {
-    const openControls = row.getByText(/^\+?\s*添加$/, { exact: true });
-    const openCount = await openControls.count().catch(() => 0);
-    let opened = false;
-    for (let index = 0; index < openCount; index += 1) {
-      const control = openControls.nth(index);
-      if (!await control.isVisible().catch(() => false)) continue;
-      await control.click({ force: true }).catch(() => {});
-      opened = true;
-      break;
-    }
-    if (!opened) return false;
-    await page.waitForTimeout(250);
-    const inputs = row.locator('input[placeholder*="输入"], input[placeholder*="enter" i]');
+    // Current Alibaba forms render a ready-to-use blank combobox. Clicking
+    // "+ 添加" before filling it creates another empty row and discards the
+    // intended custom model value.
+    const inputs = row.locator('input[role="colorCombobox"], input[placeholder*="输入"], input[placeholder*="enter" i]');
     const inputCount = await inputs.count().catch(() => 0);
     let customInput = null;
     for (let index = inputCount - 1; index >= 0; index -= 1) {
       const input = inputs.nth(index);
-      if (await input.isVisible().catch(() => false)) { customInput = input; break; }
+      if (!await input.isVisible().catch(() => false)) continue;
+      const current = String(await input.inputValue().catch(() => '')).trim();
+      if (!current || current.toLowerCase() === value.toLowerCase()) { customInput = input; break; }
     }
     if (!customInput) return false;
-    await customInput.fill(value);
-    await page.waitForTimeout(100);
-    const confirmControls = row.getByText(/^\+?\s*添加$/, { exact: true });
-    const confirmCount = await confirmControls.count().catch(() => 0);
-    let confirmed = false;
-    for (let index = confirmCount - 1; index >= 0; index -= 1) {
-      const control = confirmControls.nth(index);
-      if (!await control.isVisible().catch(() => false)) continue;
-      await control.click({ force: true }).catch(() => {});
-      confirmed = true;
-      break;
-    }
-    if (!confirmed) return false;
+    await customInput.click({ force: true });
+    await customInput.fill('');
+    await customInput.pressSequentially(value, { delay: 18 });
     await page.waitForTimeout(350);
-    return selectExactValue(row, value);
+    const exactOption = page.getByRole('option', { name: value, exact: true }).last();
+    let selectedPreset = false;
+    if (await exactOption.isVisible().catch(() => false)) {
+      await exactOption.click({ force: true }).catch(() => {});
+      selectedPreset = true;
+    }
+    await page.waitForTimeout(250);
+    if (selectedPreset && await selectExactValue(row, value)) return true;
+    await customInput.press('Tab').catch(() => {});
+    await page.waitForTimeout(350);
+    const retained = String(await customInput.inputValue().catch(() => '')).trim();
+    if (retained.toLowerCase() === value.toLowerCase()) return true;
+    await customInput.click({ force: true }).catch(() => {});
+    await customInput.fill(value).catch(() => {});
+    await customInput.dispatchEvent('change').catch(() => {});
+    await customInput.dispatchEvent('blur').catch(() => {});
+    await page.waitForTimeout(250);
+    return String(await customInput.inputValue().catch(() => '')).trim().toLowerCase() === value.toLowerCase();
   };
   for (const group of groups) {
     if (group.id && !await ensureSaleAttributeSelected(page, group.id)) {
@@ -1600,7 +1636,17 @@ async function fillVariantSpecs(page, variantGroups) {
       }
       continue;
     }
-    const row = await rowFor(aliasesFor(group.name));
+    const directRow = group.id ? page.locator(`#struct-specification [id="p-${String(group.id).replace(/["\\]/g, '')}"]`).first() : null;
+    let row = directRow && await directRow.isVisible().catch(() => false)
+      ? directRow
+      : await rowFor(aliasesFor(group.name));
+    const rowDeadline = Date.now() + 6000;
+    while (!row && Date.now() < rowDeadline) {
+      await page.waitForTimeout(200);
+      row = directRow && await directRow.isVisible().catch(() => false)
+        ? directRow
+        : await rowFor(aliasesFor(group.name));
+    }
     for (const rawValue of [...new Set(group.options || [])]) {
       const value = englishSpecText(rawValue);
       if (!value) continue;
@@ -1665,6 +1711,21 @@ async function saleAttributeIsSelected(page, value) {
       return (props.value || []).some((item) => String(item?.value) === String(expectedValue));
     }
     return false;
+  }, value).catch(() => false);
+}
+
+async function saleAttributeIsAvailable(page, value) {
+  return page.evaluate((expectedValue) => {
+    const root = document.querySelector('#saleAttributesItems');
+    if (!root) return false;
+    const fiberKey = Object.getOwnPropertyNames(root).find((key) => key.startsWith('__reactFiber'));
+    let fiber = fiberKey ? root[fiberKey] : null;
+    for (let depth = 0; fiber && depth < 12; depth += 1, fiber = fiber.return) {
+      const props = fiber.memoizedProps || fiber.stateNode?.props;
+      if (props?.id !== 'saleAttributesItems' || !Array.isArray(props.dataSource)) continue;
+      return props.dataSource.some((item) => String(item?.value) === String(expectedValue));
+    }
+    return Boolean(root.querySelector(`input[value="${CSS.escape(String(expectedValue))}"]`));
   }, value).catch(() => false);
 }
 
@@ -2126,6 +2187,11 @@ async function enableImageBackedVariantSpecs(page, product, groups, downloadImag
     && Object.values(group.optionImages || {}).some(Boolean));
   for (const group of imageGroups) {
     if (!await ensureSaleAttributeSelected(page, group.id)) return false;
+    const sourceOptions = [...new Set(group.options || [])].filter(Boolean);
+    // Preserve source specification images even for a single model. Alibaba's
+    // direct-submit validator can require this image although the switch looks
+    // optional in the UI; the retained custom value now gives the uploader a
+    // stable row to target.
     let row = await visibleSaleSpecRow(page, group.id);
     const rowDeadline = Date.now() + 10000;
     while (!row && Date.now() < rowDeadline) {
@@ -2134,7 +2200,7 @@ async function enableImageBackedVariantSpecs(page, product, groups, downloadImag
     }
     if (!row || !await ensureColorSpecImageSwitch(page, row)) return false;
 
-    for (const rawValue of [...new Set(group.options || [])]) {
+    for (const rawValue of sourceOptions) {
       const value = englishSpecText(rawValue);
       const imageUrl = group.optionImages?.[rawValue] || group.optionImages?.[value];
       if (!value || !imageUrl) continue;
@@ -2149,16 +2215,63 @@ async function enableImageBackedVariantSpecs(page, product, groups, downloadImag
   return true;
 }
 
+async function dismissPostingOverlays(page) {
+  const harmlessActions = [
+    /^(?:我知道了|知道了|关闭|取消|稍后再说|暂不|以后再说|Got it|Close|Cancel)$/i,
+    /^(?:继续返回旧版|确认返回旧版)$/i
+  ];
+  for (let pass = 0; pass < 4; pass += 1) {
+    const overlays = page.locator('.next-overlay-wrapper.opened, .next-dialog:visible, [role="dialog"]:visible, .mce-window:visible');
+    let acted = false;
+    for (let index = (await overlays.count().catch(() => 0)) - 1; index >= 0; index -= 1) {
+      const overlay = overlays.nth(index);
+      if (!await overlay.isVisible().catch(() => false)) continue;
+      for (const pattern of harmlessActions) {
+        const action = overlay.getByRole('button', { name: pattern }).last();
+        if (!await action.isVisible().catch(() => false)) continue;
+        await action.click({ force: true }).catch(() => action.evaluate((node) => node.click()).catch(() => {}));
+        acted = true;
+        break;
+      }
+      if (acted) break;
+      const close = overlay.locator('.next-dialog-close, .next-overlay-close, .mce-close, [aria-label="关闭"], [aria-label="close" i]').last();
+      if (await close.isVisible().catch(() => false)) {
+        await close.click({ force: true }).catch(() => close.evaluate((node) => node.click()).catch(() => {}));
+        acted = true;
+        break;
+      }
+    }
+    if (!acted) {
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.waitForTimeout(200);
+      const blockingBackdrop = page.locator('.next-overlay-wrapper.opened .next-overlay-backdrop:visible');
+      if (!await blockingBackdrop.count().catch(() => 0)) return true;
+      break;
+    }
+    await page.waitForTimeout(300);
+  }
+  return !await page.locator('.next-overlay-wrapper.opened .next-overlay-backdrop:visible').count().catch(() => 0);
+}
+
 async function switchToLegacyDetails(page) {
+  await dismissPostingOverlays(page);
   const oldMode = page.getByRole('button', { name: '返回老版', exact: true }).first();
   if (await oldMode.isVisible().catch(() => false)) {
-    await oldMode.click({ force: true });
+    await oldMode.click({ force: true, timeout: 5000 })
+      .catch(() => oldMode.evaluate((node) => node.click()));
     await page.waitForTimeout(350);
     const confirm = page.getByRole('button', { name: '继续返回旧版', exact: true }).first();
-    if (await confirm.isVisible().catch(() => false)) await confirm.click({ force: true });
+    if (await confirm.isVisible().catch(() => false)) {
+      await confirm.click({ force: true, timeout: 5000 })
+        .catch(() => confirm.evaluate((node) => node.click()));
+    }
+    await dismissPostingOverlays(page);
   }
   const normalEditor = page.getByText('普通编辑', { exact: true }).last();
-  if (await normalEditor.isVisible().catch(() => false)) await normalEditor.click({ force: true }).catch(() => {});
+  if (await normalEditor.isVisible().catch(() => false)) {
+    await normalEditor.click({ force: true, timeout: 5000 })
+      .catch(() => normalEditor.evaluate((node) => node.click()).catch(() => {}));
+  }
   await page.waitForTimeout(600);
 }
 
@@ -3368,7 +3481,8 @@ export class SellerPublisher {
 
     const colorGroup = (product.variantGroups || []).find((group) => /颜色|colou?r/i.test(group.name));
     const colorValues = colorGroup?.options?.length ? colorGroup.options : [];
-    const useColorSaleSpec = needsColorSaleSpecification(colorGroup);
+    const targetSupportsColor = await saleAttributeIsAvailable(page, '191288010');
+    const useColorSaleSpec = shouldUseColorSaleSpecification(colorGroup, targetSupportsColor);
     const sourceHasSpecImage = useColorSaleSpec && Boolean(
       colorGroup?.options?.some((value) => colorGroup.optionImages?.[value])
     );
@@ -4146,7 +4260,10 @@ export class SellerPublisher {
     // exact source value, and its uploaded source image must all be present.
     const finalColorGroup = (product.variantGroups || []).find((group) => /颜色|colou?r/i.test(group.name));
     const finalColorValues = [...new Set(finalColorGroup?.options || [])].map((value) => englishSpecText(value)).filter(Boolean);
-    const finalUsesColorSaleSpec = needsColorSaleSpecification(finalColorGroup);
+    const finalUsesColorSaleSpec = shouldUseColorSaleSpecification(
+      finalColorGroup,
+      await saleAttributeIsAvailable(page, '191288010')
+    );
     const finalHasColorImage = finalUsesColorSaleSpec && finalColorValues.some((value) => Boolean(
       finalColorGroup?.optionImages?.[value]
       || finalColorGroup?.optionImages?.[finalColorGroup.options?.find((item) => englishSpecText(item) === value)]
@@ -4195,6 +4312,29 @@ export class SellerPublisher {
       await this.uploadMainImages(page, product);
     }
 
+    // Alibaba's current image uploader can show completed remote previews
+    // while its submit validator still holds an empty image value. Persisting
+    // the form once makes the server-issued image records authoritative. The
+    // user still performs one "direct submit" action; this draft checkpoint is
+    // an automatic reliability step before the final publish click.
+    if (mode === 'submit') {
+      let draftAction = null;
+      for (const text of ['保存草稿', '存为草稿', '暂存草稿', 'Save as Draft', 'Save Draft']) {
+        const candidate = page.getByRole('button', { name: text, exact: false }).last();
+        if (await candidate.isVisible().catch(() => false) && !await candidate.isDisabled().catch(() => false)) {
+          draftAction = candidate;
+          break;
+        }
+      }
+      if (draftAction) {
+        const draftUrl = page.url();
+        await waitForActionResult(page, draftAction, 'draft', draftUrl);
+        await page.waitForTimeout(4200);
+        await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+        await settlePage(page);
+      }
+    }
+
     const agreementText = page.getByText(/请再次检查并确认提交的信息真实、合法和有效/).last();
     if (await agreementText.isVisible().catch(() => false)) {
       const agreementContainer = agreementText.locator('xpath=ancestor::*[.//input[@type="checkbox"]][1]');
@@ -4224,6 +4364,8 @@ export class SellerPublisher {
     } catch (error) {
       const actionError = String(error?.message || '');
       if (/商品图片|请上传.*图片|image.*required/i.test(actionError)) {
+        const cleared = await clearMainImagesForRetry(page);
+        if (!cleared) throw error;
         await this.uploadMainImages(page, product);
         let retryAction = null;
         for (const text of buttonTexts) {
