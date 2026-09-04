@@ -12,6 +12,7 @@ import {
   distinctAlibabaImageUrls,
   ensureColorSpecImageSwitch,
   findBlockingUnmappedVariant,
+  isRequiredTargetVariantGroup,
   categoryMismatchMessage,
   canonicalCategoryLeaf,
   parseDeliveryTiers,
@@ -288,6 +289,17 @@ test('keeps a single image-backed source model as a required SKU variant', () =>
     }]
   };
   assert.equal(findBlockingUnmappedVariant(product, ['model number: MF1604-2PCS/PAIR']), 'model number: MF1604-2PCS/PAIR');
+});
+
+test('does not block a single image-backed descriptive socket standard', () => {
+  const group = {
+    name: 'Socket Standard',
+    type: 'IMAGE',
+    options: ['QS8+ plug'],
+    optionImages: { 'QS8+ plug': 'https://example.com/plug.jpg' }
+  };
+  assert.equal(isRequiredTargetVariantGroup(group), false);
+  assert.equal(findBlockingUnmappedVariant({ variantGroups: [group] }, ['Socket Standard: QS8+ plug']), '');
 });
 
 test('keeps a multi-option SKU variant blocking when the target category cannot represent it', () => {

@@ -1036,16 +1036,24 @@ export function distinctAlibabaImageUrls(urls = []) {
   return result;
 }
 
+export function isRequiredTargetVariantGroup(group) {
+  if (!group?.name || /颜色|colou?r/i.test(group.name)) return false;
+  const options = [...new Set((group.options || []).map((value) => englishSpecText(value)).filter(Boolean))];
+  if (options.length > 1) return true;
+  const imageBacked = String(group.type || '').toUpperCase() === 'IMAGE'
+    && Object.values(group.optionImages || {}).some(Boolean);
+  const normalizedName = String(group.name || '').toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  // A single model with a source image is a real sale specification on forms
+  // that require an SKU image. Other single-value fields (for example Socket
+  // Standard) remain descriptive product data and must not block publishing.
+  return imageBacked && /^(?:model(?: number)?|型号)$/.test(normalizedName);
+}
+
 export function findBlockingUnmappedVariant(product, unmappedAttributes = []) {
   const required = new Set();
   for (const group of product?.variantGroups || []) {
-    if (!group?.name || /颜色|colou?r/i.test(group.name)) continue;
+    if (!isRequiredTargetVariantGroup(group)) continue;
     const options = [...new Set((group.options || []).map((value) => englishSpecText(value)).filter(Boolean))];
-    const imageBacked = String(group.type || '').toUpperCase() === 'IMAGE'
-      && Object.values(group.optionImages || {}).some(Boolean);
-    // Some category forms require at least one sales specification. Preserve
-    // a source-declared image SKU as that specification, including its image.
-    if (options.length < 2 && !imageBacked) continue;
     for (const option of options) required.add(`${group.name}: ${option}`.toLowerCase());
   }
   return (unmappedAttributes || []).find((item) => required.has(String(item || '').trim().toLowerCase())) || '';
@@ -1340,13 +1348,43 @@ async function fillColorSpec(page, values) {
   const clickAddColor = async () => {
     const row = await visibleColorSpecRow(page);
     if (!row) return false;
+    const beforeCount = await row.locator(colorInputSelector).evaluateAll((nodes) => nodes.filter((node) => {
+      const rect = node.getBoundingClientRect();
+      return Boolean(rect.width && rect.height);
+    }).length).catch(() => 0);
+    // An open autocomplete overlay consumes the first click on "+ 添加".
+    // Close it and commit the current custom value before creating a new row.
+    const activeInput = row.locator('input:focus').last();
+    if (await activeInput.count().catch(() => 0)) {
+      await activeInput.press('Escape').catch(() => {});
+      await activeInput.press('Tab').catch(() => {});
+      await activeInput.dispatchEvent('change').catch(() => {});
+      await activeInput.dispatchEvent('blur').catch(() => {});
+      await page.waitForTimeout(250);
+    }
     const controls = row.getByText(/^\+?\s*添加$/, { exact: true });
     for (let index = await controls.count().catch(() => 0) - 1; index >= 0; index -= 1) {
       const control = controls.nth(index);
       if (!await control.isVisible().catch(() => false)) continue;
-      await control.click({ force: true }).catch(() => {});
-      await page.waitForTimeout(300);
-      return true;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await control.click({ force: true }).catch(() => {});
+        const deadline = Date.now() + 1800;
+        while (Date.now() < deadline) {
+          const refreshed = await visibleColorSpecRow(page);
+          const inputs = refreshed?.locator(colorInputSelector);
+          const inputState = await inputs?.evaluateAll((nodes) => {
+            const visible = nodes.filter((node) => {
+              const rect = node.getBoundingClientRect();
+              return Boolean(rect.width && rect.height);
+            });
+            return { count: visible.length, hasEmpty: visible.some((node) => !String(node.value || '').trim()) };
+          }).catch(() => null);
+          const hasEmpty = inputState && inputState.count > beforeCount && inputState.hasEmpty;
+          if (hasEmpty) return true;
+          await page.waitForTimeout(120);
+        }
+        await page.keyboard.press('Escape').catch(() => {});
+      }
     }
     return false;
   };
@@ -1418,6 +1456,14 @@ async function fillColorSpec(page, values) {
       }, color).catch(() => false);
       await input.press('Enter').catch(() => {});
     }
+    // A custom color value is not committed while the autocomplete remains
+    // open. Explicitly blur it so Alibaba writes the value into form state and
+    // the next "+ 添加" click creates a new specification row.
+    await input.press('Escape').catch(() => {});
+    await input.press('Tab').catch(() => {});
+    await input.dispatchEvent('change').catch(() => {});
+    await input.dispatchEvent('blur').catch(() => {});
+    await page.waitForTimeout(300);
     if (!(await selectedColors()).some((item) => item.toLowerCase() === color.toLowerCase())) {
       await clickAddColor();
     }
@@ -1533,16 +1579,16 @@ export async function ensureColorSpecImageSwitch(page, row) {
 async function fillVariantSpecs(page, variantGroups) {
   // A single image-backed source SKU can satisfy categories that require one
   // sales specification and must keep the source specification image.
-  const groups = (variantGroups || []).filter((group) => group?.name
-    && !/颜色|colou?r/i.test(group.name)
-    && ([...new Set(group.options || [])].filter(Boolean).length > 1
-      || (String(group.type || '').toUpperCase() === 'IMAGE' && Object.values(group.optionImages || {}).some(Boolean))));
+  const groups = (variantGroups || []).filter(isRequiredTargetVariantGroup);
   const unmapped = [];
   const aliasesFor = (name) => {
     const normalized = String(name || '').toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
     if (/^(?:compatible\s+model|model\s+compatibility|适用型号)$/i.test(normalized)) return ['适用型号', 'compatible model'];
     if (/^(?:type|类型)$/i.test(normalized)) return ['类型', 'type'];
     if (/^(?:model(?: number)?|型号)$/i.test(normalized)) return ['型号', 'model number', 'model'];
+    if (/^(?:socket standard|socket type|plug type|connector type|connector)$/i.test(normalized)) {
+      return ['插座标准', '插头类型', '连接器类型', 'socket standard', 'socket type', 'plug type', 'connector type', 'connector'];
+    }
     return [String(name || '').trim()].filter(Boolean);
   };
   const rowFor = async (aliases) => {
@@ -1629,14 +1675,15 @@ async function fillVariantSpecs(page, variantGroups) {
     return String(await customInput.inputValue().catch(() => '')).trim().toLowerCase() === value.toLowerCase();
   };
   for (const group of groups) {
-    if (group.id && !await ensureSaleAttributeSelected(page, group.id)) {
+    const targetHasSourceId = group.id && await saleAttributeIsAvailable(page, group.id);
+    if (targetHasSourceId && !await ensureSaleAttributeSelected(page, group.id)) {
       for (const rawValue of [...new Set(group.options || [])]) {
         const value = englishSpecText(rawValue);
         if (value) unmapped.push(`${group.name}: ${value}`);
       }
       continue;
     }
-    const directRow = group.id ? page.locator(`#struct-specification [id="p-${String(group.id).replace(/["\\]/g, '')}"]`).first() : null;
+    const directRow = targetHasSourceId ? page.locator(`#struct-specification [id="p-${String(group.id).replace(/["\\]/g, '')}"]`).first() : null;
     let row = directRow && await directRow.isVisible().catch(() => false)
       ? directRow
       : await rowFor(aliasesFor(group.name));
@@ -1694,7 +1741,14 @@ async function visibleColorSpecRow(page) {
   for (let index = 0; index < count; index += 1) {
     const row = rows.nth(index);
     if (await row.isVisible().catch(() => false)
-      && await row.locator('input[role="colorCombobox"]').count().catch(() => 0)) return row;
+      && await row.locator([
+        'input[role="colorCombobox"]',
+        '.posting-field-color-select input[placeholder*="请输入"]',
+        '.posting-feild-color-select input[placeholder*="请输入"]',
+        '.posting-field-color-item input[placeholder*="请输入"]',
+        '.posting-feild-color-item input[placeholder*="请输入"]',
+        '.posting-feild-color-item-container input[placeholder*="请输入"]'
+      ].join(', ')).count().catch(() => 0)) return row;
   }
   return null;
 }
@@ -1708,9 +1762,12 @@ async function saleAttributeIsSelected(page, value) {
     for (let depth = 0; fiber && depth < 12; depth += 1, fiber = fiber.return) {
       const props = fiber.memoizedProps || fiber.stateNode?.props;
       if (props?.id !== 'saleAttributesItems' || !Array.isArray(props.dataSource)) continue;
-      return (props.value || []).some((item) => String(item?.value) === String(expectedValue));
+      if ((props.value || []).some((item) => String(item?.value) === String(expectedValue))) return true;
+      break;
     }
-    return false;
+    const input = root.querySelector(`input[value="${CSS.escape(String(expectedValue))}"]`);
+    return Boolean(input && (input.checked || input.getAttribute('aria-checked') === 'true'
+      || input.closest('[aria-checked="true"], .checked, .is-checked')));
   }, value).catch(() => false);
 }
 
@@ -1718,14 +1775,16 @@ async function saleAttributeIsAvailable(page, value) {
   return page.evaluate((expectedValue) => {
     const root = document.querySelector('#saleAttributesItems');
     if (!root) return false;
+    const input = root.querySelector(`input[value="${CSS.escape(String(expectedValue))}"]`);
+    if (input) return !input.disabled && input.getAttribute('aria-disabled') !== 'true';
     const fiberKey = Object.getOwnPropertyNames(root).find((key) => key.startsWith('__reactFiber'));
     let fiber = fiberKey ? root[fiberKey] : null;
     for (let depth = 0; fiber && depth < 12; depth += 1, fiber = fiber.return) {
       const props = fiber.memoizedProps || fiber.stateNode?.props;
       if (props?.id !== 'saleAttributesItems' || !Array.isArray(props.dataSource)) continue;
-      return props.dataSource.some((item) => String(item?.value) === String(expectedValue));
+      return props.dataSource.some((item) => String(item?.value) === String(expectedValue) && !item?.disabled);
     }
-    return Boolean(root.querySelector(`input[value="${CSS.escape(String(expectedValue))}"]`));
+    return false;
   }, value).catch(() => false);
 }
 
@@ -1774,13 +1833,27 @@ async function ensureSaleAttributeSelected(page, value) {
     }
     return { ok: false, reason: 'missing-component' };
   }, value).catch((error) => ({ ok: false, reason: error.message }));
-  if (!committed?.ok) return false;
+  const tryDomFallback = async () => {
+    if (String(value) === '191288010') {
+      const control = await visibleColorSpecControl(page);
+      if (!control || await control.input.isDisabled().catch(() => true)) return false;
+      return ensureSpecControlChecked(page, () => visibleColorSpecControl(page));
+    }
+    const input = page.locator(`#saleAttributesItems input[value="${String(value).replace(/["\\]/g, '')}"]`).first();
+    if (!await input.isVisible().catch(() => false) || await input.isDisabled().catch(() => true)) return false;
+    const wrapper = input.locator('xpath=ancestor::label[1]');
+    if (await wrapper.count().catch(() => 0)) await wrapper.click({ force: true }).catch(() => {});
+    else await input.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(350);
+    return saleAttributeIsSelected(page, value);
+  };
+  if (!committed?.ok) return tryDomFallback();
   const deadline = Date.now() + 8000;
   while (Date.now() < deadline) {
     if (await saleAttributeIsSelected(page, value)) return true;
     await page.waitForTimeout(200);
   }
-  return false;
+  return tryDomFallback();
 }
 
 async function ensureSaleAttributeCleared(page, value) {
@@ -1908,7 +1981,6 @@ async function ensureSpecControlChecked(page, resolveControl) {
     await control.input.evaluate((input) => {
       const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked');
       descriptor?.set?.call(input, true);
-      input.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
       input.dispatchEvent(new Event('input', { bubbles: true }));
       input.dispatchEvent(new Event('change', { bubbles: true }));
     }).catch(() => {});
