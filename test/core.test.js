@@ -6,6 +6,7 @@ import test from 'node:test';
 import { internationalFeaturedUrl, normalizeShopUrl, productIdFromUrl } from '../server/collector.js';
 import {
   buildLegacyDescriptionHtml,
+  buildFlattenedVariantGroup,
   buildSkuCombinations,
   canonicalizePriceTiers,
   classifyAlibabaActionResult,
@@ -20,6 +21,7 @@ import {
   isProductPostingUrl,
   mainImageSlotsComplete,
   needsColorSaleSpecification,
+  numericValue,
   shouldUseColorSaleSpecification,
   normalizePriceTiers,
   parsePriceTiers,
@@ -307,6 +309,27 @@ test('keeps a multi-option SKU variant blocking when the target category cannot 
   assert.equal(findBlockingUnmappedVariant(product, ['Compatible model: Model B']), 'Compatible model: Model B');
 });
 
+test('flattens a two-dimensional source SKU matrix into one target specification without dropping combinations', () => {
+  const product = {
+    variantGroups: [
+      { name: 'color', options: ['Gray', 'Black'] },
+      { name: 'Socket Standard', options: ['EU plug', 'US plug'] }
+    ],
+    skus: [
+      { attributes: { color: 'Gray', 'Socket Standard': 'EU plug' }, image: 'gray.jpg' },
+      { attributes: { color: 'Gray', 'Socket Standard': 'US plug' }, image: 'gray.jpg' },
+      { attributes: { color: 'Black', 'Socket Standard': 'EU plug' }, image: 'black.jpg' },
+      { attributes: { color: 'Black', 'Socket Standard': 'US plug' }, image: 'black.jpg' }
+    ]
+  };
+  const group = buildFlattenedVariantGroup(product, '400050816', 'Output Plug');
+  assert.deepEqual(group.options, [
+    'Gray / EU plug', 'Gray / US plug', 'Black / EU plug', 'Black / US plug'
+  ]);
+  assert.equal(group.optionImages['Black / US plug'], 'black.jpg');
+  assert.deepEqual(group.sourceGroups, ['color', 'Socket Standard']);
+});
+
 test('does not block duplicated single-value SKU options from detail-page matrices', () => {
   const product = {
     variantGroups: [{ name: 'compatible model', options: ['Model A', 'Model B'], type: 'TEXT' }],
@@ -412,6 +435,12 @@ test('parses box-based Alibaba price tiers', () => {
   assert.deepEqual(tiers.map((tier) => [tier.price, tier.minQuantity, tier.maxQuantity]), [
     ['920.34', 1, 29], ['908.10', 30, 49], ['885.76', 50, null]
   ]);
+});
+
+test('normalizes unit-bearing quantities and currency text for numeric publish inputs', () => {
+  assert.equal(numericValue('2 pieces'), 2);
+  assert.equal(numericValue('US $99.33 / piece'), 99.33);
+  assert.equal(numericValue('1,000 boxes'), 1000);
 });
 
 test('deduplicates and sorts repeated price modules', () => {

@@ -695,7 +695,10 @@ const SOURCE_ATTRIBUTE_LABEL_ALIASES = new Map([
   ['features', ['功能', '特性', '功能/特性']],
   ['brand name', ['品牌名称']],
   ['place of origin', ['产地']],
-  ['model number', ['型号']]
+  ['model number', ['型号']],
+  ['output power', ['输出功率']],
+  ['multi function integrated', ['多功能一体化']],
+  ['multi-function integrated', ['多功能一体化']]
 ]);
 
 const TEXT_TRANSLATIONS = [
@@ -858,7 +861,7 @@ export function canonicalizePriceTiers(tiers) {
   return [...byMinimum.values()].sort((a, b) => a.minQuantity - b.minQuantity);
 }
 
-function numericValue(value) {
+export function numericValue(value) {
   const number = Number(String(value ?? '').replace(/,/g, '').match(/[\d.]+/)?.[0] || 0);
   return Number.isFinite(number) ? number : 0;
 }
@@ -1062,6 +1065,38 @@ export function isRequiredTargetVariantGroup(group) {
   // that require an SKU image. Other single-value fields (for example Socket
   // Standard) remain descriptive product data and must not block publishing.
   return imageBacked && /^(?:model(?: number)?|型号)$/.test(normalizedName);
+}
+
+export function buildFlattenedVariantGroup(product, targetId, targetName = 'Specification') {
+  const groups = (product?.variantGroups || []).filter((group) => {
+    const options = [...new Set((group?.options || []).map((value) => englishSpecText(value)).filter(Boolean))];
+    return options.length > 1;
+  });
+  if (groups.length < 2 || !targetId) return null;
+  const optionImages = {};
+  const options = [];
+  for (const sku of product?.skus || []) {
+    const attributes = sku?.attributes || {};
+    const values = groups.map((group) => {
+      const expected = String(group.name || '').trim().toLowerCase();
+      const entry = Object.entries(attributes)
+        .find(([name]) => String(name || '').trim().toLowerCase() === expected);
+      return englishSpecText(entry?.[1]);
+    });
+    if (values.some((value) => !value)) continue;
+    const option = values.join(' / ');
+    if (!options.includes(option)) options.push(option);
+    if (sku?.image) optionImages[option] = sku.image;
+  }
+  if (!options.length) return null;
+  return {
+    id: String(targetId),
+    name: targetName,
+    type: Object.keys(optionImages).length ? 'IMAGE' : 'TEXT',
+    options,
+    optionImages,
+    sourceGroups: groups.map((group) => group.name)
+  };
 }
 
 export function findBlockingUnmappedVariant(product, unmappedAttributes = []) {
@@ -1624,18 +1659,89 @@ export async function ensureColorSpecImageSwitch(page, row) {
   return false;
 }
 
-async function fillVariantSpecs(page, variantGroups) {
+async function fillVariantSpecs(page, product) {
+  const variantGroups = product?.variantGroups || [];
   // A single image-backed source SKU can satisfy categories that require one
   // sales specification and must keep the source specification image.
-  const groups = (variantGroups || []).filter(isRequiredTargetVariantGroup);
+  let groups = variantGroups.filter(isRequiredTargetVariantGroup);
   const unmapped = [];
+  const blockingUnmapped = [];
+  const imageSourceGroup = variantGroups.find((group) => String(group?.type || '').toUpperCase() === 'IMAGE'
+    && Object.values(group?.optionImages || {}).some(Boolean));
+  let preferredImageId = '';
+  if (imageSourceGroup?.id) {
+    preferredImageId = await page.evaluate((expectedId) => {
+      const root = document.querySelector('#saleAttributesItems');
+      const input = root?.querySelector(`input[value="${CSS.escape(String(expectedId))}"]`);
+      if (!input) return '';
+      const item = input.closest('.items, .option-wrap, label')?.parentElement || input.closest('label');
+      return /支持传图|support(?:s|ed)?\s+(?:image|photo)/i.test(String(item?.innerText || item?.textContent || ''))
+        ? String(expectedId)
+        : '';
+    }, imageSourceGroup.id).catch(() => '');
+    if (preferredImageId && !await saleAttributeIsSelected(page, preferredImageId)) {
+      const selectedIds = await page.locator('#saleAttributesItems input[type="checkbox"]').evaluateAll((nodes) => nodes
+        .filter((node) => node.checked || node.getAttribute('aria-checked') === 'true'
+          || node.closest('.checked, .is-checked, [aria-checked="true"]'))
+        .map((node) => String(node.value || ''))
+        .filter(Boolean)).catch(() => []);
+      for (const selectedId of selectedIds) {
+        if (selectedId !== preferredImageId) await ensureSaleAttributeCleared(page, selectedId);
+      }
+      const deadline = Date.now() + 6000;
+      while (!await saleAttributeIsAvailable(page, preferredImageId) && Date.now() < deadline) {
+        await page.waitForTimeout(200);
+      }
+      await ensureSaleAttributeSelected(page, preferredImageId);
+    }
+  }
+  const candidateIdsFor = (group) => {
+    const normalized = String(group?.name || '').toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const ids = [group?.id].filter(Boolean).map(String);
+    if (/颜色|colou?r/i.test(normalized)) ids.push('191288010');
+    if (/^(?:socket standard|socket type|plug type|connector type|connector)$/i.test(normalized)) ids.push('400050816');
+    return [...new Set(ids)];
+  };
+  const targetIds = new Map();
+  for (const group of variantGroups) {
+    for (const candidateId of candidateIdsFor(group)) {
+      if (!await saleAttributeIsAvailable(page, candidateId)) continue;
+      targetIds.set(group, candidateId);
+      break;
+    }
+  }
+  const multiGroups = variantGroups.filter((group) => new Set(
+    (group.options || []).map((value) => englishSpecText(value)).filter(Boolean)
+  ).size > 1);
+  const availableIds = [...new Set(multiGroups.map((group) => targetIds.get(group)).filter(Boolean))];
+  if (multiGroups.length > 1 && preferredImageId && imageSourceGroup) {
+    groups = [{ ...imageSourceGroup, id: preferredImageId, omittedSourceGroups: multiGroups
+      .filter((group) => group !== imageSourceGroup).map((group) => group.name) }];
+    for (const selectedId of await page.locator('#saleAttributesItems input[type="checkbox"]').evaluateAll((nodes) => nodes
+      .filter((node) => node.checked || node.getAttribute('aria-checked') === 'true'
+        || node.closest('.checked, .is-checked, [aria-checked="true"]'))
+      .map((node) => String(node.value || '')).filter(Boolean)).catch(() => [])) {
+      if (selectedId !== preferredImageId) await ensureSaleAttributeCleared(page, selectedId);
+    }
+    await ensureSaleAttributeSelected(page, preferredImageId);
+  } else if (multiGroups.length > 1 && availableIds.length === 1) {
+    const targetId = availableIds[0];
+    const targetControl = page.locator(`input[value="${targetId.replace(/["\\]/g, '')}"]`).first();
+    const targetName = String(await targetControl.locator('xpath=ancestor::label[1]').innerText().catch(() => '')).trim()
+      || 'Specification';
+    const flattened = buildFlattenedVariantGroup(product, targetId, targetName);
+    if (flattened) {
+      groups = [flattened];
+      await ensureSaleAttributeSelected(page, targetId);
+    }
+  }
   const aliasesFor = (name) => {
     const normalized = String(name || '').toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
     if (/^(?:compatible\s+model|model\s+compatibility|适用型号)$/i.test(normalized)) return ['适用型号', 'compatible model'];
     if (/^(?:type|类型)$/i.test(normalized)) return ['类型', 'type'];
     if (/^(?:model(?: number)?|型号)$/i.test(normalized)) return ['型号', 'model number', 'model'];
     if (/^(?:socket standard|socket type|plug type|connector type|connector)$/i.test(normalized)) {
-      return ['插座标准', '插头类型', '连接器类型', 'socket standard', 'socket type', 'plug type', 'connector type', 'connector'];
+      return ['插座标准', '插头类型', '输出插头', '连接器类型', 'socket standard', 'socket type', 'plug type', 'output plug', 'connector type', 'connector'];
     }
     return [String(name || '').trim()].filter(Boolean);
   };
@@ -1686,17 +1792,30 @@ async function fillVariantSpecs(page, variantGroups) {
     return false;
   };
   const addCustomVariantValue = async (row, value) => {
-    // Current Alibaba forms render a ready-to-use blank combobox. Clicking
-    // "+ 添加" before filling it creates another empty row and discards the
-    // intended custom model value.
-    const inputs = row.locator('input[role="colorCombobox"], input[placeholder*="输入"], input[placeholder*="enter" i]');
-    const inputCount = await inputs.count().catch(() => 0);
+    // The first specification value uses the ready blank combobox. After it
+    // has a value, Alibaba requires "+ Add" to create another controlled row.
+    // Re-resolve the inputs after that click because the component rerenders.
+    let inputs = row.locator('input[role="colorCombobox"], input[placeholder*="输入"], input[placeholder*="enter" i]');
+    let inputCount = await inputs.count().catch(() => 0);
     let customInput = null;
     for (let index = inputCount - 1; index >= 0; index -= 1) {
       const input = inputs.nth(index);
       if (!await input.isVisible().catch(() => false)) continue;
       const current = String(await input.inputValue().catch(() => '')).trim();
       if (!current || current.toLowerCase() === value.toLowerCase()) { customInput = input; break; }
+    }
+    if (!customInput) {
+      const add = row.locator('[role="btn-add"], .add-color-btn').last();
+      if (!await add.isVisible().catch(() => false)) return false;
+      await add.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(300);
+      inputs = row.locator('input[role="colorCombobox"], input[placeholder*="输入"], input[placeholder*="enter" i]');
+      inputCount = await inputs.count().catch(() => 0);
+      for (let index = inputCount - 1; index >= 0; index -= 1) {
+        const input = inputs.nth(index);
+        if (!await input.isVisible().catch(() => false)) continue;
+        if (!String(await input.inputValue().catch(() => '')).trim()) { customInput = input; break; }
+      }
     }
     if (!customInput) return false;
     await customInput.click({ force: true });
@@ -1722,16 +1841,32 @@ async function fillVariantSpecs(page, variantGroups) {
     await page.waitForTimeout(250);
     return String(await customInput.inputValue().catch(() => '')).trim().toLowerCase() === value.toLowerCase();
   };
+  const targetValueCandidates = (group, value) => {
+    const normalizedName = String(group?.name || '').toLowerCase().replace(/[_-]+/g, ' ').trim();
+    const normalizedValue = String(value || '').toLowerCase().replace(/[_-]+/g, ' ').trim();
+    if (/socket|plug|connector|插口|插座|插头/.test(normalizedName)) {
+      if (/\beu\b|e\.u\./.test(normalizedValue)) return ['EU', 'For E.U.', value];
+      if (/\bus\b/.test(normalizedValue)) return ['US', value];
+      if (/\buk\b/.test(normalizedValue)) return ['UK', value];
+      if (/\bau\b|australia|new zealand/.test(normalizedValue)) return ['AU', 'For Australia/New Zealand', value];
+      if (/\bcn\b|china/.test(normalizedValue)) return ['CN', value];
+    }
+    return [value];
+  };
   for (const group of groups) {
-    const targetHasSourceId = group.id && await saleAttributeIsAvailable(page, group.id);
-    if (targetHasSourceId && !await ensureSaleAttributeSelected(page, group.id)) {
+    const targetId = targetIds.get(group)
+      || candidateIdsFor(group).find((candidateId) => availableIds.includes(candidateId))
+      || String(group.id || '');
+    const targetHasSourceId = targetId && await saleAttributeIsAvailable(page, targetId);
+    if (targetHasSourceId && !await ensureSaleAttributeSelected(page, targetId)) {
       for (const rawValue of [...new Set(group.options || [])]) {
         const value = englishSpecText(rawValue);
         if (value) unmapped.push(`${group.name}: ${value}`);
       }
       continue;
     }
-    const directRow = targetHasSourceId ? page.locator(`#struct-specification [id="p-${String(group.id).replace(/["\\]/g, '')}"]`).first() : null;
+    if (targetHasSourceId && targetId !== String(group.id || '')) group.id = targetId;
+    const directRow = targetHasSourceId ? page.locator(`#struct-specification [id="p-${targetId.replace(/["\\]/g, '')}"]`).first() : null;
     let row = directRow && await directRow.isVisible().catch(() => false)
       ? directRow
       : await rowFor(aliasesFor(group.name));
@@ -1749,13 +1884,20 @@ async function fillVariantSpecs(page, variantGroups) {
         unmapped.push(`${group.name}: ${value}`);
         continue;
       }
-      if (!await selectExactValue(row, value)) {
+      let selected = false;
+      for (const candidate of targetValueCandidates(group, value)) {
+        if (await selectExactValue(row, candidate)) { selected = true; break; }
+      }
+      if (!selected) {
         const added = await addCustomVariantValue(row, value);
-        if (!added) unmapped.push(`${group.name}: ${value}`);
+        if (!added) {
+          unmapped.push(`${group.name}: ${value}`);
+          if (group.sourceGroups?.length) blockingUnmapped.push(`${group.name}: ${value}`);
+        }
       }
     }
   }
-  return { unmapped, groups };
+  return { unmapped, blockingUnmapped, groups };
 }
 
 async function visibleColorSpecControl(page) {
@@ -1839,6 +1981,11 @@ async function saleAttributeIsSelected(page, value) {
 }
 
 async function saleAttributeIsAvailable(page, value) {
+  // Alibaba locks some required/selected sale attributes after selection. A
+  // disabled-but-checked control is still active and its rendered row is fully
+  // usable; treating it as unavailable can incorrectly collapse two source
+  // dimensions into the remaining unlocked attribute.
+  if (await saleAttributeIsSelected(page, value)) return true;
   const available = await page.evaluate((expectedValue) => {
     const root = document.querySelector('#saleAttributesItems');
     if (!root) return false;
@@ -2392,7 +2539,6 @@ async function uploadSpecFile(page, item, file) {
 async function enableImageBackedVariantSpecs(page, product, groups, downloadImages) {
   const imageGroups = (groups || []).filter((group) => group?.id
     && String(group.type || '').toUpperCase() === 'IMAGE'
-    && !/颜色|colou?r/i.test(group.name)
     && Object.values(group.optionImages || {}).some(Boolean));
   for (const group of imageGroups) {
     if (!await ensureSaleAttributeSelected(page, group.id)) return false;
@@ -2409,15 +2555,25 @@ async function enableImageBackedVariantSpecs(page, product, groups, downloadImag
     }
     if (!row || !await ensureColorSpecImageSwitch(page, row)) return false;
 
+    const tasks = [];
     for (const rawValue of sourceOptions) {
       const value = englishSpecText(rawValue);
       const imageUrl = group.optionImages?.[rawValue] || group.optionImages?.[value];
       if (!value || !imageUrl) continue;
-      const files = await downloadImages([imageUrl], `spec-${group.id}`, 1);
+      const files = await downloadImages([imageUrl], `spec-${group.id}-${tasks.length}`, 1);
       if (!files.length) return false;
       row = await visibleSaleSpecRow(page, group.id) || row;
       const item = await specValueUploadContainer(row, value);
-      if (!item || !await uploadSpecFile(page, item, files[0])) return false;
+      if (!item) return false;
+      tasks.push({ item, file: files[0] });
+    }
+    // Separate specification items have independent upload controls. Four at
+    // a time avoids the many-minute serial path while keeping request pressure
+    // low enough for Alibaba's image service and slower customer networks.
+    for (let offset = 0; offset < tasks.length; offset += 4) {
+      const results = await Promise.all(tasks.slice(offset, offset + 4)
+        .map(({ item, file }) => uploadSpecFile(page, item, file)));
+      if (results.some((result) => !result)) return false;
     }
     if (!await ensureSaleAttributeSelected(page, group.id)) return false;
   }
@@ -3713,10 +3869,23 @@ export class SellerPublisher {
 
     await clearSaleAttributeSelections(page);
 
-    const productTypeFilled = await fillChoice(page, await fieldByLabel(page, '产品类型'), productType || 'Other');
+    const productTypeField = await fieldByAnyLabel(page, ['产品类型', '类型', 'Product Type', 'Type']);
+    let productTypeFilled = false;
+    const productTypeCandidates = [...new Set([
+      productType,
+      productType.replace(/ies$/i, 'y').replace(/s$/i, ''),
+      'Other'
+    ].filter(Boolean))];
+    for (const candidate of productTypeCandidates) {
+      if (await fillChoice(page, productTypeField, candidate)) {
+        productTypeFilled = true;
+        break;
+      }
+    }
     markSourceAttributes(['产品类型', 'product type'], productTypeFilled);
 
-    const originValue = product.origin || attributeValue(product, '产地', 'Place of Origin') || 'China';
+    const sourceOrigin = product.origin || attributeValue(product, '产地', 'Place of Origin') || 'China';
+    const originValue = /(?:^|,\s*)china$/i.test(String(sourceOrigin).trim()) ? 'China' : sourceOrigin;
     const originFilled = await fillChoice(page, await fieldByAnyLabel(page, ['产地', 'Place of Origin']), originValue);
     markSourceAttributes(['产地', 'place of origin'], originFilled);
 
@@ -3747,7 +3916,10 @@ export class SellerPublisher {
       const labels = [String(item.name).trim(), englishAttributeName(item.name, index), ...aliases];
       const field = await fieldByAnyLabel(page, [...new Set(labels)]);
       if (!field) { unmappedAttributes.add(item.name); continue; }
-      const filled = await fillChoice(page, field, item.value).catch(() => false);
+      const inputType = String(await field.getAttribute('type').catch(() => '')).toLowerCase();
+      const filled = inputType === 'number'
+        ? await fillAndVerify(field, numericValue(item.value), item.name).then(() => true).catch(() => false)
+        : await fillChoice(page, field, item.value).catch(() => false);
       (filled ? mappedAttributes : unmappedAttributes).add(item.name);
     }
 
@@ -3766,16 +3938,20 @@ export class SellerPublisher {
     if (useColorSaleSpec && !colorSpecRow && colorIsRequired) {
       throw new Error('国际站商品规格区的颜色规格未能启用');
     }
-    const variantResult = await fillVariantSpecs(page, product.variantGroups);
+    const variantResult = await fillVariantSpecs(page, product);
     const hasImageBackedVariant = variantResult.groups.some((group) => String(group.type || '').toUpperCase() === 'IMAGE'
       && Object.values(group.optionImages || {}).some(Boolean));
+    let variantImageWarning = '';
+    const flattenedVariantWarning = variantResult.groups.some((group) => group.sourceGroups?.length)
+      ? '目标类目只开放一个规格槽；多维来源规格已展开为完整组合，来源图片保留在主图和详情图中'
+      : '';
     if (hasImageBackedVariant && !await enableImageBackedVariantSpecs(
       page,
       product,
       variantResult.groups,
       (urls, prefix, limit) => this.downloadImageSet(product, urls, prefix, limit)
     )) {
-      throw new Error('国际站型号规格图片未能上传，已停止提交以避免生成缺图商品');
+      variantImageWarning = '当前类目未开放规格图开关；规格组合已保留，来源图片继续保留在商品主图和详情图中';
     }
     const colorControlSelector = [
       '.posting-field-color-select input[role="colorCombobox"]',
@@ -3841,7 +4017,9 @@ export class SellerPublisher {
     }
     return {
       mappedAttributes: [...mappedAttributes],
-      unmappedAttributes: [...new Set([...unmappedAttributes, ...variantResult.unmapped])]
+      unmappedAttributes: [...new Set([...unmappedAttributes, ...variantResult.unmapped])],
+      blockingUnmapped: variantResult.blockingUnmapped,
+      warnings: [flattenedVariantWarning, variantImageWarning].filter(Boolean)
     };
   }
 
@@ -3852,17 +4030,25 @@ export class SellerPublisher {
       .filter((tier) => numericValue(tier.price) > 0 && numericValue(tier.minQuantity) > 0)
       .sort((left, right) => numericValue(left.minQuantity) - numericValue(right.minQuantity));
     const fallbackPrice = product.priceMode === 'fob-range' && numericValue(fob.minPrice) > 0 ? fob.minPrice : product.price;
-    const tiers = validTiers.length ? validTiers : [{ price: fallbackPrice, minQuantity: product.moq || 1 }];
-    let priceInputs = page.locator('[role="input-price"]');
-    let quantityInputs = page.locator('[role="input-quantity"]');
+    const tiers = (validTiers.length
+      ? validTiers
+      : [{ price: fallbackPrice, minQuantity: product.minOrder || product.moq || 1 }])
+      .map((tier) => ({
+        ...tier,
+        price: numericValue(tier.price),
+        minQuantity: numericValue(tier.minQuantity)
+      }))
+      .filter((tier) => tier.price > 0 && tier.minQuantity > 0);
+    let priceInputs = page.locator('[role="input-price"]:visible');
+    let quantityInputs = page.locator('[role="input-quantity"]:visible');
 
     while (Math.min(await priceInputs.count().catch(() => 0), await quantityInputs.count().catch(() => 0)) < tiers.length) {
       const add = page.getByText(/新增价格区间|添加价格区间|Add price range/i).last();
       if (!await add.isVisible().catch(() => false)) break;
       await add.click({ force: true });
       await page.waitForTimeout(350);
-      priceInputs = page.locator('[role="input-price"]');
-      quantityInputs = page.locator('[role="input-quantity"]');
+      priceInputs = page.locator('[role="input-price"]:visible');
+      quantityInputs = page.locator('[role="input-quantity"]:visible');
     }
 
     const rowCount = Math.min(
@@ -3876,9 +4062,12 @@ export class SellerPublisher {
       return;
     }
     for (let index = 0; index < rowCount; index += 1) {
-      await commitControlledInput(quantityInputs.nth(index), tiers[index].minQuantity);
-      await commitControlledInput(priceInputs.nth(index), tiers[index].price);
+      // Each change can rebuild the ladder row. Resolve the visible inputs
+      // again before every write so subsequent operations do not target a
+      // detached clone left behind by Alibaba's controlled form component.
+      quantityInputs = page.locator('[role="input-quantity"]:visible');
       await fillAndVerify(quantityInputs.nth(index), tiers[index].minQuantity, `第 ${index + 1} 档起订量`);
+      priceInputs = page.locator('[role="input-price"]:visible');
       await fillAndVerify(priceInputs.nth(index), tiers[index].price, `第 ${index + 1} 档价格`);
     }
     // The international form can retain a blank trailing range after adding
@@ -4519,7 +4708,8 @@ export class SellerPublisher {
     ], product.stock);
     const fieldMapping = await this.fillProductFields(page, product);
     if (mode === 'submit') {
-      const unmappedRequiredVariant = findBlockingUnmappedVariant(product, fieldMapping.unmappedAttributes);
+      const unmappedRequiredVariant = fieldMapping.blockingUnmapped?.[0]
+        || findBlockingUnmappedVariant(product, fieldMapping.unmappedAttributes);
       if (unmappedRequiredVariant) {
         throw new Error(`国际站目标类目没有与来源规格“${unmappedRequiredVariant}”一致的选项；为保证数据不被篡改，请先在发布页选择匹配类目或人工映射后再提交`);
       }
@@ -4566,20 +4756,24 @@ export class SellerPublisher {
         throw new Error('国际站颜色规格提交前复核失败：来源规格图片未被表单接收');
       }
     }
-    const finalVariantResult = await fillVariantSpecs(page, product.variantGroups);
-    const finalUnmappedVariant = findBlockingUnmappedVariant(product, finalVariantResult.unmapped);
+    const finalVariantResult = await fillVariantSpecs(page, product);
+    const finalUnmappedVariant = finalVariantResult.blockingUnmapped?.[0]
+      || findBlockingUnmappedVariant(product, finalVariantResult.unmapped);
     if (finalUnmappedVariant) {
       throw new Error(`国际站规格提交前复核失败：来源规格“${finalUnmappedVariant}”未保留`);
     }
     const finalHasImageBackedVariant = finalVariantResult.groups.some((group) => String(group.type || '').toUpperCase() === 'IMAGE'
       && Object.values(group.optionImages || {}).some(Boolean));
+    const preserveMultiDimensionImages = finalHasImageBackedVariant && finalVariantResult.groups.length > 1;
     if (finalHasImageBackedVariant && !await enableImageBackedVariantSpecs(
       page,
       product,
       finalVariantResult.groups,
       (urls, prefix, limit) => this.downloadImageSet(product, urls, prefix, limit)
     )) {
-      throw new Error('国际站型号规格提交前复核失败：来源规格图片未被表单接收');
+      if (!fieldMapping.warnings.includes('当前类目未开放规格图开关；规格组合已保留，来源图片继续保留在商品主图和详情图中')) {
+        fieldMapping.warnings.push('当前类目未开放规格图开关；规格组合已保留，来源图片继续保留在商品主图和详情图中');
+      }
     }
 
     // Uploaders and rich-text editors can rerender the form after the first
@@ -4599,7 +4793,7 @@ export class SellerPublisher {
     // the form once makes the server-issued image records authoritative. The
     // user still performs one "direct submit" action; this draft checkpoint is
     // an automatic reliability step before the final publish click.
-    if (mode === 'submit') {
+    if (mode === 'submit' && !preserveMultiDimensionImages) {
       let draftAction = null;
       for (const text of ['保存草稿', '存为草稿', '暂存草稿', 'Save as Draft', 'Save Draft']) {
         const candidate = page.getByRole('button', { name: text, exact: false }).last();
@@ -4622,6 +4816,19 @@ export class SellerPublisher {
         if (draftImageState.occupied >= 4 && !draftImageState.uploading) {
           const reset = await clearMainImagesForRetry(page);
           if (reset) await this.uploadMainImages(page, product);
+        }
+
+        // Saving a draft rebuilds Alibaba's specification component. Custom
+        // values survive that rebuild, but the specification-image switch is
+        // reset to off. Restore and verify image-backed specifications after
+        // the checkpoint so the final validator sees their server-side media.
+        if (finalHasImageBackedVariant && !await enableImageBackedVariantSpecs(
+          page,
+          product,
+          finalVariantResult.groups,
+          (urls, prefix, limit) => this.downloadImageSet(product, urls, prefix, limit)
+        )) {
+          throw new Error('保存草稿后国际站规格图状态未能恢复，已停止提交以避免生成缺图商品');
         }
       }
     }
@@ -4718,7 +4925,11 @@ export class SellerPublisher {
       verifiedBy: verification.verifiedBy,
       feedback: verification.feedback,
       fieldMapping,
-      warnings: [videoWarning, fieldMapping.unmappedAttributes.length ? `${fieldMapping.unmappedAttributes.length} 个来源属性未在当前类目表单中找到对应字段` : ''].filter(Boolean)
+      warnings: [
+        videoWarning,
+        ...(fieldMapping.warnings || []),
+        fieldMapping.unmappedAttributes.length ? `${fieldMapping.unmappedAttributes.length} 个来源属性未在当前类目表单中找到对应字段` : ''
+      ].filter(Boolean)
     };
   }
 }
