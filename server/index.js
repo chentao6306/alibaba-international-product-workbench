@@ -682,7 +682,20 @@ async function runPublishJob(jobId) {
         if (route.error || !route.url) throw new Error(route.error || '该商品没有可用的国际站发布页');
         const publishSnapshot = createPublishSnapshot(product, { mode, category: route.category, categoryId: route.categoryId, publishPageUrl: route.url });
         store.patchJob(jobId, { message: `正在处理 ${index + 1}/${total}：${product.title}（${route.category || '未识别类目'}）` });
-        const result = await publisher.publishProduct(product, route.url, mode, route.category, jobId);
+        const itemTimeoutMs = Math.max(60000, Number(process.env.KUA_YIPU_PUBLISH_ITEM_TIMEOUT_MS || 180000));
+        const timeoutToken = Symbol('publish-item-timeout');
+        let timeoutHandle;
+        const timeout = new Promise((_, reject) => { timeoutHandle = setTimeout(() => {
+          publisher.requestPublishStop(jobId);
+          const error = new Error(`单件商品处理超过 ${Math.round(itemTimeoutMs / 60000)} 分钟，已自动跳过；可稍后单独重试`);
+          error.code = 'PUBLISH_ITEM_TIMEOUT';
+          error.timeoutToken = timeoutToken;
+          reject(error);
+        }, itemTimeoutMs); });
+        const result = await Promise.race([
+          publisher.publishProduct(product, route.url, mode, route.category, jobId),
+          timeout
+        ]).finally(() => clearTimeout(timeoutHandle));
         // Keep the real publishing page visible for inspection. The user
         // explicitly requested to see the browser while an item is being
         // uploaded and submitted; collection still uses the hidden context.

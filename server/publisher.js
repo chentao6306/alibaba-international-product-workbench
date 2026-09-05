@@ -2686,7 +2686,7 @@ async function enterPostingForm(page, publishPageUrl, expectedCategoryId = '') {
   // Only navigate again when it is still on the chooser; this preserves the
   // form state on Alibaba builds that transition without a full navigation.
   if (isCategoryPage() && publishPageUrl && page.url() !== publishPageUrl) {
-    await gotoWithRetry(page, publishPageUrl, { timeout: 60000, attempts: 2 }).catch(() => {});
+    await gotoWithRetry(page, publishPageUrl, { timeout: 30000, attempts: 2 }).catch(() => {});
     await settlePage(page);
   }
   return !isCategoryPage();
@@ -4663,7 +4663,8 @@ export class SellerPublisher {
     // upload and form interaction.
     await hidePage(page);
     this.visible = false;
-    if (page.url() !== publishPageUrl) await gotoWithRetry(page, publishPageUrl, { timeout: 60000 });
+    const publishNavigation = { timeout: 30000, attempts: 2 };
+    if (page.url() !== publishPageUrl) await gotoWithRetry(page, publishPageUrl, publishNavigation);
     await settlePage(page);
     await waitForHumanVerification(page, { timeout: 300000 });
     // Electron owns the authenticated browser partition. Refresh its exported
@@ -4672,7 +4673,7 @@ export class SellerPublisher {
     if (/login|passport/i.test(page.url())) {
       await globalThis.__KUA_YIPU_SELLER_BRIDGE?.sync?.().catch(() => false);
       await syncAlibabaCookies(page.context());
-      await gotoWithRetry(page, publishPageUrl, { timeout: 60000 }).catch(() => {});
+      await gotoWithRetry(page, publishPageUrl, publishNavigation).catch(() => {});
       await settlePage(page);
       await waitForHumanVerification(page, { timeout: 300000 });
     }
@@ -4701,7 +4702,7 @@ export class SellerPublisher {
       }
       await globalThis.__KUA_YIPU_SELLER_BRIDGE?.sync?.().catch(() => false);
       await syncAlibabaCookies(page.context());
-      await gotoWithRetry(page, publishPageUrl, { timeout: 60000, attempts: 2 });
+      await gotoWithRetry(page, publishPageUrl, publishNavigation);
       await settlePage(page);
       await waitForHumanVerification(page, { timeout: 300000 });
     }
