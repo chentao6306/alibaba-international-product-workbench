@@ -999,14 +999,28 @@ async function mainImageFormState(page) {
 
 async function clearMainImagesForRetry(page) {
   const deleteAll = page.getByRole('button', { name: /删除全部图片|清空.*图片|delete all images/i }).last();
-  if (!await deleteAll.isVisible().catch(() => false)) return false;
-  await deleteAll.click({ force: true });
-  await page.waitForTimeout(250);
-  for (const pattern of [/^确定$/, /^确认$/, /^删除$/, /确认删除|confirm|delete/i]) {
-    const confirm = page.getByRole('button', { name: pattern }).last();
-    if (!await confirm.isVisible().catch(() => false)) continue;
-    await confirm.click({ force: true }).catch(() => {});
-    break;
+  if (await deleteAll.isVisible().catch(() => false)) {
+    await deleteAll.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(250);
+    for (const pattern of [/^确定$/, /^确认$/, /^删除$/, /确认删除|confirm|delete/i]) {
+      const confirm = page.getByRole('button', { name: pattern }).last();
+      if (!await confirm.isVisible().catch(() => false)) continue;
+      await confirm.click({ force: true }).catch(() => {});
+      break;
+    }
+  } else {
+    // Some seller form builds do not render the "delete all" action. Remove
+    // each occupied slot through its accessible delete control instead of
+    // treating the visible previews as a permanent upload failure.
+    await page.evaluate(() => {
+      const root = document.querySelector('.image-uploader');
+      if (!root) return;
+      const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
+      const controls = [...root.querySelectorAll('button,[role="button"],[aria-label],[title]')]
+        .filter(visible)
+        .filter((node) => /删除|移除|remove|delete/i.test(`${node.getAttribute('aria-label') || ''} ${node.getAttribute('title') || ''} ${node.textContent || ''}`));
+      for (const control of controls) control.click();
+    }).catch(() => {});
   }
   const deadline = Date.now() + 8000;
   while (Date.now() < deadline) {
@@ -1014,7 +1028,8 @@ async function clearMainImagesForRetry(page) {
     if (!state.uploading && state.occupied === 0 && state.empty >= 4) return true;
     await page.waitForTimeout(250);
   }
-  return (await mainImageFormState(page)).occupied === 0;
+  const finalState = await mainImageFormState(page);
+  return finalState.occupied === 0 && finalState.empty >= 4;
 }
 
 export function distinctAlibabaImageUrls(urls = []) {
@@ -4599,6 +4614,15 @@ export class SellerPublisher {
         await page.waitForTimeout(4200);
         await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
         await settlePage(page);
+        // Alibaba may preserve the visual previews while rebuilding the form
+        // with an empty image field after a draft checkpoint. Recommit the
+        // source images once after that rerender so the final submit carries
+        // server-issued image records, not only client-side thumbnails.
+        const draftImageState = await mainImageFormState(page);
+        if (draftImageState.occupied >= 4 && !draftImageState.uploading) {
+          const reset = await clearMainImagesForRetry(page);
+          if (reset) await this.uploadMainImages(page, product);
+        }
       }
     }
 
@@ -4636,16 +4660,28 @@ export class SellerPublisher {
     } catch (error) {
       const actionError = String(error?.message || '');
       if (/商品图片|请上传.*图片|image.*required/i.test(actionError)) {
-        const cleared = await clearMainImagesForRetry(page);
-        if (!cleared) throw error;
-        await this.uploadMainImages(page, product);
-        let retryAction = null;
-        for (const text of buttonTexts) {
-          const candidate = page.getByRole('button', { name: text, exact: false }).last();
-          if (await candidate.isVisible().catch(() => false) && !await candidate.isDisabled().catch(() => false)) { retryAction = candidate; break; }
+        let recovered = false;
+        let retryError = error;
+        for (let retry = 0; retry < 2; retry += 1) {
+          const cleared = await clearMainImagesForRetry(page);
+          if (!cleared) break;
+          await this.uploadMainImages(page, product);
+          let retryAction = null;
+          for (const text of buttonTexts) {
+            const candidate = page.getByRole('button', { name: text, exact: false }).last();
+            if (await candidate.isVisible().catch(() => false) && !await candidate.isDisabled().catch(() => false)) { retryAction = candidate; break; }
+          }
+          if (!retryAction) break;
+          try {
+            verification = await waitForActionResult(page, retryAction, mode, originalUrl);
+            recovered = true;
+            break;
+          } catch (nextError) {
+            retryError = nextError;
+            if (!/商品图片|请上传.*图片|image.*required/i.test(String(nextError?.message || ''))) break;
+          }
         }
-        if (!retryAction) throw error;
-        verification = await waitForActionResult(page, retryAction, mode, originalUrl);
+        if (!recovered) throw retryError;
       } else if (/属性值不能为空|attribute value.*(?:empty|required)/i.test(actionError)) {
         const emptyLabels = await visibleEmptyAttributeLabels(page);
         const cleared = await clearEmptySaleAttributeSelections(page);
