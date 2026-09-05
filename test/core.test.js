@@ -32,7 +32,7 @@ import {
   SellerPublisher,
   validateProductData
 } from '../server/publisher.js';
-import { auditProduct, copyMissingProductData, findAndReplaceProduct, recordProductMutation, sourceSnapshotFingerprint, syncProductModel, verifySourceIntegrity } from '../server/product-model.js';
+import { applyPublishedProductReference, auditProduct, copyMissingProductData, findAndReplaceProduct, recordProductMutation, sourceSnapshotFingerprint, syncProductModel, verifySourceIntegrity } from '../server/product-model.js';
 import { extractAlibabaCategoryId, extractAlibabaSourceData, parseAlibabaDetailDataScript } from '../server/alibaba-source-data.js';
 import { buildAlibabaPublishUrl, categoryPathKey, createPublishPlan, resolvePublishRoute } from '../server/category-routing.js';
 import { deleteWorkspaceEntities, findWorkspaceJobs, JsonStore } from '../server/store.js';
@@ -142,6 +142,42 @@ test('references only missing product data and leaves commercial content untouch
   assert.equal(patch.price, undefined);
   assert.equal(patch.detailImages, undefined);
   assert.equal(patch.keywords, undefined);
+});
+
+test('published reference replaces publish template while preserving collected commercial data', () => {
+  const target = {
+    title: 'Original target title', keywords: ['original'], price: 12.5, stock: 88,
+    mainImages: ['target-main.jpg'], detailImages: ['target-detail.jpg'],
+    sourceCategoryPath: ['Source', 'Category'], sourceCategoryId: 'source-1',
+    categoryPath: ['Old', 'Target'], categoryId: 'old-1',
+    origin: '', attributes: [{ name: 'Material', value: 'Carbon' }],
+    variantGroups: [{ name: 'Color', options: ['Black'] }],
+    skus: [{ code: 'TARGET-1', price: 12.5, stock: 88, attributes: { Color: 'Black' } }]
+  };
+  const reference = {
+    title: 'Published template', keywords: ['template'], price: 99, stock: 2,
+    mainImages: ['reference-main.jpg'], detailImages: ['reference-detail.jpg'],
+    categoryPath: ['Consumer Electronics', 'Camera', 'Drones Accessories'], categoryId: '201346401',
+    origin: 'China', province: 'Guangdong', brandName: 'Template Brand',
+    attributes: [{ name: 'Material', value: 'Nylon' }, { name: 'Private Mold', value: 'No' }],
+    variantGroups: [{ name: 'Color', options: ['Black', 'White'], optionImages: { Black: 'black.jpg' } }, { name: 'Type', options: ['Propellers'] }],
+    skus: [{ code: 'REFERENCE-1', price: 99, stock: 2, attributes: { Color: 'Black', Type: 'Propellers' } }, { code: 'REFERENCE-2', price: 99, stock: 2, attributes: { Color: 'White', Type: 'Propellers' } }]
+  };
+  const patch = applyPublishedProductReference(target, reference);
+  assert.equal(patch.categoryId, '201346401');
+  assert.deepEqual(patch.categoryPath, reference.categoryPath);
+  assert.equal(patch.province, 'Guangdong');
+  assert.deepEqual(patch.attributes, reference.attributes);
+  assert.deepEqual(patch.variantGroups, reference.variantGroups);
+  assert.equal(patch.skus[0].price, 12.5);
+  assert.equal(patch.skus[0].stock, 88);
+  assert.equal(patch.skus[0].code, 'TARGET-1');
+  assert.equal(patch.skus[1].price, 12.5);
+  assert.equal(patch.title, undefined);
+  assert.equal(patch.keywords, undefined);
+  assert.equal(patch.mainImages, undefined);
+  assert.equal(patch.detailImages, undefined);
+  assert.equal(patch.stock, undefined);
 });
 
 test('normalizes a 1688 shop home page to its product list', () => {

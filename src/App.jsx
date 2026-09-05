@@ -302,15 +302,17 @@ function ProductsView({ state, refresh, notify, onMenu }) {
   const allChecked = pagedProducts.length > 0 && pagedProducts.every((item) => item.selected);
   const allProductsSelected = state.products.length > 0 && state.products.every((item) => item.selected);
   const selectedProducts = state.products.filter((item) => item.selected);
-  const incompleteSelectedProducts = selectedProducts.filter((product) => !productCompleteness(product).complete);
-  const publishedReferenceProducts = state.products.filter((product) => product.status === 'published');
+  const referenceEligibleProducts = selectedProducts.filter((product) => product.status !== 'published');
+  const wasPublishedSuccessfully = (product) => product.status === 'published'
+    || (product.publishHistory || []).some((entry) => ['published', 'submitted', 'success'].includes(String(entry.result?.status || entry.status || '').toLowerCase()));
+  const publishedReferenceProducts = state.products.filter(wasPublishedSuccessfully);
   const referenceUnavailableReason = !selectedProducts.length
     ? '请先勾选需要补全资料的商品'
-    : !incompleteSelectedProducts.length
-      ? '已勾选商品的资料完整，无需引用'
+    : !referenceEligibleProducts.length
+      ? '已勾选商品均已上架成功，无需引用'
       : !publishedReferenceProducts.length
         ? '当前没有上架成功的商品可供引用'
-        : '引用上架成功商品中的缺失资料';
+        : '用上架成功商品的类目、受控属性和规格模板覆盖发布资料';
 
   useEffect(() => { setPage(1); }, [query, filter, pageSize]);
   useEffect(() => { if (page > pageCount) setPage(pageCount); }, [page, pageCount]);
@@ -362,7 +364,7 @@ function ProductsView({ state, refresh, notify, onMenu }) {
       <button className="secondary-button" disabled={!state.products.length} onClick={() => selectAllProducts(!allProductsSelected)} title={allProductsSelected ? '取消全部商品的选择' : '选择商品资料库中的全部商品'}><Check size={15} />{allProductsSelected ? '取消全选' : `全选全部商品 ${state.products.length}`}</button>
       <button className="secondary-button" disabled={!state.products.length} onClick={() => setFindReplaceOpen(true)}><Search size={15} />查找替换</button>
       {selectedProducts.length > 0 && <button className="primary-button" onClick={() => setBatchEditing(true)}><Pencil size={15} />批量修改 {selectedProducts.length}</button>}
-      <button className="secondary-button" disabled={!incompleteSelectedProducts.length || !publishedReferenceProducts.length} title={referenceUnavailableReason} onClick={() => setReferenceOpen(true)}><ClipboardList size={15} />引用成功商品资料</button>
+      <button className="secondary-button" disabled={!referenceEligibleProducts.length || !publishedReferenceProducts.length} title={referenceUnavailableReason} onClick={() => setReferenceOpen(true)}><ClipboardList size={15} />引用成功商品资料</button>
       {selectedProducts.length > 0 && <button className="secondary-button danger-button" onClick={removeSelected}><Trash2 size={15} />删除已勾选 {selectedProducts.length}</button>}
       <label className="page-size"><span>每页</span><select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}><option value="10">10</option><option value="20">20</option><option value="50">50</option></select></label>
       <span className="result-count">共 {products.length} 件</span>
@@ -383,7 +385,7 @@ function ProductsView({ state, refresh, notify, onMenu }) {
     {editing && <ProductEditor product={editing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); await refresh(); notify('商品修改已保存'); }} notify={notify} />}
     {batchEditing && <BatchEditor products={selectedProducts} onClose={() => setBatchEditing(false)} onSaved={async (result) => { setBatchEditing(false); await refresh(); notify(result?.categoryBindingReset ? '批量修改已应用，请重新绑定修改后类目的国际站发布表单' : '批量修改已应用'); }} notify={notify} />}
     {findReplaceOpen && <FindReplaceDialog products={selectedProducts.length ? selectedProducts : state.products} onClose={() => setFindReplaceOpen(false)} onSaved={async (result) => { setFindReplaceOpen(false); await refresh(); notify(`已替换 ${result.changedProducts} 件商品，共 ${result.total} 处`); }} notify={notify} />}
-    {referenceOpen && <ReferenceDialog products={incompleteSelectedProducts} references={publishedReferenceProducts} onClose={() => setReferenceOpen(false)} onSaved={async (result) => { setReferenceOpen(false); await refresh(); notify(`已引用成功商品资料，补全 ${result.changed.length} 件商品`); }} notify={notify} />}
+    {referenceOpen && <ReferenceDialog products={referenceEligibleProducts} references={publishedReferenceProducts} onClose={() => setReferenceOpen(false)} onSaved={async (result) => { setReferenceOpen(false); await refresh(); notify(`已套用成功商品发布模板，更新 ${result.changed.length} 件商品`); }} notify={notify} />}
   </>;
 }
 
@@ -418,7 +420,7 @@ function ReferenceDialog({ products, references, onClose, onSaved, notify }) {
     try { onSaved(await api('/api/products/reference', { method: 'POST', body: JSON.stringify({ ids: products.map((item) => item.id), referenceId }) })); }
     catch (error) { notify(error.message, 'error'); setBusy(false); }
   }
-  return <div className="drawer-backdrop"><aside className="drawer batch-drawer"><div className="drawer-header"><div><span>引用成功商品资料</span><h2>补全 {products.length} 件资料不完整商品</h2></div><button className="icon-button" onClick={onClose} title="关闭"><X size={20} /></button></div><div className="reference-help">仅补入缺失的产地、包装、规格、属性、发货期等资料；不会覆盖商品标题、关键词、价格、主图或详情图。</div><label className="batch-field"><span>选择已上架成功的商品</span><select value={referenceId} onChange={(event) => setReferenceId(event.target.value)}><option value="">请选择引用商品</option>{references.map((item) => <option key={item.id} value={item.id}>{item.title || item.id}（{item.sourceId}）</option>)}</select></label><div className="reference-list">{products.map((item) => <div key={item.id}><strong>{item.title || item.id}</strong><small>{productCompleteness(item).missing.join('、') || '资料待确认'}</small></div>)}</div><div className="drawer-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="button" className="primary-button" disabled={busy || !referenceId} onClick={apply}><ClipboardList size={17} />开始引用</button></div></aside></div>;
+  return <div className="drawer-backdrop"><aside className="drawer batch-drawer"><div className="drawer-header"><div><span>引用成功商品资料</span><h2>套用发布模板到 {products.length} 件商品</h2></div><button className="icon-button" onClick={onClose} title="关闭"><X size={20} /></button></div><div className="reference-help">将覆盖国际站发布所需的类目、产地/省份、品牌、适用品牌、材质、私模、颜色及图片、适用型号、型号及图片、类型和规格。原商品标题、关键词、价格、库存、主图、详情图和来源记录保持不变。</div><label className="batch-field"><span>选择已成功上架的商品作为模板</span><select value={referenceId} onChange={(event) => setReferenceId(event.target.value)}><option value="">请选择引用商品</option>{references.map((item) => <option key={item.id} value={item.id}>{item.title || item.id}（{item.sourceId}）</option>)}</select></label><div className="reference-list">{products.map((item) => <div key={item.id}><strong>{item.title || item.id}</strong><small>{item.status === 'publish_failed' ? '上次上架失败，可套用模板后重试' : productCompleteness(item).missing.join('、') || '将替换发布属性模板'}</small></div>)}</div><div className="drawer-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="button" className="primary-button" disabled={busy || !referenceId} onClick={apply}><ClipboardList size={17} />套用并保存</button></div></aside></div>;
 }
 
 function BatchEditor({ products, onClose, onSaved, notify }) {

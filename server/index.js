@@ -11,7 +11,7 @@ import {
   sanitizeCollectedProduct,
   SellerPublisher
 } from './publisher.js';
-import { copyMissingProductData, createPublishSnapshot, findAndReplaceProduct, recordProductMutation, syncProductModel } from './product-model.js';
+import { applyPublishedProductReference, copyMissingProductData, createPublishSnapshot, findAndReplaceProduct, recordProductMutation, syncProductModel } from './product-model.js';
 import { buildAlibabaPublishUrl, createPublishPlan, normalizeCategoryId, productCategory, publishBindings, rememberPublishBinding, resolvePublishRoute } from './category-routing.js';
 import { userFacingError } from './browser-error.js';
 
@@ -869,17 +869,23 @@ app.post('/api/products/reference', (request, response, next) => {
     const referenceId = String(request.body?.referenceId || '');
     if (!ids.size || !referenceId) return next(Object.assign(new Error('请选择待补全商品和引用商品'), { status: 400 }));
     const result = store.update((state) => {
-      const reference = state.products.find((item) => item.id === referenceId && item.status === 'published');
+      const reference = state.products.find((item) => item.id === referenceId && (
+        item.status === 'published'
+        || (Array.isArray(item.publishHistory) && item.publishHistory.some((entry) => ['published', 'submitted', 'success'].includes(String(entry.result?.status || entry.status || '').toLowerCase())))
+      ));
       if (!reference) throw Object.assign(new Error('只能引用已成功上架的商品'), { status: 400 });
       const changed = [];
       for (const product of state.products) {
         if (!ids.has(product.id) || product.id === reference.id) continue;
-        const patch = copyMissingProductData(product, reference);
+        // A failed product can have plenty of source data while still missing
+        // Alibaba-controlled values. Use the successful product as a complete
+        // publish template instead of only filling blank fields.
+        const patch = applyPublishedProductReference(product, reference);
         if (!Object.keys(patch).length) continue;
         recordProductMutation(product, patch, { actor: 'user', action: 'reference-published-product' });
-        changed.push({ id: product.id, title: product.title, fields: Object.keys(patch) });
+        changed.push({ id: product.id, title: product.title, fields: Object.keys(patch), categoryId: product.categoryId || '' });
       }
-      return { referenceId, changed };
+      return { referenceId, referenceTitle: reference.title || reference.id, changed };
     });
     response.json(result);
   } catch (error) { next(error); }

@@ -119,6 +119,67 @@ export function copyMissingProductData(target, reference) {
   return patch;
 }
 
+// Copy the publishable taxonomy/template from a product that has already
+// passed the international-site submission flow. Commercial and source media
+// fields stay attached to the target product so quoting a template cannot
+// silently change what the customer collected or priced.
+export function applyPublishedProductReference(target, reference) {
+  const patch = {};
+  const cloneIfPresent = (field) => {
+    if (!Object.hasOwn(reference || {}, field) || isBlank(reference[field])) return;
+    patch[field] = clone(reference[field]);
+  };
+
+  // The category ID is what drives automatic publish routing. Keep the
+  // original source category in sourceCategory* for traceability, while the
+  // working category is replaced with the known-good target category.
+  for (const field of [
+    'categoryPath', 'categoryId', 'targetCategory', 'targetCategoryPath',
+    'targetCategoryId', 'internationalCategory', 'internationalCategoryPath',
+    'categoryAttributes', 'publishCategory', 'publishCategoryId'
+  ]) cloneIfPresent(field);
+  if (!patch.categoryPath && Array.isArray(reference?.sourceCategoryPath) && reference.sourceCategoryPath.length) {
+    patch.categoryPath = clone(reference.sourceCategoryPath);
+  }
+  if (!patch.categoryId && !isBlank(reference?.sourceCategoryId)) {
+    patch.categoryId = clone(reference.sourceCategoryId);
+  }
+
+  // Controlled category attributes used by the Alibaba form. These names also
+  // cover data captured from older versions of the collector/custom editor.
+  for (const field of [
+    'attributes', 'customAttributes', 'origin', 'province', 'brand',
+    'brandName', 'compatibleBrand', 'compatibleBrands', 'privateMold',
+    'model', 'modelImages', 'compatibleModel', 'compatibleModels',
+    'productType', 'type', 'color', 'colorImages', 'specifications',
+    'platformAttributes', 'internationalAttributes', 'targetAttributes',
+    'services', 'certificates', 'deliveryTime', 'salesUnit', 'packaging'
+  ]) cloneIfPresent(field);
+
+  // Specifications and their option images are safe to copy. Rebuild SKU
+  // rows from the reference only when the target has no rows; when rows exist,
+  // retain target price/stock/code and replace only specification attributes.
+  cloneIfPresent('variantGroups');
+  if (Array.isArray(reference?.skus) && reference.skus.length) {
+    const targetSkus = Array.isArray(target?.skus) ? target.skus : [];
+    patch.skus = reference.skus.map((sourceSku, index) => {
+      const current = targetSkus[index] || {};
+      const next = clone(sourceSku) || {};
+      if (Object.hasOwn(current, 'price') && current.price !== '') next.price = clone(current.price);
+      else if (target?.price != null && target.price !== '') next.price = clone(target.price);
+      if (Object.hasOwn(current, 'stock') && current.stock !== '') next.stock = clone(current.stock);
+      else if (target?.stock != null && target.stock !== '') next.stock = clone(target.stock);
+      if (Object.hasOwn(current, 'code')) next.code = clone(current.code);
+      if (Object.hasOwn(current, 'skuCode')) next.skuCode = clone(current.skuCode);
+      return next;
+    });
+  }
+
+  // Do not allow a template to overwrite source identity, title, keywords,
+  // pricing, inventory, main/detail images, description or publish state.
+  return patch;
+}
+
 function snapshotFields(product) {
   return structuredClone({
     sourceId: product.sourceId || '', sourceUrl: product.sourceUrl || '', sourceTitle: product.sourceTitle || '',
