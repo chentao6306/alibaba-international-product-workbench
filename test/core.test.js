@@ -307,6 +307,17 @@ test('keeps a multi-option SKU variant blocking when the target category cannot 
   assert.equal(findBlockingUnmappedVariant(product, ['Compatible model: Model B']), 'Compatible model: Model B');
 });
 
+test('does not block duplicated single-value SKU options from detail-page matrices', () => {
+  const product = {
+    variantGroups: [{ name: 'compatible model', options: ['Model A', 'Model B'], type: 'TEXT' }],
+    skus: [
+      { attributes: { 'compatible model': 'Model A' } },
+      { attributes: { 'compatible model': 'Model A' } }
+    ]
+  };
+  assert.equal(findBlockingUnmappedVariant(product, ['compatible model: Model B']), '');
+});
+
 test('keeps the source color as a target sales specification, including one-color SKUs', () => {
   assert.equal(needsColorSaleSpecification({ options: ['Black'] }), true);
   assert.equal(needsColorSaleSpecification({ options: ['Black', 'Black'] }), true);

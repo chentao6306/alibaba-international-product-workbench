@@ -1053,6 +1053,18 @@ export function findBlockingUnmappedVariant(product, unmappedAttributes = []) {
   const required = new Set();
   for (const group of product?.variantGroups || []) {
     if (!isRequiredTargetVariantGroup(group)) continue;
+    // A few detail pages duplicate a single SKU option while building their
+    // client-side matrix. It is descriptive data, not a publishable variant,
+    // when every source SKU carries the same value for this group.
+    if (Array.isArray(product?.skus) && product.skus.length) {
+      const groupName = String(group.name || '').trim().toLowerCase();
+      const skuValues = new Set(product.skus.map((sku) => {
+        const attrs = sku?.attributes || {};
+        const entry = Object.entries(attrs).find(([name]) => String(name).trim().toLowerCase() === groupName);
+        return String(entry?.[1] || '').trim().toLowerCase();
+      }).filter(Boolean));
+      if (skuValues.size < 2) continue;
+    }
     const options = [...new Set((group.options || []).map((value) => englishSpecText(value)).filter(Boolean))];
     for (const option of options) required.add(`${group.name}: ${option}`.toLowerCase());
   }
@@ -1307,17 +1319,38 @@ async function fillLogisticsFields(page, packaging = {}) {
 
 async function fillChoice(page, locator, value) {
   if (!locator || !value) return false;
-  await locator.click().catch(() => {});
-  await locator.fill(String(value)).catch(() => {});
-  await page.waitForTimeout(350);
-  const exactOption = page.getByText(String(value), { exact: true }).last();
-  if (await exactOption.isVisible().catch(() => false)) await exactOption.click().catch(() => {});
-  else {
-    await locator.press('ArrowDown').catch(() => {});
-    await locator.press('Enter').catch(() => {});
+  const expected = String(value).trim();
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await locator.click({ force: true }).catch(() => {});
+    await locator.fill(expected).catch(() => {});
+    await page.waitForTimeout(350);
+    const exactOption = page.getByText(expected, { exact: true }).last();
+    if (await exactOption.isVisible().catch(() => false)) await exactOption.click({ force: true }).catch(() => {});
+    else {
+      await locator.press('ArrowDown').catch(() => {});
+      await locator.press('Enter').catch(() => {});
+    }
+    await locator.press('Tab').catch(() => {});
+    await locator.dispatchEvent('change').catch(() => {});
+    await page.waitForTimeout(300);
+    const committed = await locator.evaluate((node, expectedValue) => {
+      const clean = (text) => String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const expectedText = clean(expectedValue);
+      if (clean(node.value) === expectedText) return true;
+      let parent = node;
+      for (let depth = 0; parent && depth < 5; depth += 1, parent = parent.parentElement) {
+        const text = clean(parent.innerText || parent.textContent);
+        if (text.includes(expectedText)) return true;
+        if (parent.querySelector?.('[aria-selected="true"], [data-selected="true"], .next-tag-body, [class*="selected-value"]')) {
+          const selected = clean(parent.querySelector('[aria-selected="true"], [data-selected="true"], .next-tag-body, [class*="selected-value"]')?.textContent);
+          if (selected.includes(expectedText)) return true;
+        }
+      }
+      return false;
+    }, expected).catch(() => false);
+    if (committed) return true;
   }
-  await page.waitForTimeout(250);
-  return true;
+  return false;
 }
 
 async function fillColorSpec(page, values) {
@@ -1750,6 +1783,25 @@ async function visibleColorSpecRow(page) {
         '.posting-feild-color-item-container input[placeholder*="请输入"]'
       ].join(', ')).count().catch(() => 0)) return row;
   }
+  // Fallback for the newer form build where the stable p-191288010 wrapper is
+  // absent. Mark the closest visible container around a color combobox so the
+  // remaining upload code can use the same row-scoped selectors.
+  const marker = `codex-color-row-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const found = await page.evaluate((value) => {
+    const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
+    const inputs = [...document.querySelectorAll('input[role="colorCombobox"], input[placeholder*="请输入"]')].filter(visible);
+    for (const input of inputs) {
+      let node = input;
+      for (let depth = 0; node && depth < 7; depth += 1, node = node.parentElement) {
+        const text = String(node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!/颜色|colou?r/i.test(text) || /customizedServices|CustomizedServices/i.test(String(node.className || ''))) continue;
+        node.setAttribute('data-codex-color-row', value);
+        return true;
+      }
+    }
+    return false;
+  }, marker).catch(() => false);
+  if (found) return page.locator(`[data-codex-color-row="${marker}"]`).first();
   return null;
 }
 
@@ -1772,7 +1824,7 @@ async function saleAttributeIsSelected(page, value) {
 }
 
 async function saleAttributeIsAvailable(page, value) {
-  return page.evaluate((expectedValue) => {
+  const available = await page.evaluate((expectedValue) => {
     const root = document.querySelector('#saleAttributesItems');
     if (!root) return false;
     const input = root.querySelector(`input[value="${CSS.escape(String(expectedValue))}"]`);
@@ -1786,6 +1838,17 @@ async function saleAttributeIsAvailable(page, value) {
     }
     return false;
   }, value).catch(() => false);
+  if (available) return true;
+  // Newer seller forms omit #saleAttributesItems and render the same control
+  // as a plain checkbox/label. Use the visible control as the authoritative
+  // fallback so a customer machine with the newer UI does not report that
+  // color is unavailable and then fail the product unnecessarily.
+  if (String(value) === '191288010') {
+    const control = await visibleColorSpecControl(page);
+    return Boolean(control && !await control.input.isDisabled().catch(() => true));
+  }
+  const input = page.locator(`input[value="${String(value).replace(/["\\]/g, '')}"]`).first();
+  return Boolean(await input.isVisible().catch(() => false) && !await input.isDisabled().catch(() => true));
 }
 
 async function ensureSaleAttributeSelected(page, value) {
@@ -2377,11 +2440,74 @@ async function dismissPostingOverlays(page) {
       await page.waitForTimeout(200);
       const blockingBackdrop = page.locator('.next-overlay-wrapper.opened .next-overlay-backdrop:visible');
       if (!await blockingBackdrop.count().catch(() => 0)) return true;
-      break;
+      // Some versions render a warning as a backdrop-only overlay. A normal
+      // Escape is ignored in that state, but clicking the backdrop is the
+      // same user action as dismissing the warning and releases the form.
+      await blockingBackdrop.last().click({ position: { x: 4, y: 4 }, force: true }).catch(() =>
+        blockingBackdrop.last().evaluate((node) => node.click()).catch(() => {}));
+      await page.waitForTimeout(300);
     }
     await page.waitForTimeout(300);
   }
   return !await page.locator('.next-overlay-wrapper.opened .next-overlay-backdrop:visible').count().catch(() => 0);
+}
+
+async function enterPostingForm(page, publishPageUrl, expectedCategoryId = '') {
+  const isCategoryPage = () => /\/product\/(?:easyListing|category)\.htm/i.test(page.url());
+  if (!isCategoryPage()) return true;
+
+  const categoryId = String(expectedCategoryId || '').trim();
+  const clickFirstVisible = async (locators) => {
+    for (const locator of locators) {
+      if (await locator.isVisible().catch(() => false) && !await locator.isDisabled().catch(() => false)) {
+        await locator.click({ force: true }).catch(() => locator.evaluate((node) => node.click()).catch(() => {}));
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // New category pages expose a native/select-like control; selecting by ID
+  // avoids localized path text and works for both Chinese and English pages.
+  if (categoryId) {
+    const selected = await page.evaluate((id) => {
+      const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
+      for (const select of document.querySelectorAll('select')) {
+        if (!visible(select)) continue;
+        const option = [...select.options].find((item) => String(item.value || '').includes(id) || String(item.textContent || '').includes(id));
+        if (!option) continue;
+        const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+        setter?.call(select, option.value);
+        select.dispatchEvent(new Event('input', { bubbles: true }));
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      }
+      const candidate = [...document.querySelectorAll('[data-category-id], [data-cat-id], [value]')]
+        .find((node) => visible(node) && String(node.getAttribute('data-category-id') || node.getAttribute('data-cat-id') || node.getAttribute('value') || '').includes(id));
+      if (candidate) { candidate.click(); return true; }
+      const link = [...document.querySelectorAll('a[href*="catId"], a[href*="categoryId"]')]
+        .find((node) => visible(node) && String(node.href || '').includes(id));
+      if (link) { link.click(); return true; }
+      return false;
+    }, categoryId).catch(() => false);
+    if (selected) await page.waitForTimeout(600);
+  }
+
+  await dismissPostingOverlays(page);
+  await clickFirstVisible([
+    page.getByRole('button', { name: /我已阅读.*发布|发布产品|下一步|确认发布|继续/i }).last(),
+    page.getByText(/我已阅读.*发布|发布产品|下一步|继续/i).last()
+  ]);
+  await page.waitForTimeout(900);
+
+  // A category page may redirect back to the supplied URL after selection.
+  // Only navigate again when it is still on the chooser; this preserves the
+  // form state on Alibaba builds that transition without a full navigation.
+  if (isCategoryPage() && publishPageUrl && page.url() !== publishPageUrl) {
+    await gotoWithRetry(page, publishPageUrl, { timeout: 60000, attempts: 2 }).catch(() => {});
+    await settlePage(page);
+  }
+  return !isCategoryPage();
 }
 
 async function switchToLegacyDetails(page) {
@@ -3617,11 +3743,12 @@ export class SellerPublisher {
     const sourceHasSpecImage = useColorSaleSpec && Boolean(
       colorGroup?.options?.some((value) => colorGroup.optionImages?.[value])
     );
+    const colorIsRequired = colorValues.length > 1;
     if (useColorSaleSpec && !await ensureSaleAttributeSelected(page, '191288010')) {
-      throw new Error('国际站商品规格区的颜色规格未能启用');
+      if (colorIsRequired) throw new Error('国际站商品规格区的颜色规格未能启用');
     }
     const colorSpecRow = useColorSaleSpec ? await visibleColorSpecRow(page) : null;
-    if (useColorSaleSpec && !colorSpecRow) {
+    if (useColorSaleSpec && !colorSpecRow && colorIsRequired) {
       throw new Error('国际站商品规格区的颜色规格未能启用');
     }
     const variantResult = await fillVariantSpecs(page, product.variantGroups);
@@ -3650,7 +3777,7 @@ export class SellerPublisher {
     // exposes it as a target specification. Only require a successful value
     // when the selected target category actually renders a visible control.
     const colorFilled = colorControl ? await fillColorSpec(page, colorValues) : true;
-    if (colorControl && !colorFilled) {
+    if (colorControl && !colorFilled && colorIsRequired) {
       throw new Error('国际站颜色规格未成功添加，请检查颜色输入框和“添加”按钮');
     }
     if (colorControl && colorGroup?.options?.length) {
@@ -3660,7 +3787,7 @@ export class SellerPublisher {
         colorGroup,
         (urls, prefix, limit) => this.downloadImageSet(product, urls, prefix, limit)
       );
-      if (sourceHasSpecImage && !specImageUploaded) {
+      if (sourceHasSpecImage && !specImageUploaded && colorIsRequired) {
         throw new Error('国际站颜色规格图片未能上传，已停止提交以避免生成缺图商品');
       }
     }
@@ -4307,12 +4434,17 @@ export class SellerPublisher {
     }
     if (/login|passport/i.test(page.url())) throw new Error('阿里巴巴国际站登录状态已失效，请重新登录');
     const expectedCategoryId = normalizeCategoryId(product.categoryId || product.sourceCategoryId);
+    // A generated catId URL can legitimately land on Alibaba's category
+    // chooser when the seller session has not used that leaf before. Complete
+    // that chooser automatically so users never need to bind one publish page
+    // per product or per category.
+    await enterPostingForm(page, publishPageUrl, expectedCategoryId);
     const actualCategoryId = categoryIdFromUrl(page.url()) || categoryIdFromUrl(publishPageUrl);
     if (expectedCategoryId && actualCategoryId && expectedCategoryId !== actualCategoryId) {
       throw new Error(`国际站实际打开类目 ID ${actualCategoryId}，与商品目标类目 ID ${expectedCategoryId} 不一致，已停止发布`);
     }
     if (/\/product\/(?:easyListing|category)\.htm/i.test(new URL(page.url()).pathname)) {
-      throw new Error('绑定的是商品类目选择页，不是商品填写表单。请先完成类目选择后重新绑定');
+      throw new Error('国际站类目选择页未能自动进入发布表单，请重新打开任务重试');
     }
 
     let titleInput = null;
@@ -4320,6 +4452,9 @@ export class SellerPublisher {
       titleInput = await waitForFirstVisible(page, TITLE_SELECTORS, formAttempt ? 20000 : 30000);
       if (titleInput) break;
       if (/login|passport/i.test(page.url())) break;
+      if (/\/product\/(?:easyListing|category)\.htm/i.test(page.url())) {
+        await enterPostingForm(page, publishPageUrl, expectedCategoryId);
+      }
       await globalThis.__KUA_YIPU_SELLER_BRIDGE?.sync?.().catch(() => false);
       await syncAlibabaCookies(page.context());
       await gotoWithRetry(page, publishPageUrl, { timeout: 60000, attempts: 2 });
@@ -4399,7 +4534,8 @@ export class SellerPublisher {
       finalColorGroup?.optionImages?.[value]
       || finalColorGroup?.optionImages?.[finalColorGroup.options?.find((item) => englishSpecText(item) === value)]
     ));
-    if (finalUsesColorSaleSpec && finalHasColorImage) {
+    const finalColorRequired = finalColorValues.length > 1;
+    if (finalUsesColorSaleSpec && finalHasColorImage && finalColorRequired) {
       const colorFilled = await fillColorSpec(page, finalColorValues);
       const colorImageUploaded = colorFilled && await enableSpecImageUpload(
         page,
