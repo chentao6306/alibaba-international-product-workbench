@@ -682,7 +682,7 @@ async function runPublishJob(jobId) {
         if (route.error || !route.url) throw new Error(route.error || '该商品没有可用的国际站发布页');
         const publishSnapshot = createPublishSnapshot(product, { mode, category: route.category, categoryId: route.categoryId, publishPageUrl: route.url });
         store.patchJob(jobId, { message: `正在处理 ${index + 1}/${total}：${product.title}（${route.category || '未识别类目'}）` });
-        const itemTimeoutMs = Math.max(60000, Number(process.env.KUA_YIPU_PUBLISH_ITEM_TIMEOUT_MS || 180000));
+        const itemTimeoutMs = Math.max(60000, Number(process.env.KUA_YIPU_PUBLISH_ITEM_TIMEOUT_MS || 120000));
         const timeoutToken = Symbol('publish-item-timeout');
         let timeoutHandle;
         const timeout = new Promise((_, reject) => { timeoutHandle = setTimeout(() => {
@@ -692,10 +692,12 @@ async function runPublishJob(jobId) {
           error.timeoutToken = timeoutToken;
           reject(error);
         }, itemTimeoutMs); });
-        const result = await Promise.race([
-          publisher.publishProduct(product, route.url, mode, route.category, jobId),
-          timeout
-        ]).finally(() => clearTimeout(timeoutHandle));
+        const publishPromise = publisher.publishProduct(product, route.url, mode, route.category, jobId);
+        // The timeout closes the active page. Consume the eventual rejection
+        // from the cancelled automation so it cannot become an unhandled
+        // rejection while the queue moves to the next product.
+        publishPromise.catch(() => {});
+        const result = await Promise.race([publishPromise, timeout]).finally(() => clearTimeout(timeoutHandle));
         // Keep the real publishing page visible for inspection. The user
         // explicitly requested to see the browser while an item is being
         // uploaded and submitted; collection still uses the hidden context.
