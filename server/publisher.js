@@ -677,6 +677,11 @@ const ATTRIBUTE_NAME_TRANSLATIONS = new Map(Object.entries({
   '品牌名称': 'Brand Name',
   '操作语言': 'Operating Languages',
   '功能/特性': 'Features',
+  '功能': 'Function',
+  '端口': 'Port',
+  '接口': 'Port',
+  '输入': 'Input',
+  '输出': 'Output',
   '产地': 'Place of Origin',
   '型号': 'Model Number',
   '定制包装': 'Custom Packaging MOQ',
@@ -698,7 +703,13 @@ const SOURCE_ATTRIBUTE_LABEL_ALIASES = new Map([
   ['model number', ['型号']],
   ['output power', ['输出功率']],
   ['multi function integrated', ['多功能一体化']],
-  ['multi-function integrated', ['多功能一体化']]
+  ['multi-function integrated', ['多功能一体化']],
+  ['function', ['功能', '功能/特性', '特性', 'Function', 'Features']],
+  ['port', ['端口', '接口', 'Port']],
+  ['input', ['输入', 'Input']],
+  ['output', ['输出', 'Output']],
+  ['protection level', ['防护等级', 'Protection Level']],
+  ['use', ['用途', 'Use']]
 ]);
 
 const TEXT_TRANSLATIONS = [
@@ -3867,6 +3878,24 @@ export class SellerPublisher {
       }
     };
 
+    const fillRequiredChoice = async (labels, value, fallback = ['Other', '其他', 'N/A']) => {
+      const field = await fieldByAnyLabel(page, labels);
+      if (!field) return false;
+      if (value && await fillChoice(page, field, value).catch(() => false)) return true;
+      // Alibaba renders many category attributes as controlled comboboxes. A
+      // source value can be valid text yet absent from this category's legal
+      // option list. For required fields, select the platform's neutral option
+      // rather than leaving the field empty and making the entire listing fail.
+      for (const candidate of fallback) {
+        if (await fillChoice(page, field, candidate).catch(() => false)) return true;
+      }
+      const type = String(await field.getAttribute('type').catch(() => '')).toLowerCase();
+      if (type !== 'checkbox' && type !== 'radio' && value) {
+        return await fillAndVerify(field, value, labels[0]).then(() => true).catch(() => false);
+      }
+      return false;
+    };
+
     await clearSaleAttributeSelections(page);
 
     const productTypeField = await fieldByAnyLabel(page, ['产品类型', '类型', 'Product Type', 'Type']);
@@ -3904,12 +3933,23 @@ export class SellerPublisher {
       || await fillChoice(page, await fieldByAnyLabel(page, ['功能/特性', '功能', '特性', 'Feature', 'Features']), featureValue);
     markSourceAttributes(['功能/特性', '功能', '特性', 'feature', 'features'], featureFilled);
 
+    const functionValue = attributeValue(product, '功能', 'Function', 'function');
+    const functionFilled = await fillRequiredChoice(
+      ['功能', 'Function', '功能/特性', 'Features'],
+      functionValue
+    );
+    markSourceAttributes(['功能', 'Function', 'function'], functionFilled);
+
+    const portValue = attributeValue(product, '端口', '接口', 'Port', 'port');
+    const portFilled = await fillRequiredChoice(['端口', '接口', 'Port'], portValue);
+    markSourceAttributes(['端口', '接口', 'Port', 'port'], portFilled);
+
     const materialValue = attributeValue(product, '材料', '材质', 'Material');
     const materialFilled = await fillFirst(page, ['input[name="p-390873113"]'], materialValue)
       || await fillChoice(page, await fieldByAnyLabel(page, ['材料', '材质', 'Material']), materialValue);
     markSourceAttributes(['材料', '材质', 'material'], materialFilled);
 
-    const reserved = /^(?:型号|model(?: number)?|品牌名称|brand(?: name)?|功能\/特性|功能|特性|features?|材料|材质|material|颜色|colou?r|产地|place of origin|产品类型|product type|销售单位|selling units?|单个包装尺寸|single package size|单个产品毛重|single gross weight)$/i;
+    const reserved = /^(?:型号|model(?: number)?|品牌名称|brand(?: name)?|功能\/特性|功能|特性|features?|function|端口|接口|port|材料|材质|material|颜色|colou?r|产地|place of origin|产品类型|product type|销售单位|selling units?|单个包装尺寸|single package size|单个产品毛重|single gross weight)$/i;
     for (const [index, item] of attributeItems.entries()) {
       if (reserved.test(String(item.name).trim())) continue;
       const aliases = SOURCE_ATTRIBUTE_LABEL_ALIASES.get(normalizedName(item.name)) || [];
