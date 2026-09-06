@@ -38,6 +38,33 @@ import { buildAlibabaPublishUrl, categoryPathKey, createPublishPlan, resolvePubl
 import { deleteWorkspaceEntities, findWorkspaceJobs, JsonStore } from '../server/store.js';
 import { isExplicitHumanVerificationSignal, normalizeAlibabaCookies } from '../server/browser-runtime.js';
 import { userFacingError } from '../server/browser-error.js';
+import { runWithProgressTimeout } from '../server/progress-timeout.js';
+
+test('publish progress timeout resets whenever the current stage advances', async () => {
+  const stages = [];
+  const result = await runWithProgressTimeout(async (progress) => {
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    progress('uploading images');
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    progress('submitting');
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    return 'ok';
+  }, { timeoutMs: 25, onProgress: (stage) => stages.push(stage) });
+  assert.equal(result, 'ok');
+  assert.deepEqual(stages, ['uploading images', 'submitting']);
+});
+
+test('publish progress timeout reports the stalled stage', async () => {
+  let timedOutStage = '';
+  await assert.rejects(
+    runWithProgressTimeout(async (progress) => {
+      progress('uploading main images');
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    }, { timeoutMs: 20, onTimeout: (stage) => { timedOutStage = stage; } }),
+    (error) => error.code === 'PUBLISH_STAGE_TIMEOUT' && error.stage === 'uploading main images'
+  );
+  assert.equal(timedOutStage, 'uploading main images');
+});
 
 test('does not classify ordinary product text containing captcha as a challenge', () => {
   assert.equal(isExplicitHumanVerificationSignal('Product description and captcha-compatible camera module'), false);

@@ -947,10 +947,17 @@ export function buildSkuCombinations(groups, price, stock) {
 async function fieldByLabel(page, label) {
   const token = `codex-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const found = await page.evaluate(({ labelText, marker }) => {
-    const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const clean = (value) => String(value || '')
+      .replace(/\s+/g, ' ')
+      .replace(/^[*＊]\s*/, '')
+      .replace(/[：:]\s*$/, '')
+      .replace(/\s*(?:必填项?|required)\s*$/i, '')
+      .trim()
+      .toLowerCase();
+    const wanted = clean(labelText);
     const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
     const labels = [...document.querySelectorAll('label,div,span,h3,h4')]
-      .filter((node) => clean(node.textContent) === labelText);
+      .filter((node) => clean(node.textContent) === wanted);
     for (const labelNode of labels) {
       let container = labelNode;
       for (let level = 0; container && level < 7; level += 1, container = container.parentElement) {
@@ -2254,6 +2261,83 @@ async function visibleEmptyAttributeLabels(page) {
   }).catch(() => []);
 }
 
+const REQUIRED_ATTRIBUTE_ALIASES = [
+  ['屏幕', 'screen', 'display'],
+  ['电池容量', 'battery capacity', 'battery'],
+  ['蜂窝网络', 'cellular network', 'mobile network', 'network'],
+  ['蜂窝频段', 'frequency band', 'network band', 'band'],
+  ['操作系统', 'operating system', 'os'],
+  ['手机中央处理器', 'cpu', 'processor', 'central processing unit'],
+  ['功能', 'function', 'feature', 'features', '功能/特性', '特性'],
+  ['端口', 'port', 'interface', '接口'],
+  ['材质', 'material', '材料'],
+  ['类型', 'type', 'product type', '产品类型'],
+  ['产地', 'place of origin', 'origin'],
+  ['品牌名称', 'brand name', 'brand'],
+  ['型号', 'model number', 'model']
+];
+
+function cleanRequiredLabel(value) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[*＊]\s*/, '')
+    .replace(/[：:]\s*$/, '')
+    .replace(/(?:必填项?|属性值|required(?: field)?)?不能为空.*$/i, '')
+    .trim();
+}
+
+function requiredLabelAliases(label) {
+  const cleaned = cleanRequiredLabel(label);
+  const normalized = cleaned.toLowerCase();
+  const group = REQUIRED_ATTRIBUTE_ALIASES.find((items) => items.some((item) => item.toLowerCase() === normalized));
+  return [...new Set([cleaned, ...(group || [])].filter(Boolean))];
+}
+
+function requiredLabelsFromError(message) {
+  const labels = [];
+  for (const match of String(message || '').matchAll(/(?:^|[；;：:])\s*([^；;：:]{1,48}?)(?:必填项)?不能为空/gi)) {
+    const label = cleanRequiredLabel(match[1]);
+    if (label && !/^(?:属性值|商品图片项?|图片|image)$/i.test(label)) labels.push(label);
+  }
+  return [...new Set(labels)].slice(0, 12);
+}
+
+async function recoverRequiredAttributes(page, product, labels, onProgress = () => {}) {
+  const items = [...(product.attributes || []), ...(product.customAttributes || [])]
+    .filter((item) => item?.name && item?.value);
+  const normalized = (value) => String(value || '').toLowerCase().replace(/[\s_\-/]+/g, ' ').trim();
+  const recovered = [];
+  for (const rawLabel of labels) {
+    const aliases = requiredLabelAliases(rawLabel);
+    if (!aliases.length) continue;
+    const field = await fieldByAnyLabel(page, aliases);
+    if (!field) continue;
+    onProgress(`补填必填属性：${aliases[0]}`);
+    const wanted = new Set(aliases.map(normalized));
+    let value = items.find((item) => wanted.has(normalized(item.name)))?.value || '';
+    if (!value && (wanted.has('产地') || wanted.has('place of origin'))) value = product.origin || 'China';
+    if (!value && (wanted.has('品牌名称') || wanted.has('brand name'))) value = product.brand || '';
+    if (!value && (wanted.has('型号') || wanted.has('model number'))) value = product.model || '';
+    if (!value && (wanted.has('类型') || wanted.has('product type'))) value = product.productType || '';
+
+    let filled = false;
+    for (const candidate of [...new Set([value, 'Other', '其他', 'N/A'].filter(Boolean))]) {
+      if (await fillChoice(page, field, candidate).catch(() => false)) {
+        filled = true;
+        break;
+      }
+    }
+    if (!filled && value) {
+      const type = String(await field.getAttribute('type').catch(() => '')).toLowerCase();
+      if (!['checkbox', 'radio'].includes(type)) {
+        filled = await fillAndVerify(field, value, aliases[0]).then(() => true).catch(() => false);
+      }
+    }
+    if (filled) recovered.push(aliases[0]);
+  }
+  return recovered;
+}
+
 async function specControlIsChecked(control) {
   if (!control) return false;
   const { wrapper, input } = control;
@@ -3549,6 +3633,13 @@ export class SellerPublisher {
     const selectedUrls = distinctAlibabaImageUrls(urls).filter(isUsableImageUrl).slice(0, limit);
     const downloadOne = async (url, index) => {
       try {
+        const safeId = String(product.sourceId || product.id || 'product').replace(/[^A-Za-z0-9]/g, '').slice(-16);
+        const safePrefix = String(prefix || 'image').replace(/[^A-Za-z0-9]/g, '');
+        const cached = ['jpg', 'png'].map((extension) => path.join(this.imageDir, `${safeId}${safePrefix}${index}.${extension}`))
+          .find((candidate) => {
+            try { return fs.statSync(candidate).size > 1024; } catch { return false; }
+          });
+        if (cached) return cached;
         let contentType = '';
         let buffer;
         if (/^data:image\//i.test(url)) {
@@ -3563,7 +3654,7 @@ export class SellerPublisher {
           buffer = fs.readFileSync(localPath);
         } else {
           let lastError;
-          for (let attempt = 0; attempt < 3; attempt += 1) {
+          for (let attempt = 0; attempt < 2; attempt += 1) {
             try {
               const response = await fetch(url, {
                 headers: {
@@ -3571,7 +3662,7 @@ export class SellerPublisher {
                   referer: product.sourceUrl,
                   'user-agent': 'Mozilla/5.0'
                 },
-                signal: AbortSignal.timeout(30000)
+                signal: AbortSignal.timeout(12000)
               });
               if (!response.ok) throw new Error(`HTTP ${response.status}`);
               contentType = response.headers.get('content-type') || '';
@@ -3579,7 +3670,7 @@ export class SellerPublisher {
               break;
             } catch (error) {
               lastError = error;
-              if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 600 * (attempt + 1)));
+              if (attempt < 1) await new Promise((resolve) => setTimeout(resolve, 500));
             }
           }
           if (!buffer) throw lastError || new Error('图片下载失败');
@@ -3601,8 +3692,6 @@ export class SellerPublisher {
             extension = 'jpg';
           }
         }
-        const safeId = String(product.sourceId || product.id || 'product').replace(/[^A-Za-z0-9]/g, '').slice(-16);
-        const safePrefix = String(prefix || 'image').replace(/[^A-Za-z0-9]/g, '');
         const filePath = path.join(this.imageDir, `${safeId}${safePrefix}${index}.${extension}`);
         fs.writeFileSync(filePath, buffer);
         return filePath;
@@ -3858,7 +3947,7 @@ export class SellerPublisher {
     throw new Error(`国际站主图上传超过 60 秒仍未完成（已占用 ${occupiedSlots}/${expectedCount} 个槽位，空槽位 ${remainingSlots}）`);
   }
 
-  async fillProductFields(page, product) {
+  async fillProductFields(page, product, onProgress = () => {}) {
     const categoryPath = sanitizeCategoryPath(product.sourceCategoryPath || product.categoryPath);
     const productTypeCandidate = [product.productType, ...categoryPath.slice().reverse()].find((value) => value && !isPromotionalText(value));
     const productType = englishSpecText(productTypeCandidate, 'Other');
@@ -3896,6 +3985,7 @@ export class SellerPublisher {
       return false;
     };
 
+    onProgress('初始化类目属性');
     await clearSaleAttributeSelections(page);
 
     const productTypeField = await fieldByAnyLabel(page, ['产品类型', '类型', 'Product Type', 'Type']);
@@ -3952,6 +4042,7 @@ export class SellerPublisher {
     const reserved = /^(?:型号|model(?: number)?|品牌名称|brand(?: name)?|功能\/特性|功能|特性|features?|function|端口|接口|port|材料|材质|material|颜色|colou?r|产地|place of origin|产品类型|product type|销售单位|selling units?|单个包装尺寸|single package size|单个产品毛重|single gross weight)$/i;
     for (const [index, item] of attributeItems.entries()) {
       if (reserved.test(String(item.name).trim())) continue;
+      onProgress(`填写类目属性 ${index + 1}/${attributeItems.length}：${String(item.name).trim()}`);
       const aliases = SOURCE_ATTRIBUTE_LABEL_ALIASES.get(normalizedName(item.name)) || [];
       const labels = [String(item.name).trim(), englishAttributeName(item.name, index), ...aliases];
       const field = await fieldByAnyLabel(page, [...new Set(labels)]);
@@ -3963,6 +4054,7 @@ export class SellerPublisher {
       (filled ? mappedAttributes : unmappedAttributes).add(item.name);
     }
 
+    onProgress('填写颜色和商品规格');
     const colorGroup = (product.variantGroups || []).find((group) => /颜色|colou?r/i.test(group.name));
     const colorValues = colorGroup?.options?.length ? colorGroup.options : [];
     const targetSupportsColor = await saleAttributeIsAvailable(page, '191288010');
@@ -4024,6 +4116,7 @@ export class SellerPublisher {
     }
     markSourceAttributes(['颜色', 'color', 'colour'], Boolean(colorValues.length) && colorFilled);
 
+    onProgress('填写包装和物流属性');
     const logisticsFilled = await fillLogisticsFields(page, product.packaging || {});
     markSourceAttributes(['单个产品毛重', 'single gross weight'], logisticsFilled);
     markSourceAttributes(['单个包装尺寸', 'single package size'], logisticsFilled);
@@ -4129,7 +4222,7 @@ export class SellerPublisher {
     if (rowCount < tiers.length) throw new Error(`国际站价格表仅识别到 ${rowCount} 档，商品需要 ${tiers.length} 档`);
   }
 
-  async fillLegacyDescription(page, product) {
+  async fillLegacyDescription(page, product, onProgress = () => {}) {
     await switchToLegacyDetails(page);
     const html = buildLegacyDescriptionHtml(product);
     const editorDeadline = Date.now() + 15000;
@@ -4166,7 +4259,7 @@ export class SellerPublisher {
             }, html).catch(() => {});
           }
         }
-        await this.uploadLegacyDetailImages(page, product);
+        await this.uploadLegacyDetailImages(page, product, onProgress);
         return true;
       }
       await page.waitForTimeout(400);
@@ -4183,13 +4276,15 @@ export class SellerPublisher {
     throw new Error('未识别到国际站商品详情编辑器');
   }
 
-  async uploadLegacyDetailImages(page, product) {
+  async uploadLegacyDetailImages(page, product, onProgress = () => {}) {
+    onProgress('下载并缓存详情图片');
     // Uploading a very large detail-image batch is the main source of long
     // stalls on slower customer machines. Keep the first eight source images
     // (the useful product evidence) and leave the complete source list intact
     // in the workspace/audit record.
     const imagePaths = await this.downloadImageSet(product, product.detailImages || [], 'detail', 8);
     if (!imagePaths.length) throw new Error('详情图下载失败，无法上传到国际站普通编辑器');
+    onProgress(`上传详情图片 0/${imagePaths.length}`);
     const editorImageCount = async () => {
       let count = 0;
       for (const frame of page.frames()) {
@@ -4317,6 +4412,7 @@ export class SellerPublisher {
       if (!started?.started) return null;
 
       const deadline = Date.now() + 60000;
+      let lastReported = -1;
       while (Date.now() < deadline) {
         let stable = 0;
         for (const frame of page.frames()) {
@@ -4326,6 +4422,11 @@ export class SellerPublisher {
             const url = String(node.getAttribute('data-src') || node.getAttribute('src') || '').trim();
             return /^(?:https?:)?\/\//i.test(url) && !/loading|progress|placeholder/i.test(url);
           }).length).catch(() => 0));
+        }
+        const uploaded = Math.max(0, stable - initialEditorImages);
+        if (uploaded !== lastReported) {
+          lastReported = uploaded;
+          onProgress(`上传详情图片 ${uploaded}/${imagePaths.length}`);
         }
         if (stable >= initialEditorImages + imagePaths.length) {
           await syncEditor();
@@ -4651,13 +4752,18 @@ export class SellerPublisher {
     return inserted ? urls.length : 0;
   }
 
-  async publishProduct(product, publishPageUrl, mode = 'draft', publishCategory = '', jobId = '') {
+  async publishProduct(product, publishPageUrl, mode = 'draft', publishCategory = '', jobId = '', onStage = () => {}) {
+    const reportStage = (stage) => {
+      try { onStage(stage); } catch {}
+    };
+    reportStage('检查商品资料');
     if (!publishPageUrl) throw new Error('尚未绑定阿里巴巴国际站商品发布页面');
     if (!isProductPostingUrl(publishPageUrl)) throw new Error('绑定地址不是阿里巴巴国际站商品发布页');
     const mismatch = categoryMismatchMessage(product, publishCategory);
     if (mismatch) throw new Error(mismatch);
     const validationErrors = validateProductData(product);
     if (validationErrors.length) throw new Error(`商品资料未通过上架检查：${validationErrors.join('；')}`);
+    reportStage('连接国际站发布浏览器');
     const page = await this.currentSellerPage(publishPageUrl);
     const stopKey = String(jobId || '');
     if (stopKey) this.publishStops.set(stopKey, () => { page.close().catch(() => {}); });
@@ -4668,6 +4774,7 @@ export class SellerPublisher {
     await hidePage(page);
     this.visible = false;
     const publishNavigation = { timeout: 30000, attempts: 2 };
+    reportStage('打开目标类目发布页');
     if (page.url() !== publishPageUrl) await gotoWithRetry(page, publishPageUrl, publishNavigation);
     await settlePage(page);
     await waitForHumanVerification(page, { timeout: 300000 });
@@ -4687,6 +4794,7 @@ export class SellerPublisher {
     // chooser when the seller session has not used that leaf before. Complete
     // that chooser automatically so users never need to bind one publish page
     // per product or per category.
+    reportStage('确认并进入目标类目表单');
     await enterPostingForm(page, publishPageUrl, expectedCategoryId);
     const actualCategoryId = categoryIdFromUrl(page.url()) || categoryIdFromUrl(publishPageUrl);
     if (expectedCategoryId && actualCategoryId && expectedCategoryId !== actualCategoryId) {
@@ -4724,7 +4832,9 @@ export class SellerPublisher {
     // Switching Alibaba's detail editor can rebuild the entire form. Do it
     // before filling prices, specifications and images so a late editor-mode
     // transition cannot silently erase already completed fields.
-    await this.fillLegacyDescription(page, product);
+    reportStage('填写详情并上传详情图');
+    await this.fillLegacyDescription(page, product, reportStage);
+    reportStage('填写标题、价格和库存');
     await fillAndVerify(titleInput, product.title, '商品标题');
 
     if (product.subtitle) {
@@ -4751,7 +4861,8 @@ export class SellerPublisher {
       'input[placeholder*="库存"]', 'input[placeholder*="stock" i]', 'input[placeholder*="quantity" i]', 'input[name*="stock" i]',
       '[class*="stock"] input[type="text"]', '[class*="stock"] input[type="number"]'
     ], product.stock);
-    const fieldMapping = await this.fillProductFields(page, product);
+    reportStage('填写类目属性和产品规格');
+    const fieldMapping = await this.fillProductFields(page, product, reportStage);
     if (mode === 'submit') {
       const unmappedRequiredVariant = fieldMapping.blockingUnmapped?.[0]
         || findBlockingUnmappedVariant(product, fieldMapping.unmappedAttributes);
@@ -4759,9 +4870,11 @@ export class SellerPublisher {
         throw new Error(`国际站目标类目没有与来源规格“${unmappedRequiredVariant}”一致的选项；为保证数据不被篡改，请先在发布页选择匹配类目或人工映射后再提交`);
       }
     }
+    reportStage('上传商品主图');
     await this.uploadMainImages(page, product);
     let videoWarning = '';
     try {
+      reportStage('处理商品视频');
       await this.uploadMainVideo(page, product);
     } catch (error) {
       videoWarning = `主图视频未进入视频银行，已保留在商品详情链接中：${error.message}`;
@@ -4774,6 +4887,7 @@ export class SellerPublisher {
     // its top-level checkbox from stale form state. Recommit the complete
     // source color transaction immediately before submit: selected spec,
     // exact source value, and its uploaded source image must all be present.
+    reportStage('复核颜色、型号和规格图片');
     const finalColorGroup = (product.variantGroups || []).find((group) => /颜色|colou?r/i.test(group.name));
     const finalColorValues = [...new Set(finalColorGroup?.options || [])].map((value) => englishSpecText(value)).filter(Boolean);
     const finalUsesColorSaleSpec = shouldUseColorSaleSpecification(
@@ -4824,6 +4938,7 @@ export class SellerPublisher {
     // Uploaders and rich-text editors can rerender the form after the first
     // field pass. Re-apply the all-or-nothing logistics rule immediately
     // before the final action so stale weight/volume values cannot survive.
+    reportStage('复核物流和必填资料');
     await fillLogisticsFields(page, product.packaging || {});
 
     // A specification or uploader rerender may replace the image component.
@@ -4833,12 +4948,12 @@ export class SellerPublisher {
       await this.uploadMainImages(page, product);
     }
 
-    // Alibaba's current image uploader can show completed remote previews
-    // while its submit validator still holds an empty image value. Persisting
-    // the form once makes the server-issued image records authoritative. The
-    // user still performs one "direct submit" action; this draft checkpoint is
-    // an automatic reliability step before the final publish click.
-    if (mode === 'submit' && !preserveMultiDimensionImages) {
+    // Saving a draft rebuilds Alibaba's entire controlled form. On several
+    // categories that rebuild discarded required attributes or the image
+    // model even though their previews remained visible. Keep direct submit
+    // truly direct; the old checkpoint is available only for diagnostics.
+    const useDraftCheckpoint = process.env.KUA_YIPU_PUBLISH_DRAFT_CHECKPOINT === '1';
+    if (mode === 'submit' && useDraftCheckpoint && !preserveMultiDimensionImages) {
       let draftAction = null;
       for (const text of ['保存草稿', '存为草稿', '暂存草稿', 'Save as Draft', 'Save Draft']) {
         const candidate = page.getByRole('button', { name: text, exact: false }).last();
@@ -4849,6 +4964,7 @@ export class SellerPublisher {
       }
       if (draftAction) {
         const draftUrl = page.url();
+        reportStage('保存提交前检查点');
         await waitForActionResult(page, draftAction, 'draft', draftUrl);
         await page.waitForTimeout(4200);
         await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
@@ -4905,6 +5021,7 @@ export class SellerPublisher {
       this.visible = true;
       return { status: 'needs_review', message: '表单已填充，未识别到保存或发布按钮，请在浏览器中人工确认' };
     }
+    reportStage(mode === 'submit' ? '提交国际站并等待结果' : '保存国际站草稿');
     const originalUrl = page.url();
     let verification;
     try {
@@ -4935,9 +5052,13 @@ export class SellerPublisher {
         }
         if (!recovered) throw retryError;
       } else if (/属性值不能为空|attribute value.*(?:empty|required)/i.test(actionError)) {
-        const emptyLabels = await visibleEmptyAttributeLabels(page);
+        const emptyLabels = [...new Set([
+          ...await visibleEmptyAttributeLabels(page),
+          ...requiredLabelsFromError(actionError)
+        ])];
+        const recovered = await recoverRequiredAttributes(page, product, emptyLabels, reportStage);
         const cleared = await clearEmptySaleAttributeSelections(page);
-        if (!cleared.length) {
+        if (!cleared.length && !recovered.length) {
           throw new Error(`${actionError}${emptyLabels.length ? `（空字段：${emptyLabels.join('、')}）` : '；国际站未返回具体属性名称，请在当前发布表单查看红色标记字段'}`);
         }
         let retryAction = null;
