@@ -4184,7 +4184,11 @@ export class SellerPublisher {
   }
 
   async uploadLegacyDetailImages(page, product) {
-    const imagePaths = await this.downloadImageSet(product, product.detailImages || [], 'detail', 15);
+    // Uploading a very large detail-image batch is the main source of long
+    // stalls on slower customer machines. Keep the first eight source images
+    // (the useful product evidence) and leave the complete source list intact
+    // in the workspace/audit record.
+    const imagePaths = await this.downloadImageSet(product, product.detailImages || [], 'detail', 8);
     if (!imagePaths.length) throw new Error('详情图下载失败，无法上传到国际站普通编辑器');
     const editorImageCount = async () => {
       let count = 0;
@@ -4312,7 +4316,7 @@ export class SellerPublisher {
       }, payloads).catch(() => ({ started: false, reason: 'exception' }));
       if (!started?.started) return null;
 
-      const deadline = Date.now() + 120000;
+      const deadline = Date.now() + 60000;
       while (Date.now() < deadline) {
         let stable = 0;
         for (const frame of page.frames()) {

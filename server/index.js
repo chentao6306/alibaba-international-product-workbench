@@ -682,7 +682,11 @@ async function runPublishJob(jobId) {
         if (route.error || !route.url) throw new Error(route.error || '该商品没有可用的国际站发布页');
         const publishSnapshot = createPublishSnapshot(product, { mode, category: route.category, categoryId: route.categoryId, publishPageUrl: route.url });
         store.patchJob(jobId, { message: `正在处理 ${index + 1}/${total}：${product.title}（${route.category || '未识别类目'}）` });
-        const itemTimeoutMs = Math.max(60000, Number(process.env.KUA_YIPU_PUBLISH_ITEM_TIMEOUT_MS || 120000));
+        const detailImageCount = Array.isArray(product.detailImages) ? Math.min(8, product.detailImages.length) : 0;
+        const itemTimeoutMs = Math.min(
+          360000,
+          Math.max(120000, Number(process.env.KUA_YIPU_PUBLISH_ITEM_TIMEOUT_MS || (240000 + detailImageCount * 4000)))
+        );
         const timeoutToken = Symbol('publish-item-timeout');
         let timeoutHandle;
         const timeout = new Promise((_, reject) => { timeoutHandle = setTimeout(() => {
