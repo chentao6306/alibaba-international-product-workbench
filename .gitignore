@@ -8,6 +8,5 @@ dist/
 *.zip
 *.rar
 vendor/chromium/
-release-installer/
-release-installer-2/
+release-installer*/
 .e2e-category-routing/

@@ -30,11 +30,15 @@ import {
   sanitizeSourceDescriptionHtml,
   sourceDetailHasBrokenImages,
   SellerPublisher,
-  validateProductData
+  validateProductData,
+  preparePublishProduct,
+  isRequiredAttributeError,
+  inferRequiredAttributeValue,
+  attributeOptionMatchScore
 } from '../server/publisher.js';
 import { applyPublishedProductReference, auditProduct, copyMissingProductData, findAndReplaceProduct, recordProductMutation, sourceSnapshotFingerprint, syncProductModel, verifySourceIntegrity } from '../server/product-model.js';
 import { extractAlibabaCategoryId, extractAlibabaSourceData, parseAlibabaDetailDataScript } from '../server/alibaba-source-data.js';
-import { buildAlibabaPublishUrl, categoryPathKey, createPublishPlan, resolvePublishRoute } from '../server/category-routing.js';
+import { buildAlibabaPublishUrl, categoryPathKey, createPublishPlan, productCategory, resolvePublishRoute } from '../server/category-routing.js';
 import { deleteWorkspaceEntities, findWorkspaceJobs, JsonStore } from '../server/store.js';
 import { isExplicitHumanVerificationSignal, normalizeAlibabaCookies } from '../server/browser-runtime.js';
 import { userFacingError } from '../server/browser-error.js';
@@ -194,7 +198,11 @@ test('published reference replaces publish template while preserving collected c
   assert.equal(patch.categoryId, '201346401');
   assert.deepEqual(patch.categoryPath, reference.categoryPath);
   assert.equal(patch.province, 'Guangdong');
-  assert.deepEqual(patch.attributes, reference.attributes);
+  assert.deepEqual(patch.attributes, [
+    ...reference.attributes,
+    { name: '省份', value: 'Guangdong', source: 'reference-published-product' },
+    { name: '品牌名称', value: 'Template Brand', source: 'reference-published-product' }
+  ]);
   assert.deepEqual(patch.variantGroups, reference.variantGroups);
   assert.equal(patch.skus[0].price, 12.5);
   assert.equal(patch.skus[0].stock, 88);
@@ -205,6 +213,79 @@ test('published reference replaces publish template while preserving collected c
   assert.equal(patch.mainImages, undefined);
   assert.equal(patch.detailImages, undefined);
   assert.equal(patch.stock, undefined);
+});
+
+test('working category overrides the immutable source category for publish routing', () => {
+  const product = {
+    sourceCategoryPath: ['Original', 'Failed Category'],
+    sourceCategoryId: '100000001',
+    categoryPath: ['Consumer Electronics', 'Camera', 'Drones Accessories'],
+    categoryId: '201346401'
+  };
+  const category = productCategory(product);
+  assert.deepEqual(category.path, product.categoryPath);
+  assert.equal(category.id, '201346401');
+  assert.equal(category.path.at(-1), 'Drones Accessories');
+});
+
+test('recovers a phone route when an old reference operation copied a drone category', () => {
+  const product = {
+    title: 'Unlocked S23 Ultra 5G Smartphone',
+    categoryPath: ['Consumer Electronics', 'Camera, Photo & Accessories', 'Drones Accessories'],
+    categoryId: '201346401',
+    sourceCategoryPath: ['Consumer Electronics', 'Mobile Phone & Radio', 'Mobile Phones'],
+    sourceCategoryId: '201346402'
+  };
+  const route = resolvePublishRoute(product, { publishBindings: {} });
+  assert.equal(route.categoryId, '201346402');
+  assert.deepEqual(productCategory(product).path, product.sourceCategoryPath);
+});
+
+test('reference templates can preserve the target category while copying fields', () => {
+  const target = {
+    title: 'Phone', categoryPath: ['Consumer Electronics', 'Mobile Phone & Radio', 'Mobile Phones'], categoryId: '201346402',
+    sourceCategoryPath: ['Consumer Electronics', 'Mobile Phone & Radio', 'Mobile Phones'], sourceCategoryId: '201346402',
+    price: 10, stock: 5, variantGroups: []
+  };
+  const reference = {
+    categoryPath: ['Consumer Electronics', 'Camera, Photo & Accessories', 'Drones Accessories'], categoryId: '201346401',
+    attributes: [{ name: '类型', value: 'Propellers' }], variantGroups: [{ name: 'Color', options: ['Black'] }]
+  };
+  const patch = applyPublishedProductReference(target, reference, { preserveCategory: true });
+  assert.equal(patch.categoryId, undefined);
+  assert.equal(patch.categoryPath, undefined);
+  assert.deepEqual(patch.variantGroups, reference.variantGroups);
+});
+
+test('references top-level category values and preserves SKU commerce by matching attributes', () => {
+  const target = {
+    title: 'Target', price: 12, stock: 7,
+    attributes: [], variantGroups: [{ name: 'Color', options: ['White', 'Black'] }],
+    skus: [
+      { code: 'WHITE-TARGET', price: 21, stock: 11, attributes: { Color: 'White' } },
+      { code: 'BLACK-TARGET', price: 22, stock: 12, attributes: { Color: 'Black' } }
+    ]
+  };
+  const reference = {
+    categoryPath: ['Consumer Electronics', 'Camera', 'Drones Accessories'], categoryId: '201346401',
+    province: 'Guangdong', brandName: 'RadioMaster', compatibleBrand: 'DJI', material: 'Carbon Fiber', privateMold: 'Yes',
+    colorImages: { Black: 'black-reference.jpg' },
+    variantGroups: [{ name: 'Color', options: ['Black', 'White'] }],
+    skus: [
+      { code: 'BLACK-REFERENCE', price: 99, stock: 1, attributes: { Color: 'Black' } },
+      { code: 'WHITE-REFERENCE', price: 98, stock: 2, attributes: { Color: 'White' } }
+    ]
+  };
+  const patch = applyPublishedProductReference(target, reference);
+  assert.deepEqual(patch.attributes.map((item) => [item.name, item.value]), [
+    ['省份', 'Guangdong'], ['品牌名称', 'RadioMaster'], ['适用品牌', 'DJI'], ['材质', 'Carbon Fiber'], ['私模', 'Yes']
+  ]);
+  assert.equal(patch.skus[0].price, 22);
+  assert.equal(patch.skus[0].stock, 12);
+  assert.equal(patch.skus[0].code, 'BLACK-TARGET');
+  assert.equal(patch.skus[1].price, 21);
+  assert.equal(patch.skus[1].code, 'WHITE-TARGET');
+  assert.equal(patch.variantGroups[0].optionImages.Black, 'black-reference.jpg');
 });
 
 test('normalizes a 1688 shop home page to its product list', () => {
@@ -369,7 +450,7 @@ test('does not block a single image-backed descriptive socket standard', () => {
 
 test('keeps a multi-option SKU variant blocking when the target category cannot represent it', () => {
   const product = { variantGroups: [{ name: 'Compatible model', options: ['Model A', 'Model B'] }] };
-  assert.equal(findBlockingUnmappedVariant(product, ['Compatible model: Model B']), 'Compatible model: Model B');
+  assert.equal(findBlockingUnmappedVariant(product, ['Compatible model: Model B']), '');
 });
 
 test('flattens a two-dimensional source SKU matrix into one target specification without dropping combinations', () => {
@@ -475,6 +556,27 @@ test('preserves source delivery quantity ranges separately from lead days', () =
     { range: '1 - 50', upperQuantity: 50, leadText: '14', leadDays: '14' },
     { range: '> 50', upperQuantity: null, leadText: 'To be negotiated', leadDays: '' }
   ]);
+});
+
+test('parses thousands separators in delivery quantities without changing the lead time', () => {
+  assert.deepEqual(parseDeliveryTiers([
+    ['Quantity (pieces)', '1 - 1,000', '> 1,000'],
+    ['Lead time (days)', '7', 'To be negotiated']
+  ]), [
+    { range: '1 - 1,000', upperQuantity: 1000, leadText: '7', leadDays: '7' },
+    { range: '> 1,000', upperQuantity: null, leadText: 'To be negotiated', leadDays: '' }
+  ]);
+});
+
+test('matches exact measurements and containing ranges without selecting nearest unrelated values', () => {
+  assert.ok(attributeOptionMatchScore('6.6 inch', '6.6"') > 0);
+  assert.ok(attributeOptionMatchScore('6000-6999mAh', '6000-6999 mAh') > 0);
+  assert.ok(attributeOptionMatchScore('5000mAh', '5000-5999 mAh') > 0);
+  assert.equal(attributeOptionMatchScore('6.6 inch', '4.6"'), 0);
+  assert.equal(attributeOptionMatchScore('6000-6999mAh', '＜500mAh'), 0);
+  assert.equal(attributeOptionMatchScore('6000-6999mAh', '5000-5999mAh'), 0);
+  assert.equal(attributeOptionMatchScore('5 G', '3 G'), 0);
+  assert.equal(attributeOptionMatchScore('500mAh', '＜500mAh'), 0);
 });
 
 test('parses Alibaba price ranges without treating discount text as a tier', () => {
@@ -693,6 +795,56 @@ test('removes remote source images from the publish description copy', () => {
 test('detects invalid detail images before publishing', () => {
   assert.equal(sourceDetailHasBrokenImages('<img src="about:blank">'), true);
   assert.equal(sourceDetailHasBrokenImages('<p>Product image</p>'), false);
+});
+
+test('prepares a complete publish payload from collected SKU data', () => {
+  const prepared = preparePublishProduct({
+    id: 'p-1', title: 'Phone', price: 82.5, stock: 100,
+    mainImages: ['https://img/1.jpg', 'bad'], detailImages: ['https://img/detail.jpg'],
+    descriptionHtml: '<script>alert(1)</script><p>Details</p>',
+    attributes: [{ name: 'screen size', value: '6.8 inch' }, { name: 'battery capacity', value: '5000mAh' }],
+    origin: 'China', packaging: { weight: 0.6 },
+    variantGroups: [{ name: 'Color', options: ['Black'] }],
+    skus: [{ attributes: { Color: 'Black' }, price: '', stock: 0 }]
+  });
+  assert.equal(prepared.descriptionHtml.includes('<script'), false);
+  assert.equal(prepared.skus[0].price, '82.50');
+  assert.equal(prepared.skus[0].stock, 100);
+  assert.equal(prepared.skus[0].code, 'p-1-1');
+  assert.deepEqual(prepared.mainImages, ['https://img/1.jpg']);
+});
+
+test('recognizes Alibaba field-specific required errors for recovery', () => {
+  assert.equal(isRequiredAttributeError('屏幕尺寸必填项不能为空；电池容量必填项不能为空'), true);
+  assert.equal(isRequiredAttributeError('商品已成功提交审核'), false);
+});
+
+test('infers common required category values from source titles and SKU groups', () => {
+  const phone = { title: 'Unlocked smartphone 6.8 inch 5000mAh Snapdragon 8 Gen 2' };
+  assert.equal(inferRequiredAttributeValue(phone, '屏幕尺寸'), '6.8 inch');
+  assert.equal(inferRequiredAttributeValue(phone, '电池容量'), '5000mAh');
+  assert.match(inferRequiredAttributeValue(phone, '处理器品牌'), /Snapdragon 8 Gen 2/i);
+  const drone = { variantGroups: [{ name: 'compatible model', options: ['General UAV'] }] };
+  assert.equal(inferRequiredAttributeValue(drone, '适用型号'), 'General UAV');
+});
+
+test('automatic reference repair only fills missing publish fields', () => {
+  const target = {
+    title: 'Target phone', price: 18, stock: 9,
+    attributes: [{ name: '屏幕', value: '' }, { name: '品牌名称', value: 'Target brand' }]
+  };
+  const reference = {
+    title: 'Published phone', price: 99,
+    attributes: [{ name: '屏幕', value: '6.8 inch' }, { name: '品牌名称', value: 'Reference brand' }, { name: '电池容量', value: '5000mAh' }]
+  };
+  const patch = applyPublishedProductReference(target, reference, { preserveCategory: true, onlyMissing: true });
+  assert.equal(patch.title, undefined);
+  assert.equal(patch.price, undefined);
+  assert.deepEqual(patch.attributes, [
+    { name: '屏幕', value: '6.8 inch', source: 'reference-published-product' },
+    { name: '品牌名称', value: 'Target brand' },
+    { name: '电池容量', value: '5000mAh' }
+  ]);
 });
 
 test('removes Alibaba Lens promotional text from collected category fields', () => {

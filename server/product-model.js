@@ -123,26 +123,30 @@ export function copyMissingProductData(target, reference) {
 // passed the international-site submission flow. Commercial and source media
 // fields stay attached to the target product so quoting a template cannot
 // silently change what the customer collected or priced.
-export function applyPublishedProductReference(target, reference) {
+export function applyPublishedProductReference(target, reference, options = {}) {
   const patch = {};
   const cloneIfPresent = (field) => {
     if (!Object.hasOwn(reference || {}, field) || isBlank(reference[field])) return;
+    if (options.onlyMissing && !isBlank(target?.[field])) return;
     patch[field] = clone(reference[field]);
   };
 
-  // The category ID is what drives automatic publish routing. Keep the
-  // original source category in sourceCategory* for traceability, while the
-  // working category is replaced with the known-good target category.
-  for (const field of [
-    'categoryPath', 'categoryId', 'targetCategory', 'targetCategoryPath',
-    'targetCategoryId', 'internationalCategory', 'internationalCategoryPath',
-    'categoryAttributes', 'publishCategory', 'publishCategoryId'
-  ]) cloneIfPresent(field);
-  if (!patch.categoryPath && Array.isArray(reference?.sourceCategoryPath) && reference.sourceCategoryPath.length) {
-    patch.categoryPath = clone(reference.sourceCategoryPath);
-  }
-  if (!patch.categoryId && !isBlank(reference?.sourceCategoryId)) {
-    patch.categoryId = clone(reference.sourceCategoryId);
+  // A reference is a field/specification template. The target's working
+  // category remains authoritative unless a caller explicitly requests the
+  // legacy category-copy behavior. Copying a successful drone category onto
+  // a phone is otherwise enough to make every subsequent submission fail.
+  if (!options.preserveCategory) {
+    for (const field of [
+      'categoryPath', 'categoryId', 'targetCategory', 'targetCategoryPath',
+      'targetCategoryId', 'internationalCategory', 'internationalCategoryPath',
+      'categoryAttributes', 'publishCategory', 'publishCategoryId'
+    ]) cloneIfPresent(field);
+    if (!patch.categoryPath && Array.isArray(reference?.sourceCategoryPath) && reference.sourceCategoryPath.length) {
+      patch.categoryPath = clone(reference.sourceCategoryPath);
+    }
+    if (!patch.categoryId && !isBlank(reference?.sourceCategoryId)) {
+      patch.categoryId = clone(reference.sourceCategoryId);
+    }
   }
 
   // Controlled category attributes used by the Alibaba form. These names also
@@ -156,14 +160,85 @@ export function applyPublishedProductReference(target, reference) {
     'services', 'certificates', 'deliveryTime', 'salesUnit', 'packaging'
   ]) cloneIfPresent(field);
 
+  // Older captures sometimes kept these category values as top-level fields
+  // instead of attribute rows. Materialize the aliases the publisher knows so
+  // a reference remains usable across old and new workspace schemas.
+  const referenceAttributes = Array.isArray(reference?.attributes) ? reference.attributes.map((item) => ({ ...item })) : [];
+  const targetAttributes = Array.isArray(target?.attributes) ? target.attributes.map((item) => ({ ...item })) : [];
+  const normalizeAttributeName = (value) => String(value || '').toLowerCase().replace(/[\s_\-/]+/g, ' ').trim();
+  const attributeKey = (value) => ({
+    screen: 'screen size', 'screen size': 'screen size', display: 'screen size', 屏幕: 'screen size', 屏幕尺寸: 'screen size',
+    battery: 'battery capacity', 'battery capacity': 'battery capacity', 电池: 'battery capacity', 电池容量: 'battery capacity',
+    'compatible model': 'compatible model', 适用型号: 'compatible model',
+    type: 'type', 'product type': 'type', 类型: 'type', 产品类型: 'type'
+  })[normalizeAttributeName(value)] || normalizeAttributeName(value);
+  const mergedAttributes = options.onlyMissing ? targetAttributes : referenceAttributes;
+  const knownAttributeNames = new Map(mergedAttributes
+    .map((item, index) => [attributeKey(item?.name), index])
+    .filter(([name]) => name));
+  if (options.onlyMissing) {
+    for (const item of referenceAttributes) {
+      const key = attributeKey(item?.name);
+      if (!key) continue;
+      const currentIndex = knownAttributeNames.get(key);
+      if (currentIndex == null) {
+        mergedAttributes.push({ ...item });
+        knownAttributeNames.set(key, mergedAttributes.length - 1);
+      } else if (isBlank(mergedAttributes[currentIndex]?.value) && !isBlank(item?.value)) {
+        mergedAttributes[currentIndex] = { ...mergedAttributes[currentIndex], value: clone(item.value), source: mergedAttributes[currentIndex].source || 'reference-published-product' };
+      }
+    }
+  }
+  const addReferenceAttribute = (name, value) => {
+    if (isBlank(value)) return;
+    const key = attributeKey(name);
+    const existingIndex = knownAttributeNames.get(key);
+    if (existingIndex != null) {
+      if (isBlank(mergedAttributes[existingIndex].value)) mergedAttributes[existingIndex] = { ...mergedAttributes[existingIndex], value: clone(value) };
+      return;
+    }
+    mergedAttributes.push({ name, value: clone(value), source: 'reference-published-product' });
+    knownAttributeNames.set(key, mergedAttributes.length - 1);
+  };
+  addReferenceAttribute('省份', reference.province);
+  addReferenceAttribute('产品名称', reference.productName);
+  addReferenceAttribute('品牌名称', reference.brandName || reference.brand);
+  addReferenceAttribute('适用品牌', Array.isArray(reference.compatibleBrands)
+    ? reference.compatibleBrands.join(', ')
+    : (reference.compatibleBrand || reference.applicableBrand || reference.applicationBrand));
+  addReferenceAttribute('材质', reference.material || reference.materialName);
+  addReferenceAttribute('私模', reference.privateMold);
+  addReferenceAttribute('适用型号', Array.isArray(reference.compatibleModels)
+    ? reference.compatibleModels.join(', ')
+    : (reference.compatibleModel || reference.applicableModel || reference.applicationModel));
+  addReferenceAttribute('类型', reference.type || reference.productType);
+  if (reference.color && !Array.isArray(patch.variantGroups)) addReferenceAttribute('颜色', reference.color);
+  if (mergedAttributes.length) patch.attributes = mergedAttributes;
+
   // Specifications and their option images are safe to copy. Rebuild SKU
   // rows from the reference only when the target has no rows; when rows exist,
   // retain target price/stock/code and replace only specification attributes.
-  cloneIfPresent('variantGroups');
-  if (Array.isArray(reference?.skus) && reference.skus.length) {
+  if (!options.onlyMissing) cloneIfPresent('variantGroups');
+  if (!options.onlyMissing && Array.isArray(patch.variantGroups)) {
+    const imageMap = (value) => value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    const colorImages = imageMap(reference.colorImages);
+    const modelImages = imageMap(reference.modelImages);
+    patch.variantGroups = patch.variantGroups.map((group) => {
+      const name = String(group?.name || '').toLowerCase();
+      const extraImages = /color|colour|颜色/.test(name) ? colorImages : /model|型号/.test(name) ? modelImages : {};
+      return Object.keys(extraImages).length
+        ? { ...group, optionImages: { ...(group.optionImages || {}), ...clone(extraImages) } }
+        : group;
+    });
+  }
+  if (!options.onlyMissing && Array.isArray(reference?.skus) && reference.skus.length) {
     const targetSkus = Array.isArray(target?.skus) ? target.skus : [];
+    const skuKey = (sku) => Object.entries(sku?.attributes || {})
+      .map(([name, value]) => `${String(name).trim().toLowerCase()}=${String(value).trim().toLowerCase()}`)
+      .sort().join('|');
+    const targetByKey = new Map(targetSkus.map((sku) => [skuKey(sku), sku]));
     patch.skus = reference.skus.map((sourceSku, index) => {
-      const current = targetSkus[index] || {};
+      const current = targetByKey.get(skuKey(sourceSku)) || targetSkus[index] || {};
       const next = clone(sourceSku) || {};
       if (Object.hasOwn(current, 'price') && current.price !== '') next.price = clone(current.price);
       else if (target?.price != null && target.price !== '') next.price = clone(target.price);

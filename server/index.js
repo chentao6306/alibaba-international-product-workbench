@@ -6,13 +6,17 @@ import { deleteWorkspaceEntities, findWorkspaceJobs, JsonStore, newId } from './
 import { ShopCollector } from './collector.js';
 import {
   canonicalizePriceTiers,
+  categoryMismatchMessage,
   classifyAlibabaActionResult,
   hasCompleteSourceData,
+  preparePublishProduct,
+  requiredLabelsFromError,
   sanitizeCollectedProduct,
   SellerPublisher
 } from './publisher.js';
 import { applyPublishedProductReference, copyMissingProductData, createPublishSnapshot, findAndReplaceProduct, recordProductMutation, syncProductModel } from './product-model.js';
 import { buildAlibabaPublishUrl, createPublishPlan, normalizeCategoryId, productCategory, publishBindings, rememberPublishBinding, resolvePublishRoute } from './category-routing.js';
+import { findPublishedReferenceRepair } from './publish-reference.js';
 import { userFacingError } from './browser-error.js';
 import { runWithProgressTimeout } from './progress-timeout.js';
 
@@ -667,6 +671,11 @@ async function runPublishJob(jobId) {
         store.patchJob(jobId, { progress: index + 1, total, message: `已跳过不存在的商品 ${index + 1}/${total}` });
         continue;
       }
+      product = preparePublishProduct(product);
+      store.update((draft) => {
+        const target = draft.products.find((item) => item.id === product.id);
+        if (target) Object.assign(target, product, { updatedAt: new Date().toISOString() });
+      });
       store.patchJob(jobId, { status: 'running', progress: index, total, message: `正在处理 ${index + 1}/${total}：${product.title}` });
       try {
         if (!hasCompleteSourceData(product)) {
@@ -719,7 +728,7 @@ async function runPublishJob(jobId) {
         store.patchJob(jobId, { progress: index + 1, total, message: `已处理 ${index + 1}/${total}：${product.title}` });
       } catch (error) {
         const message = userFacingError(error);
-        const requiresHuman = /captcha|verify|人机验证|安全验证|滑块|登录失效|人工验证/i.test(message);
+        const requiresHuman = /captcha|verify|人机验证|安全验证|滑块|登录(?:状态)?(?:已)?失效|人工验证/i.test(message);
         const currentJobStatus = store.read().jobs.find((item) => item.id === jobId)?.status;
         const pauseRequested = ['pause_requested', 'paused'].includes(currentJobStatus) || error.code === 'PUBLISH_PAUSED';
         // Preserve the visible publishing page on both success and failure so
@@ -737,14 +746,45 @@ async function runPublishJob(jobId) {
           }
         });
         publisher.clearPublishStop(jobId);
+        // A required category field is often the only difference between a
+        // failed listing and a product Alibaba accepts. Reuse a successful
+        // product from the same category once, keeping the target's identity,
+        // price, inventory and media untouched, then let the normal loop retry
+        // the exact item with the repaired publish template.
+        const jobState = store.read().jobs.find((item) => item.id === jobId);
+        const retries = jobState?.metadata?.autoReferenceRetries && typeof jobState.metadata.autoReferenceRetries === 'object'
+          ? jobState.metadata.autoReferenceRetries : {};
+        const requiredFields = [...new Set([...(error.requiredFields || []), ...requiredLabelsFromError(message)])];
+        const attempted = retries[product.id]?.referenceIds || (retries[product.id]?.referenceId ? [retries[product.id].referenceId] : []);
+        if (!pauseRequested && !requiresHuman && requiredFields.length && attempted.length < 2) {
+          const repair = findPublishedReferenceRepair(product, store.read().products, requiredFields, attempted);
+          if (repair) {
+            store.update((draft) => {
+              const target = draft.products.find((item) => item.id === product.id);
+              if (!target) return;
+              recordProductMutation(target, repair.patch, { actor: 'system', action: 'automatic-publish-reference' });
+              target.status = 'ready';
+              delete target.publishResult;
+            });
+            retries[product.id] = {
+              referenceIds: [...attempted, repair.referenceId], fields: repair.fields, at: new Date().toISOString()
+            };
+            store.patchJob(jobId, {
+              metadata: { ...(jobState?.metadata || {}), autoReferenceRetries: retries },
+              message: `已引用同类目成功商品的缺失字段（${repair.fields.join('、')}），准备重试 ${index + 1}/${total}`
+            });
+            index -= 1;
+            continue;
+          }
+        }
         if (pauseRequested) {
           store.patchJob(jobId, { status: 'paused', progress: index, total, message: `已立即暂停，当前商品未继续操作，已完成 ${index}/${total} 件` });
           return;
         }
-        if (requiresHuman) {
+        if (requiresHuman || error.code === 'PUBLISH_ACCOUNT_LIMIT') {
           store.patchJob(jobId, {
             status: 'paused', progress: index, total,
-            message: `已暂停：${product.title} - ${message}。完成验证后可继续`
+            message: `已暂停：${product.title} - ${message}。处理后可继续`
           });
           return;
         }
@@ -888,15 +928,32 @@ app.post('/api/products/reference', (request, response, next) => {
         || (Array.isArray(item.publishHistory) && item.publishHistory.some((entry) => ['published', 'submitted', 'success'].includes(String(entry.result?.status || entry.status || '').toLowerCase())))
       ));
       if (!reference) throw Object.assign(new Error('只能引用已成功上架的商品'), { status: 400 });
+      const successfulSnapshot = (reference.publishHistory || []).find((entry) =>
+        ['published', 'submitted', 'success'].includes(String(entry.result?.status || entry.status || '').toLowerCase())
+        && entry.data && typeof entry.data === 'object'
+      );
+      const referenceTemplate = successfulSnapshot ? { ...reference, ...successfulSnapshot.data } : reference;
+      const referenceCategory = productCategory(referenceTemplate);
+      for (const product of state.products.filter((item) => ids.has(item.id) && item.id !== reference.id)) {
+        const targetCategory = productCategory(product);
+        const mismatch = targetCategory.id && referenceCategory.id && targetCategory.id !== referenceCategory.id
+          ? `引用商品类目“${referenceCategory.pathText || referenceCategory.id}”与目标商品类目“${targetCategory.pathText || targetCategory.id}”不一致，请选择同类目成功商品`
+          : categoryMismatchMessage(product, referenceCategory.pathText);
+        if (mismatch) throw Object.assign(new Error(mismatch), { status: 400 });
+      }
       const changed = [];
       for (const product of state.products) {
         if (!ids.has(product.id) || product.id === reference.id) continue;
         // A failed product can have plenty of source data while still missing
         // Alibaba-controlled values. Use the successful product as a complete
         // publish template instead of only filling blank fields.
-        const patch = applyPublishedProductReference(product, reference);
+        const patch = applyPublishedProductReference(product, referenceTemplate, { preserveCategory: true });
         if (!Object.keys(patch).length) continue;
-        recordProductMutation(product, patch, { actor: 'user', action: 'reference-published-product' });
+        // A template reference is an explicit recovery action for a failed
+        // listing. Reset the working status and remove the stale failure
+        // banner so the item is immediately eligible for a clean retry.
+        recordProductMutation(product, { ...patch, status: 'ready' }, { actor: 'user', action: 'reference-published-product' });
+        delete product.publishResult;
         changed.push({ id: product.id, title: product.title, fields: Object.keys(patch), categoryId: product.categoryId || '' });
       }
       return { referenceId, referenceTitle: reference.title || reference.id, changed };

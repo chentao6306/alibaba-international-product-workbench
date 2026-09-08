@@ -120,12 +120,13 @@ main { margin-left: 232px; padding: 31px 34px 60px; max-width: 1640px; }
 .empty strong { color: #3c464b; font-size: 13px; }
 .empty span { font-size: 11px; margin-top: 5px; }
 
-.toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 15px; }
-.search-box { width: min(360px, 33vw); }
-.segmented { display: inline-flex; padding: 3px; background: #e8ecee; border-radius: 6px; }
-.segmented button { height: 32px; padding: 0 13px; border: 0; background: transparent; color: #5f6a70; border-radius: 4px; font-size: 12px; }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 15px; }
+.toolbar > * { flex-shrink: 0; }
+.search-box { width: min(360px, 100%); }
+.segmented { display: inline-flex; max-width: 100%; overflow-x: auto; padding: 3px; background: #e8ecee; border-radius: 6px; }
+.segmented button { flex-shrink: 0; height: 32px; padding: 0 13px; border: 0; background: transparent; color: #5f6a70; border-radius: 4px; font-size: 12px; white-space: nowrap; }
 .segmented button.active { background: white; color: var(--ink); box-shadow: 0 1px 3px #bcc5c966; font-weight: 600; }
-.result-count { color: var(--muted); margin-left: auto; font-size: 12px; }
+.result-count { color: var(--muted); margin-left: auto; font-size: 12px; white-space: nowrap; }
 .page-size { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .page-size select { height: 34px; border: 1px solid #cfd6da; border-radius: 5px; background: white; color: #455159; padding: 0 7px; }
 .product-panel { overflow: hidden; }

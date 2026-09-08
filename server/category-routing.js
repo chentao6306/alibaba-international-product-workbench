@@ -57,7 +57,7 @@ export function categoryLeafKey(value) {
 }
 
 export function productCategory(product = {}) {
-  const path = normalizedCategoryPath(
+  let path = normalizedCategoryPath(
     product.categoryPath?.length ? product.categoryPath : product.sourceCategoryPath
   );
   const snapshot = product.source?.snapshot || {};
@@ -67,6 +67,16 @@ export function productCategory(product = {}) {
     || snapshot.categoryId
     || snapshot.sourceCategoryId
   );
+  // A previous reference-template operation could have copied a drone leaf
+  // onto a phone product. Prefer the immutable source taxonomy in that one
+  // unambiguous case so existing workspaces recover without manual edits.
+  const sourcePath = normalizedCategoryPath(product.sourceCategoryPath);
+  const phoneTitle = /\b(?:smartphone|mobile\s+phone|cell\s+phone|iphone|android\s+phone|phone\s+1[0-9])\b/i.test(String(product.title || ''));
+  if (phoneTitle && categoryLeafKey(path) === 'drones accessories'
+    && categoryLeafKey(sourcePath) && categoryLeafKey(sourcePath) !== 'drones accessories') {
+    path = sourcePath;
+    id = normalizeCategoryId(product.sourceCategoryId || snapshot.sourceCategoryId);
+  }
   if (!id && path.length) id = BUILTIN_CATEGORY_IDS.get(canonicalCategoryPart(path.at(-1))) || '';
   return { id, path, pathText: path.join(' >> '), pathKey: categoryPathKey(path) };
 }

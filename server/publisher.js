@@ -1,11 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import sharp from 'sharp';
 import { load } from 'cheerio';
 import { hasExplicitHumanChallenge, hidePage, launchPersistent, revealPage, settlePage, syncAlibabaCookies, waitForHumanVerification } from './browser-runtime.js';
 import { extractAlibabaSourceData, parseAlibabaDetailDataScript } from './alibaba-source-data.js';
 import { SOURCE_LANGUAGE_HEADERS, withSourceLocale } from './source-locale.js';
 import { categoryIdFromUrl, normalizeCategoryId } from './category-routing.js';
+import { REQUIRED_ATTRIBUTE_ALIASES } from './publish-reference.js';
 
 const WORKBENCH_URL = 'https://i.alibaba.com/';
 const TITLE_SELECTORS = [
@@ -36,13 +38,18 @@ export function sanitizeCollectedProduct(product) {
     : String(product.productType || '').trim();
   const keywords = (Array.isArray(product.keywords) ? product.keywords : []).filter((value) => !isPromotionalText(value));
   const subtitle = isPromotionalText(product.subtitle) ? '' : product.subtitle;
-  const description = String(product.description || '').replace(/供应商的产品说明\s*报告可疑活动/gi, '').trim();
+  let description = String(product.description || '').replace(/供应商的产品说明\s*报告可疑活动/gi, '').trim();
+  const descriptionHtml = sanitizeSourceDescriptionHtml(product.descriptionHtml || '');
+  if (/with\s*\(document\)|insertBefore\s*\(createElement\(['"]script/i.test(description)) {
+    description = descriptionHtml ? load(descriptionHtml).text().replace(/\s+/g, ' ').trim() : '';
+  }
   const sourceCategoryId = normalizeCategoryId(product.sourceCategoryId || product.categoryId);
   return {
     ...product,
     ...(categoryPath.length ? { sourceCategoryPath: categoryPath } : {}),
     ...(sourceCategoryId ? { sourceCategoryId, categoryId: product.categoryId || sourceCategoryId } : {}),
-    productType, keywords, subtitle, description
+    productType, keywords, subtitle, description,
+    ...(descriptionHtml ? { descriptionHtml } : {})
   };
 }
 
@@ -68,8 +75,8 @@ export function parseDeliveryTiers(deliveryTime) {
   const leadRow = Array.isArray(deliveryTime[1]) ? deliveryTime[1].slice(1) : [];
   return quantityRow.map((range, index) => {
     const text = String(range || '').replace(/\s+/g, ' ').trim();
-    const upperMatch = text.match(/(?:^|[-–])\s*(\d+)\s*$/);
-    const upperQuantity = upperMatch ? Number(upperMatch[1]) : null;
+    const upperMatch = text.match(/(?:^|[-–])\s*([\d,]+)\s*$/);
+    const upperQuantity = upperMatch ? Number(upperMatch[1].replace(/,/g, '')) : null;
     const leadText = String(leadRow[index] || '').replace(/\s+/g, ' ').trim();
     const leadDays = leadText.match(/\d+(?:\.\d+)?/)?.[0] || '';
     return { range: text, upperQuantity, leadText, leadDays };
@@ -90,6 +97,10 @@ export function isProductPostingUrl(value) {
 
 export function categoryMismatchMessage(product, category) {
   const title = product?.title || '';
+  if (/\b(?:smartphone|(?:mobile|cell) phone|phone 1[0-9]|1[0-9]pro)\b/i.test(title)
+    && /drones? accessories|无人机配件/i.test(category || '')) {
+    return '手机商品不能使用无人机配件类目；引用模板的类目与商品不符，请恢复手机类目或选择同类目成功商品';
+  }
   const targetPath = sanitizeCategoryPath(product?.categoryPath);
   const sourcePath = sanitizeCategoryPath(product?.sourceCategoryPath);
   const expectedPath = targetPath.length ? targetPath : sourcePath;
@@ -265,6 +276,7 @@ function compactText(value, limit = 220) {
 
 async function visibleFeedback(page) {
   const selectors = [
+    '.sell-error-message .msg-text', '.error-sell-info + .sell-error-message',
     '[role="alert"]', '.next-message', '.next-notice', '.next-feedback',
     '.next-balloon', '.next-dialog', '[class*="toast"]', '[class*="message"]',
     '[class*="error"]', '[class*="invalid"]', '[class*="feedback"]'
@@ -285,12 +297,14 @@ async function visibleFeedback(page) {
 
 const SUBMIT_SUCCESS_TEXT = /(?:发布成功|提交成功|已提交发布|审核中|产品信息已经成功提交|产品已经进入审核流程|您的产品信息已经成功提交|您的产品已经进入审核流程|successfully\s+(?:submitted|published)|submitted successfully)/i;
 const DRAFT_SUCCESS_TEXT = /(?:保存成功|草稿.*成功|已保存|successfully\s+saved|saved successfully)/i;
-const BLOCKING_FEEDBACK_TEXT = /(?:报错反馈|错误项|必填项.*不能为空|请上传相关产品图片|请不要输入如下非英文字符|required|invalid)/i;
+const ACCOUNT_LIMIT_TEXT = /(?:产品|商品)(?:总量|数量).{0,20}(?:超出|超过|上限)|product.{0,30}(?:quota|limit).{0,20}(?:exceed|reach)/i;
+const BLOCKING_FEEDBACK_TEXT = /(?:报错反馈|错误项|必填项.*不能为空|无效起订量|物流属性.*(?:请填写完整|不能为空)|重量、体积.*(?:请填写完整|不能为空)|请上传相关产品图片|请不要输入如下非英文字符|required|invalid)/i;
 
 export function classifyAlibabaActionResult({ mode = 'draft', url = '', originalUrl = '', feedback = [], bodyText = '' } = {}) {
   const messages = Array.isArray(feedback) ? feedback.filter(Boolean) : [];
   const feedbackText = messages.join(' ');
   const combinedText = `${feedbackText} ${String(bodyText || '')}`;
+  if (ACCOUNT_LIMIT_TEXT.test(combinedText)) return { succeeded: false, verifiedBy: '', blockingFeedback: true };
   let currentUrl = null;
   let initialUrl = null;
   try { currentUrl = new URL(url); } catch {}
@@ -324,7 +338,8 @@ export function classifyAlibabaActionResult({ mode = 'draft', url = '', original
     && currentUrl.href !== initialUrl.href
     && !/\/product\/publish\.htm$/i.test(currentUrl.pathname)
   );
-  if (navigatedAway) return { succeeded: true, verifiedBy: 'navigation', blockingFeedback };
+  // Login, quota errors and category redirects are not publication receipts.
+  if (navigatedAway) return { succeeded: false, verifiedBy: '', blockingFeedback };
   return { succeeded: false, verifiedBy: '', blockingFeedback };
 }
 
@@ -606,6 +621,22 @@ async function currentFormDiagnostics(page) {
   return main;
 }
 
+async function captureCategoryAttributes(page) {
+  return page.locator('.sell-catProp-item, #struct-specification [id^="p-"]').evaluateAll((rows) => rows
+    .filter((row) => row.offsetWidth || row.offsetHeight)
+    .map((row) => {
+      const name = String(row.querySelector('.label, label')?.textContent || '').replace(/^[*＊]\s*/, '').replace(/添加规格图.*$/, '').trim();
+      const selected = [...row.querySelectorAll('.next-select-values em, .next-tag-body')]
+        .map((node) => node.textContent?.trim()).filter(Boolean);
+      const inputs = [...row.querySelectorAll('input:not([type="hidden"]), textarea, select')]
+        .filter((node) => node.type !== 'file')
+        .filter((node) => !['checkbox', 'radio'].includes(node.type) || node.checked)
+        .map((node) => ['checkbox', 'radio'].includes(node.type) ? node.closest('label')?.textContent?.trim() : node.value)
+        .filter(Boolean);
+      return { name, value: [...new Set(selected.length ? selected : inputs)].join(', ') };
+    }).filter((item) => item.name && item.value)).catch(() => []);
+}
+
 async function waitForActionResult(page, action, mode, originalUrl) {
   const responses = [];
   const onResponse = (response) => {
@@ -615,6 +646,8 @@ async function waitForActionResult(page, action, mode, originalUrl) {
   };
   page.on('response', onResponse);
   try {
+    await dismissPostingOverlays(page);
+    const requiredAttributes = await captureCategoryAttributes(page);
     await action.click();
     const deadline = Date.now() + 15000;
     while (Date.now() < deadline) {
@@ -622,8 +655,14 @@ async function waitForActionResult(page, action, mode, originalUrl) {
       await page.waitForTimeout(400);
       const url = page.url();
       const feedback = await visibleFeedback(page);
+      const accountLimit = await page.locator('body').innerText().then((value) => value.match(/[^\n]*您发布的产品总量已超出限制[^\n]*/)?.[0]).catch(() => '');
+      if (accountLimit) {
+        const error = new Error(`国际站账号发布额度不足：${accountLimit.trim()}`);
+        error.code = 'PUBLISH_ACCOUNT_LIMIT';
+        throw error;
+      }
       const result = classifyAlibabaActionResult({ mode, url, originalUrl, feedback });
-      if (result.succeeded) return { verifiedBy: result.verifiedBy, feedback, responses };
+      if (result.succeeded) return { verifiedBy: result.verifiedBy, feedback, responses, requiredAttributes };
     }
     const feedback = await visibleFeedback(page);
     const bodyText = await page.locator('body').innerText().catch(() => '');
@@ -637,17 +676,19 @@ async function waitForActionResult(page, action, mode, originalUrl) {
       bodyText
     });
     if (finalResult.succeeded) {
-      return { verifiedBy: finalResult.verifiedBy, feedback, responses };
+      return { verifiedBy: finalResult.verifiedBy, feedback, responses, requiredAttributes };
     }
     const relevant = feedback
-      .filter((text) => /必填|不能为空|请填写|请上传|请不要输入|非英文|至少|错误|失败|error|required/i.test(text))
+      .filter((text) => /必填|不能为空|请填写|请输入|无效|未填写|请上传|请不要输入|非英文|至少|错误|失败|error|required|invalid/i.test(text))
       .sort((left, right) => left.length - right.length);
-    const errorPanel = bodyText.match(/报错反馈[\s\S]{0,1200}/)?.[0]
+    const errorPanel = bodyText.match(/(?:报错反馈|请发布前修改以下出错项)[\s\S]{0,1200}/)?.[0]
       ?.split(/商品质量助手|基本信息|当前商品类型/)[0]
       ?.replace(/\s+/g, ' ')
       ?.trim() || '';
     const detail = relevant.slice(0, 8).join('；') || errorPanel || feedback[0] || '';
-    throw new Error(`${mode === 'submit' ? '提交' : '保存草稿'}后未检测到国际站成功反馈${detail ? `：${detail}` : ''}`);
+    const error = new Error(`${mode === 'submit' ? '提交' : '保存草稿'}后未检测到国际站成功反馈${detail ? `：${detail}` : ''}`);
+    error.requiredFields = [...new Set([...await visibleEmptyAttributeLabels(page), ...requiredLabelsFromError(detail)])];
+    throw error;
   } finally {
     page.off('response', onResponse);
   }
@@ -691,6 +732,18 @@ const ATTRIBUTE_NAME_TRANSLATIONS = new Map(Object.entries({
   '颜色': 'Color',
   '运行内存': 'RAM',
   '存储容量': 'Storage Capacity'
+  , 'screen size': 'Screen Size'
+  , 'battery capacity': 'Battery Capacity'
+  , 'processor brand': 'Processor Brand'
+  , 'operation system': 'Operating System'
+  , 'display refresh rate': 'Display Refresh Rate'
+  , 'cellular band': 'Cellular Band'
+  , 'cellular': 'Cellular Network'
+  , 'selling units': 'Selling Unit'
+  , 'single package size': 'Single Package Size'
+  , 'single gross weight': 'Single Gross Weight'
+  , 'product type': 'Product Type'
+  , 'compatible model': 'Compatible Model'
 }));
 
 const SOURCE_ATTRIBUTE_LABEL_ALIASES = new Map([
@@ -710,9 +763,21 @@ const SOURCE_ATTRIBUTE_LABEL_ALIASES = new Map([
   ['output', ['输出', 'Output']],
   ['protection level', ['防护等级', 'Protection Level']],
   ['use', ['用途', 'Use']]
+  , ['screen size', ['屏幕', '屏幕尺寸', 'Screen Size', 'Display']]
+  , ['battery capacity', ['电池容量', 'Battery Capacity', 'Battery']]
+  , ['processor brand', ['处理器品牌', 'Processor Brand']]
+  , ['operation system', ['操作系统', 'Operation System', 'Operating System', 'OS']]
+  , ['display refresh rate', ['屏幕刷新率', 'Display Refresh Rate']]
+  , ['cellular band', ['蜂窝频段', 'Cellular Band', 'Frequency Band']]
+  , ['cellular', ['蜂窝网络', 'Cellular', 'Cellular Network']]
+  , ['compatible model', ['适用型号', 'Compatible Model', 'Model Compatibility']]
+  , ['screen', ['屏幕', '屏幕尺寸', 'Screen', 'Screen Size', 'Display']]
+  , ['battery', ['电池容量', 'Battery', 'Battery Capacity']]
+  , ['brand', ['品牌名称', 'Brand', 'Brand Name']]
 ]);
 
 const TEXT_TRANSLATIONS = [
+  ['英国', 'UK'], ['美国', 'US'], ['澳大利亚', 'AU'],
   ['联发科天玑', 'MediaTek Dimensity '], ['联发科', 'MediaTek '],
   ['北斗', 'BeiDou'], ['伽利略', 'Galileo'], ['荷兰语', 'Dutch'], ['英文', 'English'],
   ['法式', 'French'], ['法语', 'French'], ['德语', 'German'], ['西班牙语', 'Spanish'],
@@ -812,8 +877,67 @@ export function sourceDetailHasBrokenImages(value) {
 }
 
 function attributeValue(product, ...names) {
-  const wanted = names.map((name) => name.toLowerCase());
-  return (product.attributes || []).find((item) => wanted.includes(String(item.name || '').toLowerCase()))?.value || '';
+  const normalize = (name) => String(name || '').toLowerCase().replace(/[\s_\-/]+/g, ' ').trim();
+  const canonical = (name) => {
+    const value = normalize(name);
+    return ({
+      screen: 'screen size', display: 'screen size', 'screen size': 'screen size',
+      屏幕: 'screen size', 屏幕尺寸: 'screen size',
+      battery: 'battery capacity', 'battery capacity': 'battery capacity', 电池: 'battery capacity', 电池容量: 'battery capacity',
+      cellular: 'cellular network', 'cellular network': 'cellular network', 蜂窝网络: 'cellular network',
+      'processor brand': 'processor brand', 处理器品牌: 'processor brand',
+      'compatible model': 'compatible model', 适用型号: 'compatible model'
+    })[value] || value;
+  };
+  const wanted = new Set(names.map(canonical));
+  const direct = [...(product.attributes || []), ...(product.customAttributes || [])]
+    .find((item) => wanted.has(canonical(item.name)) && item.value != null && String(item.value).trim());
+  if (direct) return direct.value;
+  const topLevel = [
+    ['screen size', product.screenSize || product.screen],
+    ['battery capacity', product.batteryCapacity || product.battery],
+    ['processor brand', product.processorBrand], ['operation system', product.operationSystem],
+    ['compatible model', product.compatibleModel], ['type', product.type || product.productType]
+  ].find(([name, value]) => wanted.has(canonical(name)) && value != null && String(value).trim());
+  if (topLevel) return topLevel[1];
+  const group = (product.variantGroups || []).find((item) => wanted.has(canonical(item.name))
+    && Array.isArray(item.options) && item.options.length);
+  return group?.options?.[0] || '';
+}
+
+// Source captures are not consistent: some categories expose a value as an
+// attribute, some only put it in the title, and older captures keep it in a
+// SKU group. Resolve the common required fields from all three locations.
+export function inferRequiredAttributeValue(product = {}, ...names) {
+  const normalize = (value) => String(value || '').toLowerCase().replace(/[\s_\-/]+/g, ' ').trim();
+  const wanted = new Set(names.map(normalize));
+  const value = attributeValue(product, ...names);
+  if (value) return value;
+  const text = [product.title, product.subtitle, product.description, product.descriptionHtml]
+    .filter(Boolean).join(' ');
+  if (wanted.has('屏幕') || wanted.has('屏幕尺寸') || wanted.has('screen') || wanted.has('screen size') || wanted.has('display')) {
+    const match = text.match(/(?:^|\s)(\d{1,2}(?:\.\d+)?)\s*(?:["”]|inch(?:es)?|英寸)/i);
+    if (match && /smartphone|mobile phone|phone|tablet|screen|display|monitor|屏幕|手机|平板/i.test(product.title || '')) return `${match[1]} inch`;
+  }
+  if (wanted.has('电池容量') || wanted.has('battery') || wanted.has('battery capacity')) {
+    const match = text.match(/(?:^|\s)(\d{3,5})\s*(?:mah|毫安时)/i);
+    if (match) return `${match[1]}mAh`;
+  }
+  if (wanted.has('处理器品牌') || wanted.has('processor brand')) {
+    const match = text.match(/\b(?:snapdragon|exynos|kirin|dimensity|mediatek|mtk|apple\s+a\d+)\b(?:\s+[\w-]+){0,3}/i);
+    if (match) return match[0];
+  }
+  if (wanted.has('适用型号') || wanted.has('compatible model')) {
+    const group = (product.variantGroups || []).find((item) => /适用型号|compatible\s*model|model\s*compatibility/i.test(String(item.name || '')));
+    if (group?.options?.length) return group.options[0];
+    return product.model || '';
+  }
+  if (wanted.has('类型') || wanted.has('type') || wanted.has('product type') || wanted.has('产品类型')) {
+    return product.productType || product.type || product.categoryPath?.at(-1) || product.sourceCategoryPath?.at(-1) || '';
+  }
+  if (wanted.has('品牌名称') || wanted.has('brand') || wanted.has('brand name')) return product.brand || product.brandName || '';
+  if (wanted.has('产地') || wanted.has('origin') || wanted.has('place of origin')) return product.origin || 'China';
+  return '';
 }
 
 export function hasCompleteSourceData(product) {
@@ -840,6 +964,7 @@ export function validateProductData(product) {
     && numericValue(sourceRange.maxPrice) >= numericValue(sourceRange.minPrice);
   if ((product.skus || []).some((sku) => sku.price != null && sku.price !== '' && numericValue(sku.price) <= 0)) errors.push('SKU 价格无效');
   if ((product.skus || []).some((sku) => sku.stock != null && numericValue(sku.stock) < 0)) errors.push('SKU 库存无效');
+  if ((product.variantGroups || []).length && (product.skus || []).some((sku) => numericValue(sku.stock) <= 0)) errors.push('SKU 库存必须大于 0');
   if (!hasSourceRange && (product.skus || []).some((sku) => sku.price == null || sku.price === '')) errors.push('SKU 缺少价格');
   if (!String(product.description || product.descriptionHtml || '').trim()) errors.push('缺少商品详情');
   const tiers = canonicalizePriceTiers(product.priceTiers || []);
@@ -854,6 +979,36 @@ export function validateProductData(product) {
     }
   }
   return errors;
+}
+
+// Convert collected data into a deterministic payload before touching the
+// Alibaba form. The editor may display a value while its controlled state is
+// empty; materializing every SKU value here gives the browser layer a complete
+// set of values to commit and verify.
+export function preparePublishProduct(product) {
+  const next = { ...product };
+  next.mainImages = [...new Set((product.mainImages || product.images || []).filter((url) => /^https?:\/\//i.test(String(url))))];
+  next.images = next.mainImages;
+  next.detailImages = [...new Set((product.detailImages || []).filter((url) => /^https?:\/\//i.test(String(url))))];
+  next.descriptionHtml = sanitizeSourceDescriptionHtml(product.descriptionHtml || '');
+  if (!next.description && next.descriptionHtml) next.description = load(next.descriptionHtml).text().replace(/\s+/g, ' ').trim();
+  const fallbackPrice = numericValue(product.price) || numericValue(product.sourcePriceRange?.minPrice) || 1;
+  const fallbackStock = numericValue(product.stock) || 100;
+  const groups = Array.isArray(product.variantGroups) ? product.variantGroups : [];
+  if (groups.length && Array.isArray(product.skus)) {
+    next.skus = product.skus.map((sku, index) => ({
+      ...sku,
+      price: numericValue(sku.price) > 0 ? Number(sku.price).toFixed(2) : fallbackPrice.toFixed(2),
+      stock: numericValue(sku.stock) > 0 ? Number(sku.stock) : fallbackStock,
+      code: String(sku.code || sku.skuCode || `${product.sourceId || product.id || 'SKU'}-${index + 1}`).trim()
+    }));
+  }
+  next.priceTiers = canonicalizePriceTiers(product.priceTiers || []);
+  return next;
+}
+
+export function isRequiredAttributeError(message) {
+  return /(?:必填项?不能为空|属性值不能为空|不能为空|required(?: field| attribute)?[^\\n]{0,40}(?:empty|blank|missing)|attribute[^\\n]{0,40}(?:empty|required))/i.test(String(message || ''));
 }
 
 export function canonicalizePriceTiers(tiers) {
@@ -957,18 +1112,27 @@ async function fieldByLabel(page, label) {
     const wanted = clean(labelText);
     const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
     const labels = [...document.querySelectorAll('label,div,span,h3,h4')]
-      .filter((node) => clean(node.textContent) === wanted);
+      .filter((node) => clean(node.textContent) === wanted
+        && !node.closest('#struct-specification, #saleAttributesItems, [class*="customizedServices"]'));
     for (const labelNode of labels) {
       let container = labelNode;
       for (let level = 0; container && level < 7; level += 1, container = container.parentElement) {
-        const input = [...container.querySelectorAll('input:not([type="hidden"]),textarea,[contenteditable="true"]')].find(visible);
+        const input = [...container.querySelectorAll('input:not([type="hidden"]),textarea,select,[contenteditable="true"]')]
+          .find((node) => visible(node) && !node.closest('#struct-specification, #saleAttributesItems, [class*="customizedServices"]'));
         if (!input) continue;
+        const stableRow = input.closest('.sell-catProp-item[id]');
+        if (stableRow) {
+          const controls = [...stableRow.querySelectorAll('input:not([type="hidden"]),textarea,select,[contenteditable="true"]')];
+          return { rowId: stableRow.id, index: controls.indexOf(input) };
+        }
         input.setAttribute('data-codex-field', marker);
         return true;
       }
     }
     return false;
   }, { labelText: label, marker: token });
+  if (found?.rowId) return page.locator(`[id="${found.rowId.replace(/["\\]/g, '')}"]`)
+    .locator('input:not([type="hidden"]),textarea,select,[contenteditable="true"]').nth(found.index);
   return found ? page.locator(`[data-codex-field="${token}"]`) : null;
 }
 
@@ -1074,6 +1238,11 @@ export function distinctAlibabaImageUrls(urls = []) {
 
 export function isRequiredTargetVariantGroup(group) {
   if (!group?.name || /颜色|colou?r/i.test(group.name)) return false;
+  // Alibaba treats compatible model as a category attribute on the affected
+  // phone/drone forms, not as a sale SKU dimension. Filling it through the
+  // required-attribute path avoids the false "source specification does not
+  // exist in target category" rejection.
+  if (/^(?:compatible\s+model|model\s+compatibility|适用型号)$/i.test(String(group.name).trim())) return false;
   const options = [...new Set((group.options || []).map((value) => englishSpecText(value)).filter(Boolean))];
   if (options.length > 1) return true;
   const imageBacked = String(group.type || '').toUpperCase() === 'IMAGE'
@@ -1154,7 +1323,7 @@ export function shouldUseColorSaleSpecification(colorGroup, targetSupportsColor)
 }
 
 const LOGISTICS_FIELD_LABELS = {
-  weight: ['单个产品毛重', 'single gross weight', 'gross weight', 'product weight'],
+  weight: ['毛重(KG/Piece)', '单个产品毛重', 'single gross weight', 'gross weight', 'product weight'],
   length: ['长(CM/Piece)', '包装长度', 'package length', 'length(cm/piece)', 'length'],
   width: ['宽(CM/Piece)', '包装宽度', 'package width', 'width(cm/piece)', 'width'],
   height: ['高(CM/Piece)', '包装高度', 'package height', 'height(cm/piece)', 'height']
@@ -1167,16 +1336,19 @@ const LOGISTICS_FIELD_SELECTORS = {
     'input[placeholder*="weight" i]'
   ],
   length: [
+    '#pkgMeasure [role="gridcell"]:nth-child(1) input',
     'input[name="pkgLength"]', 'input[name*="pkgLength" i]',
     'input[name*="packageLength" i]', 'input[placeholder*="长(CM/Piece)" i]',
     'input[placeholder*="length" i]'
   ],
   width: [
+    '#pkgMeasure [role="gridcell"]:nth-child(2) input',
     'input[name="pkgWidth"]', 'input[name*="pkgWidth" i]',
     'input[name*="packageWidth" i]', 'input[placeholder*="宽(CM/Piece)" i]',
     'input[placeholder*="width" i]'
   ],
   height: [
+    '#pkgMeasure [role="gridcell"]:nth-child(3) input',
     'input[name="pkgHeight"]', 'input[name*="pkgHeight" i]',
     'input[name*="packageHeight" i]', 'input[placeholder*="高(CM/Piece)" i]',
     'input[placeholder*="height" i]'
@@ -1317,9 +1489,17 @@ async function clearLogisticsFields(page, fields = null) {
   return targets;
 }
 
-async function forceClearLogisticsSection(page) {
+export async function forceClearLogisticsSection(page) {
   const fields = await logisticsFields(page);
   await clearLogisticsFields(page, fields);
+  // Current forms store the three anonymous size inputs in one pkgMeasure
+  // component. Clear each through a real edit, including its blur handler.
+  const measurements = page.locator('#pkgMeasure input:visible');
+  for (let index = 0; index < await measurements.count(); index += 1) {
+    const input = measurements.nth(index);
+    await input.fill('');
+    await input.press('Tab');
+  }
   await syncLogisticsControls(page, {}, { clear: true });
   // If Alibaba kept the optional logistics module selected after a failed
   // submit, clear its selection as well so the retry is a true all-empty
@@ -1345,7 +1525,7 @@ async function forceClearLogisticsSection(page) {
   await page.waitForTimeout(500);
 }
 
-async function fillLogisticsFields(page, packaging = {}) {
+export async function fillLogisticsFields(page, packaging = {}) {
   const values = {
     weight: packaging.weight,
     length: packaging.length,
@@ -1363,7 +1543,7 @@ async function fillLogisticsFields(page, packaging = {}) {
   // recognized control for each metric instead of rejecting a valid form just
   // because its generated label/name changed.
   const completeTarget = ['weight', 'length', 'width', 'height']
-    .every((key) => synced.keys.includes(key));
+    .every((key) => fields[key] || synced.keys.includes(key));
 
   // Alibaba accepts this section only as a complete set or as an empty set.
   // Never leave source or target values partially populated.
@@ -1385,21 +1565,117 @@ async function fillLogisticsFields(page, packaging = {}) {
   }
 }
 
-async function fillChoice(page, locator, value) {
+export function attributeOptionMatchScore(source, option) {
+  const normalize = (value) => String(value || '').toLowerCase()
+    .replace(/[＜]/g, '<').replace(/[＞]/g, '>')
+    .replace(/[–—～~]/g, '-')
+    .replace(/英寸|inch(?:es)?|["“”]/g, '')
+    .replace(/[\s'‘’（）()]/g, '');
+  const wanted = normalize(source);
+  const offered = normalize(option);
+  if (!wanted || !offered) return 0;
+  if (wanted === offered) return 100;
+  const numbers = (value) => value.match(/\d+(?:\.\d+)?/g) || [];
+  const a = numbers(wanted);
+  const b = numbers(offered);
+  if (a.length || b.length) {
+    if (a.length !== b.length || !a.length) {
+      // A single measurement may be represented by a containing interval.
+      if (a.length === 1 && b.length === 2 && /^\d+(?:\.\d+)?-\d/.test(offered)
+        && Number(a[0]) >= Number(b[0]) && Number(a[0]) <= Number(b[1])) return 70;
+      return 0;
+    }
+    const comparator = (value) => value.match(/^[<>]=?|^[≤≥]/)?.[0] || '';
+    return comparator(wanted) === comparator(offered) && a.join(',') === b.join(',') ? 90 : 0;
+  }
+  if (/^others?$/.test(wanted) && /^(?:others?|其他)$/.test(offered)) return 90;
+  return offered.includes(wanted) || wanted.includes(offered) ? 50 : 0;
+}
+
+export async function fillChoice(page, locator, value) {
   if (!locator || !value) return false;
   const expected = String(value).trim();
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    await locator.click({ force: true }).catch(() => {});
-    await locator.fill(expected).catch(() => {});
-    await page.waitForTimeout(350);
-    const exactOption = page.getByText(expected, { exact: true }).last();
-    if (await exactOption.isVisible().catch(() => false)) await exactOption.click({ force: true }).catch(() => {});
-    else {
-      await locator.press('ArrowDown').catch(() => {});
-      await locator.press('Enter').catch(() => {});
+  const kind = await locator.evaluate((node) => ({ tag: node.tagName, type: node.type })).catch(() => null);
+  if (!kind) return false;
+  if (kind.tag === 'SELECT') return locator.selectOption({ label: expected }, { timeout: 4000 }).then(() => true).catch(() => false);
+  if (['checkbox', 'radio'].includes(kind.type)) {
+    const row = locator.locator('xpath=ancestor::*[starts-with(@id,"p-")][1]');
+    const label = row.locator('label').filter({ hasText: new RegExp(`^${expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }).first();
+    const input = label.locator('input').first();
+    if (!await label.isVisible().catch(() => false)) return false;
+    if (!await input.isChecked().catch(() => false)) await label.click({ timeout: 4000 }).catch(() => {});
+    return input.isChecked().catch(() => false);
+  }
+  const chooseVisibleOption = async (candidate) => {
+    const menu = page.locator('.sell-o-select-options:visible').last();
+    const options = await menu.count()
+      ? menu.locator('.options-item')
+      : page.locator('[role="option"]:visible, .next-menu-item:visible, .next-select-menu-item:visible');
+    // The menu virtualizes its options. Search reveals values outside the
+    // first nine rows, including 6.6-inch screens and 6000-6999mAh batteries.
+    const search = menu.locator('.options-search input');
+    if (await search.isVisible().catch(() => false)) {
+      await search.fill(candidate.match(/\d+(?:\.\d+)?/)?.[0] || candidate);
+      await page.waitForTimeout(300);
     }
-    await locator.press('Tab').catch(() => {});
-    await locator.dispatchEvent('change').catch(() => {});
+    const deadline = Date.now() + 1800;
+    do {
+      const texts = await options.allTextContents();
+      const ranked = texts.map((text, index) => ({ index, score: attributeOptionMatchScore(candidate, text) }))
+        .filter((item) => item.score > 0).sort((a, b) => b.score - a.score);
+      if (ranked.length) {
+        return options.nth(ranked[0].index).click({ timeout: 4000 }).then(() => true).catch(() => false);
+      }
+      await page.waitForTimeout(200);
+    } while (Date.now() < deadline);
+    return false;
+  };
+  const isCombo = await locator.getAttribute('role').catch(() => '') === 'combobox'
+    || await locator.getAttribute('readonly').catch(() => null) !== null;
+  if (isCombo) {
+    const candidates = expected.split(/\s*,\s*/).map((item) => item.trim()).filter(Boolean);
+    let selected = true;
+    const selectedValues = () => locator.evaluate((node) => {
+      const root = node.closest('.next-select');
+      return [...(root?.querySelectorAll('.next-select-values em, .next-tag-body, [class*="selected-value"]') || [])]
+        .map((item) => item.textContent);
+    }).catch(() => []);
+    for (const candidate of candidates) {
+      const selectedTexts = await selectedValues();
+      if (selectedTexts.some((text) => attributeOptionMatchScore(candidate, text) >= 70)) continue;
+      if (await locator.getAttribute('aria-expanded').catch(() => '') !== 'true') {
+        await locator.click({ force: true, timeout: 4000 }).catch(() => {});
+      }
+      await page.waitForTimeout(180);
+      const acceptsCustom = Number(await locator.getAttribute('maxcustomitems')) > 0;
+      if (acceptsCustom) {
+        await locator.fill(candidate);
+        await page.waitForTimeout(250);
+      }
+      let chose = await chooseVisibleOption(candidate);
+      if (!chose && acceptsCustom) await locator.fill('').catch(() => {});
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(180);
+      const actual = await selectedValues();
+      chose = actual.some((text) => attributeOptionMatchScore(candidate, text) >= 70);
+      selected &&= chose;
+    }
+    await locator.evaluate((node) => node.blur()).catch(() => {});
+    return selected;
+  }
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    // A stale or category-specific control must fail quickly. The outer
+    // publish stage has a long timeout for network work, but a single missing
+    // field should never consume that entire timeout.
+    await locator.click({ force: true, timeout: 4000 }).catch(() => {});
+    await locator.fill(expected, { timeout: 4000 }).catch(() => {});
+    await page.waitForTimeout(350);
+    const exactOption = page.locator('[role="option"]:visible, .next-menu-item:visible')
+      .filter({ hasText: new RegExp(`^${expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }).last();
+    if (await exactOption.isVisible().catch(() => false)) await exactOption.click({ force: true, timeout: 4000 }).catch(() => {});
+    await page.keyboard.press('Escape');
+    await locator.evaluate((node) => node.blur()).catch(() => {});
+    await locator.dispatchEvent('change', { timeout: 4000 }).catch(() => {});
     await page.waitForTimeout(300);
     const committed = await locator.evaluate((node, expectedValue) => {
       const clean = (text) => String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -1677,8 +1953,8 @@ export async function ensureColorSpecImageSwitch(page, row) {
   return false;
 }
 
-async function fillVariantSpecs(page, product) {
-  const variantGroups = product?.variantGroups || [];
+export async function fillVariantSpecs(page, product) {
+  const variantGroups = structuredClone(product?.variantGroups || []);
   // A single image-backed source SKU can satisfy categories that require one
   // sales specification and must keep the source specification image.
   let groups = variantGroups.filter(isRequiredTargetVariantGroup);
@@ -1732,17 +2008,10 @@ async function fillVariantSpecs(page, product) {
     (group.options || []).map((value) => englishSpecText(value)).filter(Boolean)
   ).size > 1);
   const availableIds = [...new Set(multiGroups.map((group) => targetIds.get(group)).filter(Boolean))];
-  if (multiGroups.length > 1 && preferredImageId && imageSourceGroup) {
-    groups = [{ ...imageSourceGroup, id: preferredImageId, omittedSourceGroups: multiGroups
-      .filter((group) => group !== imageSourceGroup).map((group) => group.name) }];
-    for (const selectedId of await page.locator('#saleAttributesItems input[type="checkbox"]').evaluateAll((nodes) => nodes
-      .filter((node) => node.checked || node.getAttribute('aria-checked') === 'true'
-        || node.closest('.checked, .is-checked, [aria-checked="true"]'))
-      .map((node) => String(node.value || '')).filter(Boolean)).catch(() => [])) {
-      if (selectedId !== preferredImageId) await ensureSaleAttributeCleared(page, selectedId);
-    }
-    await ensureSaleAttributeSelected(page, preferredImageId);
-  } else if (multiGroups.length > 1 && availableIds.length === 1) {
+  for (const group of variantGroups) {
+    if (!/颜色|colou?r/i.test(group.name) && targetIds.has(group) && !groups.includes(group)) groups.push(group);
+  }
+  if (multiGroups.length > 1 && availableIds.length === 1) {
     const targetId = availableIds[0];
     const targetControl = page.locator(`input[value="${targetId.replace(/["\\]/g, '')}"]`).first();
     const targetName = String(await targetControl.locator('xpath=ancestor::label[1]').innerText().catch(() => '')).trim()
@@ -1801,15 +2070,27 @@ async function fillVariantSpecs(page, product) {
       if (!await label.isVisible().catch(() => false)) continue;
       const input = label.locator('input[type="checkbox"], input[type="radio"]').first();
       if (!await input.count().catch(() => 0)) continue;
-      if (!await input.isChecked().catch(() => false)) {
-        await label.click({ force: true }).catch(() => {});
-        await page.waitForTimeout(160);
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (await input.isChecked().catch(() => false)) return true;
+        await input.check({ timeout: 4000 }).catch(() => {});
+        await page.waitForTimeout(250);
       }
       if (await input.isChecked().catch(() => false)) return true;
     }
     return false;
   };
   const addCustomVariantValue = async (row, value) => {
+    const sequentialAdd = row.locator('.sell-sequential-combocheckbox button.add-button:visible').last();
+    if (await sequentialAdd.isVisible().catch(() => false)) {
+      if (!await sequentialAdd.isDisabled()) await sequentialAdd.click();
+      const custom = row.locator('.sell-sequential-combobox-custom-wrap input:visible').last();
+      if (await custom.isVisible().catch(() => false)) {
+        await custom.fill(value);
+        await custom.press('Tab');
+        await page.waitForTimeout(300);
+        return selectExactValue(row, value);
+      }
+    }
     // The first specification value uses the ready blank combobox. After it
     // has a value, Alibaba requires "+ Add" to create another controlled row.
     // Re-resolve the inputs after that click because the component rerenders.
@@ -1823,7 +2104,7 @@ async function fillVariantSpecs(page, product) {
       if (!current || current.toLowerCase() === value.toLowerCase()) { customInput = input; break; }
     }
     if (!customInput) {
-      const add = row.locator('[role="btn-add"], .add-color-btn').last();
+      const add = row.locator('[role="btn-add"], .add-color-btn, button.add-button').last();
       if (!await add.isVisible().catch(() => false)) return false;
       await add.click({ force: true }).catch(() => {});
       await page.waitForTimeout(300);
@@ -1850,6 +2131,7 @@ async function fillVariantSpecs(page, product) {
     if (selectedPreset && await selectExactValue(row, value)) return true;
     await customInput.press('Tab').catch(() => {});
     await page.waitForTimeout(350);
+    if (await selectExactValue(row, value)) return true;
     const retained = String(await customInput.inputValue().catch(() => '')).trim();
     if (retained.toLowerCase() === value.toLowerCase()) return true;
     await customInput.click({ force: true }).catch(() => {});
@@ -1876,7 +2158,9 @@ async function fillVariantSpecs(page, product) {
       || candidateIdsFor(group).find((candidateId) => availableIds.includes(candidateId))
       || String(group.id || '');
     const targetHasSourceId = targetId && await saleAttributeIsAvailable(page, targetId);
-    if (targetHasSourceId && !await ensureSaleAttributeSelected(page, targetId)) {
+    const existingRow = targetId ? page.locator(`[id="p-${targetId.replace(/["\\]/g, '')}"]:visible`).first() : null;
+    const rowAlreadyVisible = Boolean(existingRow && await existingRow.isVisible().catch(() => false));
+    if (targetHasSourceId && !rowAlreadyVisible && !await ensureSaleAttributeSelected(page, targetId)) {
       for (const rawValue of [...new Set(group.options || [])]) {
         const value = englishSpecText(rawValue);
         if (value) unmapped.push(`${group.name}: ${value}`);
@@ -1884,7 +2168,7 @@ async function fillVariantSpecs(page, product) {
       continue;
     }
     if (targetHasSourceId && targetId !== String(group.id || '')) group.id = targetId;
-    const directRow = targetHasSourceId ? page.locator(`#struct-specification [id="p-${targetId.replace(/["\\]/g, '')}"]`).first() : null;
+    const directRow = rowAlreadyVisible ? existingRow : targetHasSourceId ? page.locator(`#struct-specification [id="p-${targetId.replace(/["\\]/g, '')}"]`).first() : null;
     let row = directRow && await directRow.isVisible().catch(() => false)
       ? directRow
       : await rowFor(aliasesFor(group.name));
@@ -1896,11 +2180,26 @@ async function fillVariantSpecs(page, product) {
         : await rowFor(aliasesFor(group.name));
     }
     for (const rawValue of [...new Set(group.options || [])]) {
-      const value = englishSpecText(rawValue);
+      let value = englishSpecText(rawValue);
       if (!value) continue;
       if (!row) {
         unmapped.push(`${group.name}: ${value}`);
         continue;
+      }
+      const sourceOptionId = group.optionIds?.[rawValue];
+      if (sourceOptionId && String(sourceOptionId) !== '-1') {
+        const targetText = await row.evaluate((node, optionId) => {
+          const key = Object.getOwnPropertyNames(node).find((name) => name.startsWith('__reactFiber'));
+          let fiber = key && node[key];
+          for (let depth = 0; fiber && depth < 12; depth += 1, fiber = fiber.return) {
+            const options = fiber.memoizedProps?.dataSource;
+            if (!Array.isArray(options)) continue;
+            const match = options.find((item) => String(item.value) === String(optionId));
+            if (match) return match.text || match.label || '';
+          }
+          return '';
+        }, sourceOptionId).catch(() => '');
+        if (targetText) value = targetText;
       }
       let selected = false;
       for (const candidate of targetValueCandidates(group, value)) {
@@ -1918,12 +2217,42 @@ async function fillVariantSpecs(page, product) {
   return { unmapped, blockingUnmapped, groups };
 }
 
+async function colorSaleAttributeId(page) {
+  const control = await visibleColorSpecControl(page);
+  return String(await control?.input.getAttribute('value').catch(() => '') || '191288010');
+}
+
 async function visibleColorSpecControl(page) {
   // Alibaba has used several different container class names for this area.
-  // Resolve the first visible exact color checkbox in document order and
-  // explicitly reject the later light/deep-customization sections.
+  // Resolve the first visible color checkbox in document order and explicitly
+  // reject the later light/deep-customization sections. Newer form builds
+  // expose the attribute id on the input instead of rendering a text-only
+  // label, so check that stable id before falling back to label matching.
+  const directInputs = page.locator([
+    'input[value="191288010"]',
+    '[data-attribute-id="191288010"] input[type="checkbox"]',
+    '[data-id="191288010"] input[type="checkbox"]'
+  ].join(', '));
+  const directCount = await directInputs.count().catch(() => 0);
+  for (let index = 0; index < directCount; index += 1) {
+    const input = directInputs.nth(index);
+    if (!await input.isVisible().catch(() => false)) continue;
+    const wrapper = input.locator('xpath=ancestor::label[1]');
+    const candidate = await wrapper.count().catch(() => 0) ? wrapper : input;
+    const excluded = await candidate.evaluate((node) => Boolean(
+      node.closest('[class*="customizedServices"], [class*="CustomizedServices"]')
+    )).catch(() => true);
+    if (!excluded) {
+      return {
+        wrapper: candidate,
+        input,
+        top: await input.evaluate((node) => node.getBoundingClientRect().top + window.scrollY).catch(() => 0)
+      };
+    }
+  }
+
   const wrappers = page.locator('label, [role="checkbox"]')
-    .filter({ hasText: /^(?:颜色|colou?r)$/i });
+    .filter({ hasText: /颜色|colou?r/i });
   const count = await wrappers.count().catch(() => 0);
   const candidates = [];
   for (let index = 0; index < count; index += 1) {
@@ -1934,7 +2263,7 @@ async function visibleColorSpecControl(page) {
       excluded: Boolean(node.closest('[class*="customizedServices"], [class*="CustomizedServices"]')),
       top: node.getBoundingClientRect().top + window.scrollY
     })).catch(() => null);
-    if (!metadata || metadata.excluded || !/^(?:颜色|colou?r)$/i.test(metadata.text)) continue;
+    if (!metadata || metadata.excluded || !/(?:^|\s)(?:颜色|colou?r)(?:\s|$)/i.test(metadata.text)) continue;
     const input = wrapper.locator('input[type="checkbox"]').first();
     if (!await input.count().catch(() => 0)) continue;
     candidates.push({ wrapper, input, top: metadata.top });
@@ -1944,7 +2273,8 @@ async function visibleColorSpecControl(page) {
 }
 
 async function visibleColorSpecRow(page) {
-  const rows = page.locator('[id="p-191288010"], [id="struct-p-191288010"], [data-attribute-id="191288010"], [data-id="191288010"], [data-attribute-id="color"], [data-spec-id="191288010"]');
+  const colorId = await colorSaleAttributeId(page);
+  const rows = page.locator(`[id="p-${colorId}"], [id="struct-p-${colorId}"], [data-attribute-id="${colorId}"], [data-id="${colorId}"], [data-attribute-id="color"], [data-spec-id="${colorId}"]`);
   const count = await rows.count().catch(() => 0);
   for (let index = 0; index < count; index += 1) {
     const row = rows.nth(index);
@@ -1983,7 +2313,11 @@ async function visibleColorSpecRow(page) {
 async function saleAttributeIsSelected(page, value) {
   return page.evaluate((expectedValue) => {
     const root = document.querySelector('#saleAttributesItems');
-    if (!root) return false;
+    if (!root) {
+      const input = document.querySelector(`input[value="${CSS.escape(String(expectedValue))}"]`);
+      return Boolean(input && (input.checked || input.getAttribute('aria-checked') === 'true'
+        || input.closest('[aria-checked="true"], .checked, .is-checked')));
+    }
     const fiberKey = Object.getOwnPropertyNames(root).find((key) => key.startsWith('__reactFiber'));
     let fiber = fiberKey ? root[fiberKey] : null;
     for (let depth = 0; fiber && depth < 12; depth += 1, fiber = fiber.return) {
@@ -2109,6 +2443,7 @@ async function ensureSaleAttributeCleared(page, value) {
     for (let depth = 0; fiber && depth < 12; depth += 1, fiber = fiber.return) {
       const props = fiber.memoizedProps || fiber.stateNode?.props;
       if (props?.id !== 'saleAttributesItems' || !Array.isArray(props.value)) continue;
+      if (props.dataSource?.some((item) => String(item.value) === String(expectedValue) && item.must)) return { ok: false, reason: 'required' };
       if (!props.value.some((item) => String(item?.value) === String(expectedValue))) {
         return { ok: true, already: true };
       }
@@ -2164,6 +2499,7 @@ async function clearSaleAttributeSelections(page) {
     for (let depth = 0; fiber && depth < 12; depth += 1, fiber = fiber.return) {
       const props = fiber.memoizedProps || fiber.stateNode?.props;
       if (props?.id !== 'saleAttributesItems' || !Array.isArray(props.value)) continue;
+      const required = (props.dataSource || []).filter((item) => item.must);
       const visit = (candidate, level = 0, seen = new Set()) => {
         if (!candidate || level > 18 || seen.has(candidate)) return null;
         seen.add(candidate);
@@ -2173,15 +2509,15 @@ async function clearSaleAttributeSelections(page) {
       };
       const instance = visit(fiber.child);
       if (instance) {
-        instance.onChange([]);
+        instance.onChange(required.map((item) => String(item.value)));
         return { ok: true, method: 'SaleAttributesItems.onChange' };
       }
       if (typeof props.changeValue === 'function') {
-        props.changeValue.call(props, []);
+        props.changeValue.call(props, required);
         return { ok: true, method: 'changeValue' };
       }
       if (typeof props.change === 'function') {
-        props.change(props.id, { props: { value: [] } });
+        props.change(props.id, { props: { value: required } });
         return { ok: true, method: 'change' };
       }
       return { ok: false, reason: 'missing-change-handler' };
@@ -2196,7 +2532,7 @@ async function clearSaleAttributeSelections(page) {
     let fiber = fiberKey ? root[fiberKey] : null;
     for (let depth = 0; fiber && depth < 12; depth += 1, fiber = fiber.return) {
       const props = fiber.memoizedProps || fiber.stateNode?.props;
-      if (props?.id === 'saleAttributesItems' && Array.isArray(props.value)) return props.value.length === 0;
+      if (props?.id === 'saleAttributesItems' && Array.isArray(props.value)) return props.value.every((item) => item.must);
     }
     return false;
   }).catch(() => false);
@@ -2243,39 +2579,33 @@ async function clearEmptySaleAttributeSelections(page) {
   return cleared;
 }
 
-async function visibleEmptyAttributeLabels(page) {
+export async function visibleEmptyAttributeLabels(page) {
   return page.evaluate(() => {
     const clean = (value) => String(value || '').replace(/\s+/g, ' ').replace(/^[*＊]\s*/, '').trim();
     const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
     const labels = [];
     for (const error of document.querySelectorAll('[class*="error"], [class*="invalid"], [aria-invalid="true"]')) {
       if (!visible(error) || !/属性值不能为空|必填项不能为空|required|不能为空/i.test(clean(error.textContent) + ' ' + (error.getAttribute?.('itemmessage') || ''))) continue;
-      let row = error;
+      const fieldRows = '.sell-catProp-item, .next-form-item, [id^="p-"]';
+      const fieldRow = error.closest(fieldRows);
+      // Aggregate error panels can contain several fields. Never borrow the
+      // first label from their section when only a later field is invalid.
+      if (!fieldRow && error.querySelector(fieldRows)) continue;
+      let row = fieldRow || error;
       for (let level = 0; row && level < 7; level += 1, row = row.parentElement) {
-        const label = [...row.querySelectorAll('label, legend, [class*="label"]')]
-          .map((node) => clean(node.textContent)).find((text) => text && text.length <= 80 && !/属性值不能为空|必填项不能为空|required|不能为空/i.test(text));
-        if (label) { labels.push(label); break; }
+        const rowLabels = [...new Set([...row.querySelectorAll('label, legend, [class*="label"]')]
+          .map((node) => clean(node.textContent)).filter((text) => text && text.length <= 80 && !/属性值不能为空|必填项不能为空|required|不能为空/i.test(text)))];
+        if (rowLabels.length > 1) break;
+        if (rowLabels.length === 1 && row.querySelector('input, select, textarea, [role="combobox"]')) {
+          labels.push(rowLabels[0]);
+          break;
+        }
+        if (fieldRow || row.querySelector(fieldRows)) break;
       }
     }
     return [...new Set(labels)].slice(0, 8);
   }).catch(() => []);
 }
-
-const REQUIRED_ATTRIBUTE_ALIASES = [
-  ['屏幕', 'screen', 'display'],
-  ['电池容量', 'battery capacity', 'battery'],
-  ['蜂窝网络', 'cellular network', 'mobile network', 'network'],
-  ['蜂窝频段', 'frequency band', 'network band', 'band'],
-  ['操作系统', 'operating system', 'os'],
-  ['手机中央处理器', 'cpu', 'processor', 'central processing unit'],
-  ['功能', 'function', 'feature', 'features', '功能/特性', '特性'],
-  ['端口', 'port', 'interface', '接口'],
-  ['材质', 'material', '材料'],
-  ['类型', 'type', 'product type', '产品类型'],
-  ['产地', 'place of origin', 'origin'],
-  ['品牌名称', 'brand name', 'brand'],
-  ['型号', 'model number', 'model']
-];
 
 function cleanRequiredLabel(value) {
   return String(value || '')
@@ -2293,11 +2623,14 @@ function requiredLabelAliases(label) {
   return [...new Set([cleaned, ...(group || [])].filter(Boolean))];
 }
 
-function requiredLabelsFromError(message) {
+export function requiredLabelsFromError(message) {
   const labels = [];
-  for (const match of String(message || '').matchAll(/(?:^|[；;：:])\s*([^；;：:]{1,48}?)(?:必填项)?不能为空/gi)) {
+  for (const match of String(message || '').matchAll(/(?:^|[；;，,\s])\s*([^；;，,：:\s]{1,48}?)(?:必填项)?不能为空/gi)) {
     const label = cleanRequiredLabel(match[1]);
     if (label && !/^(?:属性值|商品图片项?|图片|image)$/i.test(label)) labels.push(label);
+  }
+  for (const match of String(message || '').matchAll(/(?:^|[；;\n])\s*([A-Za-z][A-Za-z /_-]{1,60}?)\s+(?:(?:is\s+)?required|(?:cannot|must not)\s+be\s+(?:empty|blank))/gi)) {
+    labels.push(match[1].trim());
   }
   return [...new Set(labels)].slice(0, 12);
 }
@@ -2307,7 +2640,7 @@ async function recoverRequiredAttributes(page, product, labels, onProgress = () 
     .filter((item) => item?.name && item?.value);
   const normalized = (value) => String(value || '').toLowerCase().replace(/[\s_\-/]+/g, ' ').trim();
   const recovered = [];
-  for (const rawLabel of labels) {
+    for (const rawLabel of labels) {
     const aliases = requiredLabelAliases(rawLabel);
     if (!aliases.length) continue;
     const field = await fieldByAnyLabel(page, aliases);
@@ -2315,13 +2648,10 @@ async function recoverRequiredAttributes(page, product, labels, onProgress = () 
     onProgress(`补填必填属性：${aliases[0]}`);
     const wanted = new Set(aliases.map(normalized));
     let value = items.find((item) => wanted.has(normalized(item.name)))?.value || '';
-    if (!value && (wanted.has('产地') || wanted.has('place of origin'))) value = product.origin || 'China';
-    if (!value && (wanted.has('品牌名称') || wanted.has('brand name'))) value = product.brand || '';
-    if (!value && (wanted.has('型号') || wanted.has('model number'))) value = product.model || '';
-    if (!value && (wanted.has('类型') || wanted.has('product type'))) value = product.productType || '';
+    if (!value) value = inferRequiredAttributeValue(product, ...aliases);
 
     let filled = false;
-    for (const candidate of [...new Set([value, 'Other', '其他', 'N/A'].filter(Boolean))]) {
+    for (const candidate of [value].filter(Boolean)) {
       if (await fillChoice(page, field, candidate).catch(() => false)) {
         filled = true;
         break;
@@ -2369,6 +2699,7 @@ async function ensureSpecControlChecked(page, resolveControl) {
 }
 
 export async function enableSpecImageUpload(page, product, colorGroup, downloadImages) {
+  const colorId = await colorSaleAttributeId(page);
   const colorValues = [...new Set(colorGroup?.options || [])].map((value) => englishSpecText(value)).filter(Boolean);
   const imageUrl = colorValues.map((value) => colorGroup?.optionImages?.[value] || colorGroup?.optionImages?.[colorGroup.options?.find((item) => englishSpecText(item) === value)]).find(Boolean);
   if (!imageUrl) return false;
@@ -2376,7 +2707,7 @@ export async function enableSpecImageUpload(page, product, colorGroup, downloadI
   // Commit through the specification selector's own form-model callback.
   // Mutating the child row directly creates a visually populated value that
   // Alibaba rejects because saleAttributesItems still omits the specification.
-  if (!await ensureSaleAttributeSelected(page, '191288010')) return false;
+  if (!await ensureSaleAttributeSelected(page, colorId)) return false;
 
   // A populated color input is already a committed specification in the
   // current editor. The separate "+ 添加" control creates another blank row.
@@ -2440,7 +2771,7 @@ export async function enableSpecImageUpload(page, product, colorGroup, downloadI
     '.custom-upload-image.uploaded .value-preview img[src]'
   ].join(', '));
   if (await uploadedPreview().count().catch(() => 0)) {
-    return ensureSaleAttributeSelected(page, '191288010');
+    return ensureSaleAttributeSelected(page, colorId);
   }
 
   const uploadBox = item.locator('.custom-upload-image, [class*="upload-image"], [class*="upload-trigger"]').first();
@@ -2547,7 +2878,7 @@ export async function enableSpecImageUpload(page, product, colorGroup, downloadI
   // The uploader rerenders the color row. Wait for the enclosing form model
   // to settle and recommit the exact sale attribute if that rerender briefly
   // removed it instead of turning a successful upload into a false failure.
-  return ensureSaleAttributeSelected(page, '191288010');
+  return ensureSaleAttributeSelected(page, colorId);
 }
 
 async function visibleSaleSpecRow(page, attributeId) {
@@ -3249,6 +3580,7 @@ export class SellerPublisher {
   }
 
   async readSourceProduct(page, base, retry = 0) {
+    page.setDefaultTimeout(5000);
     await page.setExtraHTTPHeaders(SOURCE_LANGUAGE_HEADERS);
     await page.goto(base.sourceUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
@@ -3282,13 +3614,20 @@ export class SellerPublisher {
       .find((text) => /(?:window\.)?detailData\s*=\s*\{/.test(text)) || '').catch(() => '');
     const structuredSource = extractAlibabaSourceData(parseAlibabaDetailDataScript(detailDataScript));
     let detailFrame = page.frames().find((frame) => /descIframe\.html/i.test(frame.url()));
+    if (detailFrame) {
+      await detailFrame.waitForFunction(() => {
+        const root = document.querySelector('#detail_decorate_root') || document.body;
+        return [...(root?.querySelectorAll('img') || [])]
+          .some((image) => /\/kf\//i.test(image.currentSrc || image.src || image.getAttribute('data-src') || ''));
+      }, null, { timeout: 8000 }).catch(() => {});
+    }
     // Alibaba serves the rich-text description through different iframe URLs
     // depending on the product template. If the canonical descIframe is not
     // present, inspect loaded child frames and choose the one containing real
     // product images/content instead of treating the detail as empty.
     if (!detailFrame) {
       for (const frame of page.frames()) {
-        if (frame === page.mainFrame() || /login|passport|captcha|photobank|videobank/i.test(frame.url())) continue;
+        if (frame === page.mainFrame() || /login|passport|captcha|photobank|videobank|message|onetalk/i.test(frame.url())) continue;
         const candidate = await frame.evaluate(() => {
           const root = document.body || document.documentElement;
           const html = root?.innerHTML || '';
@@ -3304,14 +3643,15 @@ export class SellerPublisher {
         try { return new URL(String(value || '').startsWith('//') ? `https:${value}` : value, location.href).href; }
         catch { return ''; }
       };
-      const root = document.body || document.documentElement;
+      const root = (document.querySelector('#detail_decorate_root') || document.body || document.documentElement).cloneNode(true);
+      root.querySelectorAll('script, style, link, noscript').forEach((node) => node.remove());
       const images = [...root.querySelectorAll('img')].map((image) => ({
         src: absolute(image.currentSrc || image.src || image.getAttribute('data-src') || image.getAttribute('data-original')),
         alt: clean(image.alt || '')
       })).filter((image) => image.src && /\/kf\//i.test(image.src));
       return {
         html: root?.innerHTML || '',
-        text: clean(root?.innerText || ''),
+        text: clean(root?.textContent || ''),
         images
       };
     }).catch(() => null) : null;
@@ -3634,7 +3974,7 @@ export class SellerPublisher {
     const downloadOne = async (url, index) => {
       try {
         const safeId = String(product.sourceId || product.id || 'product').replace(/[^A-Za-z0-9]/g, '').slice(-16);
-        const safePrefix = String(prefix || 'image').replace(/[^A-Za-z0-9]/g, '');
+        const safePrefix = `${String(prefix || 'image').replace(/[^A-Za-z0-9]/g, '')}-${crypto.createHash('sha256').update(url).digest('hex').slice(0, 16)}`;
         const cached = ['jpg', 'png'].map((extension) => path.join(this.imageDir, `${safeId}${safePrefix}${index}.${extension}`))
           .find((candidate) => {
             try { return fs.statSync(candidate).size > 1024; } catch { return false; }
@@ -3948,14 +4288,38 @@ export class SellerPublisher {
   }
 
   async fillProductFields(page, product, onProgress = () => {}) {
-    const categoryPath = sanitizeCategoryPath(product.sourceCategoryPath || product.categoryPath);
+    // References and manual category edits update the working category while
+    // sourceCategory* remains immutable traceability data. Publishing must
+    // therefore use the working category first.
+    const categoryPath = sanitizeCategoryPath(product.categoryPath || product.sourceCategoryPath);
     const productTypeCandidate = [product.productType, ...categoryPath.slice().reverse()].find((value) => value && !isPromotionalText(value));
     const productType = englishSpecText(productTypeCandidate, 'Other');
+    const normalizedName = (value) => String(value || '').trim().toLowerCase();
     const attributeItems = [...(product.attributes || []), ...(product.customAttributes || [])]
-      .filter((item) => item?.name && item?.value);
+      .filter((item) => item?.name && item?.value && normalizedName(item.name) !== normalizedName(item.value));
+    // Some detail pages expose required category values only inside the SKU
+    // matrix (for example compatible model/type). Keep the matrix intact, but
+    // expose its first value to the corresponding required attribute control.
+    const knownAttributeNames = new Set(attributeItems.map((item) => normalizedName(item.name)));
+    const addInferredAttribute = (name, value) => {
+      if (!value || knownAttributeNames.has(normalizedName(name))) return;
+      attributeItems.push({ name, value, source: 'inferred-publish-value' });
+      knownAttributeNames.add(normalizedName(name));
+    };
+    addInferredAttribute('屏幕', inferRequiredAttributeValue(product, '屏幕', '屏幕尺寸', 'screen size', 'screen'));
+    addInferredAttribute('电池容量', inferRequiredAttributeValue(product, '电池容量', 'battery capacity', 'battery'));
+    addInferredAttribute('处理器品牌', inferRequiredAttributeValue(product, '处理器品牌', 'processor brand'));
+    addInferredAttribute('适用型号', inferRequiredAttributeValue(product, '适用型号', 'compatible model'));
+    addInferredAttribute('类型', inferRequiredAttributeValue(product, '类型', 'product type'));
+    for (const group of product.variantGroups || []) {
+      const name = String(group?.name || '').trim();
+      const value = Array.isArray(group?.options) ? group.options.find(Boolean) : '';
+      if (!name || !value || /颜色|colou?r/i.test(name) || knownAttributeNames.has(normalizedName(name))) continue;
+      attributeItems.push({ name, value });
+      knownAttributeNames.add(normalizedName(name));
+    }
     const mappedAttributes = new Set();
     const unmappedAttributes = new Set();
-    const normalizedName = (value) => String(value || '').trim().toLowerCase();
     const sourceItemsByName = (...names) => {
       const wanted = new Set(names.map(normalizedName));
       return attributeItems.filter((item) => wanted.has(normalizedName(item.name)));
@@ -3967,14 +4331,10 @@ export class SellerPublisher {
       }
     };
 
-    const fillRequiredChoice = async (labels, value, fallback = ['Other', '其他', 'N/A']) => {
+    const fillRequiredChoice = async (labels, value, fallback = []) => {
       const field = await fieldByAnyLabel(page, labels);
       if (!field) return false;
       if (value && await fillChoice(page, field, value).catch(() => false)) return true;
-      // Alibaba renders many category attributes as controlled comboboxes. A
-      // source value can be valid text yet absent from this category's legal
-      // option list. For required fields, select the platform's neutral option
-      // rather than leaving the field empty and making the entire listing fail.
       for (const candidate of fallback) {
         if (await fillChoice(page, field, candidate).catch(() => false)) return true;
       }
@@ -3987,13 +4347,14 @@ export class SellerPublisher {
 
     onProgress('初始化类目属性');
     await clearSaleAttributeSelections(page);
+    onProgress('填写产品类型');
 
     const productTypeField = await fieldByAnyLabel(page, ['产品类型', '类型', 'Product Type', 'Type']);
     let productTypeFilled = false;
+    const explicitType = attributeValue(product, '产品类型', '类型', 'product type', 'type');
     const productTypeCandidates = [...new Set([
-      productType,
-      productType.replace(/ies$/i, 'y').replace(/s$/i, ''),
-      'Other'
+      explicitType || productType,
+      (explicitType || productType).replace(/ies$/i, 'y').replace(/s$/i, '')
     ].filter(Boolean))];
     for (const candidate of productTypeCandidates) {
       if (await fillChoice(page, productTypeField, candidate)) {
@@ -4008,12 +4369,13 @@ export class SellerPublisher {
     const originFilled = await fillChoice(page, await fieldByAnyLabel(page, ['产地', 'Place of Origin']), originValue);
     markSourceAttributes(['产地', 'place of origin'], originFilled);
 
-    const modelValue = product.model || attributeValue(product, '型号', 'Model Number');
+    onProgress('填写型号和品牌');
+    const modelValue = product.model || attributeValue(product, '型号', 'Model Number') || 'General';
     const modelFilled = await fillFirst(page, ['input[name="p-3"]'], modelValue)
       || await fillChoice(page, await fieldByAnyLabel(page, ['型号', 'Model Number']), modelValue);
     markSourceAttributes(['型号', 'model', 'model number'], modelFilled);
 
-    const brandValue = product.brand || attributeValue(product, '品牌名称', 'Brand Name');
+    const brandValue = product.brand || attributeValue(product, '品牌名称', 'Brand Name') || 'Other';
     const brandFilled = await fillFirst(page, ['input[name="p-2"]'], brandValue)
       || await fillChoice(page, await fieldByAnyLabel(page, ['品牌名称', 'Brand Name']), brandValue);
     markSourceAttributes(['品牌名称', 'brand', 'brand name'], brandFilled);
@@ -4034,6 +4396,7 @@ export class SellerPublisher {
     const portFilled = await fillRequiredChoice(['端口', '接口', 'Port'], portValue);
     markSourceAttributes(['端口', '接口', 'Port', 'port'], portFilled);
 
+    onProgress('填写材质');
     const materialValue = attributeValue(product, '材料', '材质', 'Material');
     const materialFilled = await fillFirst(page, ['input[name="p-390873113"]'], materialValue)
       || await fillChoice(page, await fieldByAnyLabel(page, ['材料', '材质', 'Material']), materialValue);
@@ -4044,7 +4407,7 @@ export class SellerPublisher {
       if (reserved.test(String(item.name).trim())) continue;
       onProgress(`填写类目属性 ${index + 1}/${attributeItems.length}：${String(item.name).trim()}`);
       const aliases = SOURCE_ATTRIBUTE_LABEL_ALIASES.get(normalizedName(item.name)) || [];
-      const labels = [String(item.name).trim(), englishAttributeName(item.name, index), ...aliases];
+      const labels = [String(item.name).trim(), englishAttributeName(item.name, index), ...aliases, ...requiredLabelAliases(item.name)];
       const field = await fieldByAnyLabel(page, [...new Set(labels)]);
       if (!field) { unmappedAttributes.add(item.name); continue; }
       const inputType = String(await field.getAttribute('type').catch(() => '')).toLowerCase();
@@ -4057,13 +4420,14 @@ export class SellerPublisher {
     onProgress('填写颜色和商品规格');
     const colorGroup = (product.variantGroups || []).find((group) => /颜色|colou?r/i.test(group.name));
     const colorValues = colorGroup?.options?.length ? colorGroup.options : [];
-    const targetSupportsColor = await saleAttributeIsAvailable(page, '191288010');
+    const colorId = await colorSaleAttributeId(page);
+    const targetSupportsColor = await saleAttributeIsAvailable(page, colorId);
     const useColorSaleSpec = shouldUseColorSaleSpecification(colorGroup, targetSupportsColor);
     const sourceHasSpecImage = useColorSaleSpec && Boolean(
       colorGroup?.options?.some((value) => colorGroup.optionImages?.[value])
     );
-    const colorIsRequired = colorValues.length > 1;
-    if (useColorSaleSpec && !await ensureSaleAttributeSelected(page, '191288010')) {
+    const colorIsRequired = colorValues.length > 0;
+    if (useColorSaleSpec && !await ensureSaleAttributeSelected(page, colorId)) {
       if (colorIsRequired) throw new Error('国际站商品规格区的颜色规格未能启用');
     }
     const colorSpecRow = useColorSaleSpec ? await visibleColorSpecRow(page) : null;
@@ -4172,16 +4536,19 @@ export class SellerPublisher {
         minQuantity: numericValue(tier.minQuantity)
       }))
       .filter((tier) => tier.price > 0 && tier.minQuantity > 0);
+    if (!tiers.length) throw new Error('缺少有效的价格和起订量');
     let priceInputs = page.locator('[role="input-price"]:visible');
     let quantityInputs = page.locator('[role="input-quantity"]:visible');
 
     while (Math.min(await priceInputs.count().catch(() => 0), await quantityInputs.count().catch(() => 0)) < tiers.length) {
+      const previousCount = await priceInputs.count();
       const add = page.getByText(/新增价格区间|添加价格区间|Add price range/i).last();
       if (!await add.isVisible().catch(() => false)) break;
       await add.click({ force: true });
       await page.waitForTimeout(350);
       priceInputs = page.locator('[role="input-price"]:visible');
       quantityInputs = page.locator('[role="input-quantity"]:visible');
+      if (await priceInputs.count() <= previousCount) break;
     }
 
     const rowCount = Math.min(
@@ -4210,9 +4577,6 @@ export class SellerPublisher {
     const rows = page.locator('tr[role="row"]:has([role="input-quantity"]):has([role="input-price"])');
     for (let index = (await rows.count().catch(() => 0)) - 1; index >= tiers.length; index -= 1) {
       const row = rows.nth(index);
-      const quantity = String(await row.locator('[role="input-quantity"]').inputValue().catch(() => '')).trim();
-      const price = String(await row.locator('[role="input-price"]').inputValue().catch(() => '')).trim();
-      if (quantity || price) continue;
       const remove = row.locator('[role="remove"], button').last();
       if (await remove.isVisible().catch(() => false) && !await remove.isDisabled().catch(() => true)) {
         await remove.click({ force: true }).catch(() => {});
@@ -4757,6 +5121,7 @@ export class SellerPublisher {
       try { onStage(stage); } catch {}
     };
     reportStage('检查商品资料');
+    product = preparePublishProduct(product);
     if (!publishPageUrl) throw new Error('尚未绑定阿里巴巴国际站商品发布页面');
     if (!isProductPostingUrl(publishPageUrl)) throw new Error('绑定地址不是阿里巴巴国际站商品发布页');
     const mismatch = categoryMismatchMessage(product, publishCategory);
@@ -4765,6 +5130,7 @@ export class SellerPublisher {
     if (validationErrors.length) throw new Error(`商品资料未通过上架检查：${validationErrors.join('；')}`);
     reportStage('连接国际站发布浏览器');
     const page = await this.currentSellerPage(publishPageUrl);
+    page.setDefaultTimeout(5000);
     const stopKey = String(jobId || '');
     if (stopKey) this.publishStops.set(stopKey, () => { page.close().catch(() => {}); });
     // Normal publishing is headless and must not appear in the Windows taskbar.
@@ -4775,7 +5141,7 @@ export class SellerPublisher {
     this.visible = false;
     const publishNavigation = { timeout: 30000, attempts: 2 };
     reportStage('打开目标类目发布页');
-    if (page.url() !== publishPageUrl) await gotoWithRetry(page, publishPageUrl, publishNavigation);
+    await gotoWithRetry(page, publishPageUrl, publishNavigation);
     await settlePage(page);
     await waitForHumanVerification(page, { timeout: 300000 });
     // Electron owns the authenticated browser partition. Refresh its exported
@@ -4889,16 +5255,17 @@ export class SellerPublisher {
     // exact source value, and its uploaded source image must all be present.
     reportStage('复核颜色、型号和规格图片');
     const finalColorGroup = (product.variantGroups || []).find((group) => /颜色|colou?r/i.test(group.name));
+    const finalColorId = await colorSaleAttributeId(page);
     const finalColorValues = [...new Set(finalColorGroup?.options || [])].map((value) => englishSpecText(value)).filter(Boolean);
     const finalUsesColorSaleSpec = shouldUseColorSaleSpecification(
       finalColorGroup,
-      await saleAttributeIsAvailable(page, '191288010')
+      await saleAttributeIsAvailable(page, finalColorId)
     );
     const finalHasColorImage = finalUsesColorSaleSpec && finalColorValues.some((value) => Boolean(
       finalColorGroup?.optionImages?.[value]
       || finalColorGroup?.optionImages?.[finalColorGroup.options?.find((item) => englishSpecText(item) === value)]
     ));
-    const finalColorRequired = finalColorValues.length > 1;
+    const finalColorRequired = finalColorValues.length > 0;
     if (finalUsesColorSaleSpec && finalHasColorImage && finalColorRequired) {
       const colorFilled = await fillColorSpec(page, finalColorValues);
       const colorImageUploaded = colorFilled && await enableSpecImageUpload(
@@ -4907,7 +5274,7 @@ export class SellerPublisher {
         finalColorGroup,
         (urls, prefix, limit) => this.downloadImageSet(product, urls, prefix, limit)
       );
-      const finalColorSelected = await saleAttributeIsSelected(page, '191288010');
+      const finalColorSelected = await saleAttributeIsSelected(page, finalColorId);
       if (!colorFilled || !finalColorSelected) {
         throw new Error('国际站颜色规格提交前复核失败：来源颜色规格值未保留');
       }
@@ -4940,6 +5307,8 @@ export class SellerPublisher {
     // before the final action so stale weight/volume values cannot survive.
     reportStage('复核物流和必填资料');
     await fillLogisticsFields(page, product.packaging || {});
+    reportStage('复核价格阶梯');
+    await this.fillPriceFields(page, product);
 
     // A specification or uploader rerender may replace the image component.
     // Reconcile against the real preview state immediately before submission.
@@ -4998,6 +5367,16 @@ export class SellerPublisher {
     // attribute without any value. Alibaba reports only "属性值不能为空" for
     // that state, so remove those empty optional selections before submit.
     await clearEmptySaleAttributeSelections(page);
+    if (mode === 'submit') {
+      const earlyFeedback = (await visibleFeedback(page)).join(' ');
+      if (isRequiredAttributeError(earlyFeedback)) {
+        const earlyLabels = [...new Set([
+          ...await visibleEmptyAttributeLabels(page),
+          ...requiredLabelsFromError(earlyFeedback)
+        ])];
+        await recoverRequiredAttributes(page, product, earlyLabels, reportStage);
+      }
+    }
 
     const agreementText = page.getByText(/请再次检查并确认提交的信息真实、合法和有效/).last();
     if (await agreementText.isVisible().catch(() => false)) {
@@ -5024,11 +5403,31 @@ export class SellerPublisher {
     reportStage(mode === 'submit' ? '提交国际站并等待结果' : '保存国际站草稿');
     const originalUrl = page.url();
     let verification;
+    let logisticsWarning = '';
     try {
       verification = await waitForActionResult(page, action, mode, originalUrl);
     } catch (error) {
       const actionError = String(error?.message || '');
-      if (/商品图片|请上传.*图片|image.*required/i.test(actionError)) {
+      if (/页面仍有弹窗遮罩|overlay|intercepts pointer events/i.test(actionError)) {
+        await dismissPostingOverlays(page);
+        let retryAction = null;
+        for (const text of buttonTexts) {
+          const candidate = page.getByRole('button', { name: text, exact: false }).last();
+          if (await candidate.isVisible().catch(() => false) && !await candidate.isDisabled().catch(() => false)) { retryAction = candidate; break; }
+        }
+        if (!retryAction) throw error;
+        verification = await waitForActionResult(page, retryAction, mode, originalUrl);
+      } else if (/商品规格项|商品图片项|规格图片|specification.*image|spec.*image|商品图片.*不能为空/i.test(actionError)) {
+        await dismissPostingOverlays(page);
+        await fillVariantSpecs(page, product);
+        let retryAction = null;
+        for (const text of buttonTexts) {
+          const candidate = page.getByRole('button', { name: text, exact: false }).last();
+          if (await candidate.isVisible().catch(() => false) && !await candidate.isDisabled().catch(() => false)) { retryAction = candidate; break; }
+        }
+        if (!retryAction) throw error;
+        verification = await waitForActionResult(page, retryAction, mode, originalUrl);
+      } else if (/商品图片|请上传.*图片|image.*required/i.test(actionError)) {
         let recovered = false;
         let retryError = error;
         for (let retry = 0; retry < 2; retry += 1) {
@@ -5051,7 +5450,7 @@ export class SellerPublisher {
           }
         }
         if (!recovered) throw retryError;
-      } else if (/属性值不能为空|attribute value.*(?:empty|required)/i.test(actionError)) {
+      } else if (isRequiredAttributeError(actionError)) {
         const emptyLabels = [...new Set([
           ...await visibleEmptyAttributeLabels(page),
           ...requiredLabelsFromError(actionError)
@@ -5059,7 +5458,8 @@ export class SellerPublisher {
         const recovered = await recoverRequiredAttributes(page, product, emptyLabels, reportStage);
         const cleared = await clearEmptySaleAttributeSelections(page);
         if (!cleared.length && !recovered.length) {
-          throw new Error(`${actionError}${emptyLabels.length ? `（空字段：${emptyLabels.join('、')}）` : '；国际站未返回具体属性名称，请在当前发布表单查看红色标记字段'}`);
+          error.requiredFields = emptyLabels;
+          throw error;
         }
         let retryAction = null;
         for (const text of buttonTexts) {
@@ -5074,7 +5474,9 @@ export class SellerPublisher {
       // the whole card, then retry the same action instead of reporting a
       // product-level failure to the user.
       if (!/物流属性|重量、体积|packaging|shipping/i.test(actionError)) throw error;
+      reportStage('清除平台允许留空的整组物流信息后重试');
       await forceClearLogisticsSection(page);
+      logisticsWarning = '平台要求物流信息完整或全部留空，本次已清空可选物流字段；本地包装资料保留';
       let fallbackAction = null;
       for (const text of buttonTexts) {
         const candidate = page.getByRole('button', { name: text, exact: false }).last();
@@ -5090,9 +5492,11 @@ export class SellerPublisher {
       url: page.url(),
       verifiedBy: verification.verifiedBy,
       feedback: verification.feedback,
+      requiredAttributes: verification.requiredAttributes || [],
       fieldMapping,
       warnings: [
         videoWarning,
+        logisticsWarning,
         ...(fieldMapping.warnings || []),
         fieldMapping.unmappedAttributes.length ? `${fieldMapping.unmappedAttributes.length} 个来源属性未在当前类目表单中找到对应字段` : ''
       ].filter(Boolean)
