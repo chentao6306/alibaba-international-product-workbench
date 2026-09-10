@@ -1068,9 +1068,9 @@ app.get('/api/storage', (_request, response) => {
   });
 });
 
-app.get('/api/announcements', async (_request, response) => {
+app.get('/api/announcements', async (request, response) => {
   inbox.account = process.env.KUA_YIPU_ACCOUNT || 'local';
-  response.json(await inbox.list());
+  response.set('Cache-Control', 'no-store').json(await inbox.list({ refresh: request.query.refresh === '1' }));
 });
 app.post('/api/announcements/read', (request, response) => {
   inbox.account = process.env.KUA_YIPU_ACCOUNT || 'local';

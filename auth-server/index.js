@@ -3,7 +3,7 @@ import express from 'express';
 import pg from 'pg';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { clientAllowed, licenseState, pagination, announcementInput } from './policy.js';
+import { clientAllowed, licenseState, pagination, announcementInput, licenseFilters } from './policy.js';
 
 const app = express();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -46,7 +46,7 @@ async function transaction(work) {
 }
 const event = (client, licenseId, action, actor, metadata = {}) => client.query('INSERT INTO license_events (id,license_id,action,actor,metadata) VALUES ($1,$2,$3,$4,$5)', [id(), licenseId, action, actor, JSON.stringify(metadata)]);
 
-app.get('/health', (_request, response) => response.json({ ok: true, service: 'kua-yipu-auth', version: '1.4.0' }));
+app.get('/health', (_request, response) => response.json({ ok: true, service: 'kua-yipu-auth', version: '1.4.2' }));
 app.get('/', (_request, response) => response.sendFile(path.join(__dirname, 'admin.html')));
 for (const file of ['admin.js', 'admin.css']) app.get(`/${file}`, (_request, response) => response.sendFile(path.join(__dirname, file)));
 app.post('/api/admin/login', async (request, response) => {
@@ -62,7 +62,7 @@ app.post('/api/client/login', async (request, response) => {
   const account = normalize(request.body?.username); const deviceId = normalize(request.body?.deviceId);
   if (!account || !deviceId || account.length > 200 || deviceId.length > 200) throw fail('缺少或无效的 Alibaba 账号或设备标识');
   const result = await transaction(async (client) => {
-    const license = (await client.query('SELECT * FROM licenses WHERE alibaba_account=$1 FOR UPDATE', [account])).rows[0];
+    const license = (await client.query('SELECT * FROM licenses WHERE alibaba_account=$1 AND deleted_at IS NULL FOR UPDATE', [account])).rows[0];
     if (!license || licenseState(license) !== 'active') throw fail('该 Alibaba 账号没有有效的软件授权', 403);
     if (!license.allow_multi_device) await client.query('UPDATE licenses SET active_device_id=$2 WHERE id=$1', [license.id, deviceId]);
     await client.query(`INSERT INTO client_logins (id,alibaba_account,device_id,device_name,app_version,ip_address,last_seen_at) VALUES ($1,$2,$3,$4,$5,$6,now()) ON CONFLICT (alibaba_account,device_id) DO UPDATE SET device_name=EXCLUDED.device_name,app_version=EXCLUDED.app_version,ip_address=EXCLUDED.ip_address,last_seen_at=now()`, [id(), account, deviceId, normalize(request.body?.deviceName).slice(0, 200), normalize(request.body?.appVersion).slice(0, 50), request.ip]);
@@ -88,12 +88,16 @@ app.post('/api/client/heartbeat', async (request, response) => {
 
 app.get('/api/admin/licenses', requireAdmin, async (request, response) => {
   const { page, pageSize, offset } = pagination(request.query);
-  const status = String(request.query.status || 'all');
-  const search = String(request.query.search || '').trim().slice(0, 160);
-  const stateSql = "CASE WHEN l.status='active' AND l.expires_at<=now() THEN 'expired' ELSE l.status END";
-  const where = `WHERE ($1='all' OR ${stateSql}=$1) AND ($2='' OR strpos(lower(l.alibaba_account),lower($2))>0 OR strpos(lower(l.note),lower($2))>0)`;
-  const total = (await pool.query(`SELECT COUNT(*)::int count FROM licenses l ${where}`, [status, search])).rows[0].count;
-  const result = await pool.query(`SELECT l.*, ${stateSql} AS display_status, COALESCE(c.device_count,0)::int AS device_count, c.last_seen_at FROM licenses l LEFT JOIN (SELECT alibaba_account,COUNT(*) device_count,MAX(last_seen_at) last_seen_at FROM client_logins GROUP BY alibaba_account) c ON c.alibaba_account=l.alibaba_account ${where} ORDER BY l.created_at DESC,l.id LIMIT $3 OFFSET $4`, [status, search, pageSize, offset]);
+  const filters = licenseFilters(request.query);
+  const stateSql = "CASE WHEN l.deleted_at IS NOT NULL THEN 'deleted' WHEN l.status='active' AND l.expires_at<=now() THEN 'expired' ELSE l.status END";
+  const from = `FROM licenses l LEFT JOIN (SELECT alibaba_account,COUNT(*) device_count,MAX(last_seen_at) last_seen_at FROM client_logins GROUP BY alibaba_account) c ON c.alibaba_account=l.alibaba_account AND l.deleted_at IS NULL`;
+  const where = `WHERE (CASE WHEN cardinality($1::text[])=0 THEN l.deleted_at IS NULL ELSE ${stateSql}=ANY($1::text[]) END)
+    AND ($2='' OR strpos(lower(l.alibaba_account),lower($2))>0 OR strpos(lower(l.note),lower($2))>0)
+    AND ($3='all' OR ($3='multiple' AND l.allow_multi_device) OR ($3='single' AND NOT l.allow_multi_device))
+    AND ($4='all' OR ($4='never' AND c.last_seen_at IS NULL) OR ($4='24h' AND c.last_seen_at>now()-interval '24 hours') OR ($4='30d' AND c.last_seen_at>now()-interval '30 days'))`;
+  const values = [filters.statuses, filters.search, filters.devices, filters.activity];
+  const total = (await pool.query(`SELECT COUNT(*)::int count ${from} ${where}`, values)).rows[0].count;
+  const result = await pool.query(`SELECT l.*, ${stateSql} AS display_status, COALESCE(c.device_count,0)::int AS device_count, c.last_seen_at ${from} ${where} ORDER BY l.created_at DESC,l.id LIMIT $5 OFFSET $6`, [...values, pageSize, offset]);
   response.json({ items: result.rows, total, page, pageSize });
 });
 app.get('/api/admin/licenses/:id/history', requireAdmin, async (request, response) => {
@@ -105,20 +109,21 @@ app.post('/api/admin/licenses', requireAdmin, async (request, response) => {
   if (!account || account.length > 200) throw fail('账号无效');
   response.json(await transaction(async (client) => {
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [account]);
-    const existing = (await client.query('SELECT * FROM licenses WHERE alibaba_account=$1 FOR UPDATE', [account])).rows[0];
+    const existing = (await client.query('SELECT * FROM licenses WHERE alibaba_account=$1 AND deleted_at IS NULL FOR UPDATE', [account])).rows[0];
     const base = existing && licenseState(existing) === 'active' ? new Date(existing.expires_at).getTime() : Date.now();
     const expires = new Date(base + days * 86400000);
-    const result = await client.query(`INSERT INTO licenses (id,alibaba_account,status,starts_at,expires_at,note) VALUES ($1,$2,'active',now(),$3,$4) ON CONFLICT (alibaba_account) DO UPDATE SET status='active',expires_at=EXCLUDED.expires_at,note=EXCLUDED.note,updated_at=now() RETURNING *`, [existing?.id || id(), account, expires, normalize(request.body?.note).slice(0, 2000)]);
+    const result = await client.query(`INSERT INTO licenses (id,alibaba_account,status,starts_at,expires_at,note) VALUES ($1,$2,'active',now(),$3,$4) ON CONFLICT (alibaba_account) WHERE deleted_at IS NULL DO UPDATE SET status='active',expires_at=EXCLUDED.expires_at,note=EXCLUDED.note,updated_at=now() RETURNING *`, [existing?.id || id(), account, expires, normalize(request.body?.note).slice(0, 2000)]);
     await event(client, result.rows[0].id, existing ? 'extend' : 'activate', request.admin.username, { days });
     return result.rows[0];
   }));
 });
 app.patch('/api/admin/licenses/:id', requireAdmin, async (request, response) => {
   const action = normalize(request.body?.action);
-  if (!['pause', 'resume', 'revoke', 'extend', 'devices'].includes(action)) throw fail('不支持的授权操作');
+  if (!['pause', 'resume', 'revoke', 'extend', 'reduce', 'devices'].includes(action)) throw fail('不支持的授权操作');
   response.json(await transaction(async (client) => {
     const existing = (await client.query('SELECT * FROM licenses WHERE id=$1 FOR UPDATE', [request.params.id])).rows[0];
     if (!existing) throw fail('授权账号不存在', 404);
+    if (existing.deleted_at) throw fail('账号已删除，不能修改原授权', 409);
     const values = [existing.id]; let query;
     if (action === 'devices') {
       if (typeof request.body.allowMultiDevice !== 'boolean') throw fail('多端登录开关无效');
@@ -127,20 +132,34 @@ app.patch('/api/admin/licenses/:id', requireAdmin, async (request, response) => 
     } else if (action === 'extend') {
       values.push(daysValue(request.body.days));
       query = `UPDATE licenses SET status='active',expires_at=GREATEST(expires_at,now())+($2*interval '1 day'),updated_at=now() WHERE id=$1 RETURNING *`;
+    } else if (action === 'reduce') {
+      values.push(daysValue(request.body.days));
+      query = `UPDATE licenses SET expires_at=expires_at-($2*interval '1 day'),updated_at=now() WHERE id=$1 RETURNING *`;
     } else {
       if (action === 'resume' && new Date(existing.expires_at).getTime() <= Date.now()) throw fail('授权已到期，请先延长有效期', 409);
       query = 'UPDATE licenses SET status=$2,updated_at=now() WHERE id=$1 RETURNING *';
       values.push({ pause: 'paused', resume: 'active', revoke: 'revoked' }[action]);
     }
     const updated = (await client.query(query, values)).rows[0];
-    await event(client, existing.id, action, request.admin.username, { days: request.body.days || null, allowMultiDevice: updated.allow_multi_device });
+    await event(client, existing.id, action, request.admin.username, { days: request.body.days || null, allowMultiDevice: updated.allow_multi_device, previousExpiresAt: existing.expires_at, expiresAt: updated.expires_at });
     return updated;
+  }));
+});
+app.delete('/api/admin/licenses/:id', requireAdmin, async (request, response) => {
+  response.json(await transaction(async (client) => {
+    const existing = (await client.query('SELECT * FROM licenses WHERE id=$1 FOR UPDATE', [request.params.id])).rows[0];
+    if (!existing) throw fail('授权账号不存在', 404);
+    if (existing.deleted_at) return { ok: true };
+    await client.query("UPDATE licenses SET status='revoked',deleted_at=now(),active_device_id=NULL,updated_at=now() WHERE id=$1", [existing.id]);
+    await client.query('DELETE FROM client_logins WHERE alibaba_account=$1', [existing.alibaba_account]);
+    await event(client, existing.id, 'delete', request.admin.username, { account: existing.alibaba_account });
+    return { ok: true };
   }));
 });
 app.get('/api/admin/stats', requireAdmin, async (_request, response) => {
   const results = await Promise.all([
-    pool.query("SELECT COUNT(*)::int total,COUNT(*) FILTER (WHERE status='active' AND expires_at>now())::int active,COUNT(*) FILTER (WHERE status='active' AND expires_at<=now())::int expired,COUNT(*) FILTER (WHERE status='paused')::int paused,COUNT(*) FILTER (WHERE status='revoked')::int revoked FROM licenses"),
-    pool.query("SELECT COUNT(DISTINCT alibaba_account) FILTER (WHERE last_seen_at>now()-interval '24 hours')::int active24,COUNT(DISTINCT alibaba_account) FILTER (WHERE last_seen_at>now()-interval '30 days')::int active30 FROM client_logins"),
+    pool.query("SELECT COUNT(*) FILTER (WHERE deleted_at IS NULL)::int total,COUNT(*) FILTER (WHERE deleted_at IS NOT NULL)::int deleted,COUNT(*) FILTER (WHERE deleted_at IS NULL AND status='active' AND expires_at>now())::int active,COUNT(*) FILTER (WHERE deleted_at IS NULL AND status='active' AND expires_at<=now())::int expired,COUNT(*) FILTER (WHERE deleted_at IS NULL AND status='paused')::int paused,COUNT(*) FILTER (WHERE deleted_at IS NULL AND status='revoked')::int revoked FROM licenses"),
+    pool.query("SELECT COUNT(DISTINCT c.alibaba_account) FILTER (WHERE c.last_seen_at>now()-interval '24 hours')::int active24,COUNT(DISTINCT c.alibaba_account) FILTER (WHERE c.last_seen_at>now()-interval '30 days')::int active30 FROM client_logins c JOIN licenses l ON l.alibaba_account=c.alibaba_account AND l.deleted_at IS NULL"),
     pool.query("SELECT COUNT(*)::int count FROM license_events WHERE action='client-login'")
   ]);
   response.json({ ...results[0].rows[0], paidUsers: results[0].rows[0].active, activeUsers24h: results[1].rows[0].active24, activeUsers30d: results[1].rows[0].active30, loginCount: results[2].rows[0].count });
@@ -168,11 +187,15 @@ app.patch('/api/admin/announcements/:id', requireAdmin, async (request, response
   if (!result.rows[0]) throw fail('公告不存在', 404);
   response.json(result.rows[0]);
 });
+app.delete('/api/admin/announcements/:id', requireAdmin, async (request, response) => {
+  await pool.query('DELETE FROM announcements WHERE id=$1', [request.params.id]);
+  response.json({ ok: true });
+});
 app.use((error, request, response, _next) => {
   const status = error.status || (error.code === '22P02' ? 400 : 500);
   if (status === 500) console.error('Authorization request failed:', error.code || error.name);
   const message = status === 500 ? '授权服务内部错误' : error.code === '22P02' ? '请求标识无效' : error.message;
   response.status(status).json({ error: message, ...(request.path.startsWith('/api/client/') ? { authorized: false, reason: message } : {}) });
 });
-const listener = app.listen(port, process.env.BIND_HOST || '0.0.0.0', () => console.log(`Kua Yipu authorization service listening on ${port}`));
+const listener = app.listen(port, process.env.BIND_HOST || '0.0.0.0', () => console.log(`Kua Yipu authorization service: http://127.0.0.1:${listener.address().port}`));
 process.on('SIGTERM', () => listener.close(() => pool.end().finally(() => process.exit(0))));

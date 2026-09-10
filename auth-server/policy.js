@@ -1,6 +1,27 @@
 export function licenseState(license, time = Date.now()) {
+  if (license.deleted_at) return 'deleted';
   if (license.status !== 'active') return license.status;
   return new Date(license.expires_at).getTime() > time ? 'active' : 'expired';
+}
+
+export function licenseFilters(query = {}) {
+  const statuses = [...new Set(String(query.status || 'all').split(',').filter((value) => value !== 'all' && value))];
+  const activity = String(query.activity || 'all');
+  const devices = String(query.devices || 'all');
+  if (statuses.some((value) => !['active', 'expired', 'paused', 'revoked', 'deleted'].includes(value))
+    || !['all', '24h', '30d', 'never'].includes(activity) || !['all', 'multiple', 'single'].includes(devices)) {
+    throw Object.assign(new Error('查询条件无效'), { status: 400 });
+  }
+  return { statuses, activity, devices, search: String(query.search || '').trim().slice(0, 160) };
+}
+
+export function matchesLicenseFilters(license, filters, time = Date.now()) {
+  const state = licenseState(license, time);
+  const recent = new Date(license.last_seen_at || 0).getTime();
+  return (filters.statuses.length ? filters.statuses.includes(state) : state !== 'deleted')
+    && [license.alibaba_account, license.note || ''].some((value) => value.toLowerCase().includes(filters.search.toLowerCase()))
+    && (filters.devices === 'all' || (license.allow_multi_device !== false) === (filters.devices === 'multiple'))
+    && (filters.activity === 'all' || (filters.activity === 'never' ? !license.last_seen_at : recent > time - (filters.activity === '24h' ? 1 : 30) * 86400000));
 }
 
 export function clientAllowed(license, deviceId, time = Date.now()) {

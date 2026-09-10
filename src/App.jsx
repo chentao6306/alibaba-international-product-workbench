@@ -929,7 +929,7 @@ export default function App() {
   useEffect(() => {
     const heartbeat = window.kuaYipu?.heartbeat;
     if (!heartbeat) return undefined;
-    const timer = setInterval(() => heartbeat().catch(() => {}), 5 * 60 * 1000);
+    const timer = setInterval(() => heartbeat().catch(() => {}), 60 * 1000);
     return () => clearInterval(timer);
   }, []);
   function notify(text, type = 'success') { setNotice({ text, type }); setTimeout(() => setNotice(null), 4200); }

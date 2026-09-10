@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Bell, ChevronLeft, ChevronRight, RefreshCw, X } from 'lucide-react';
 
 async function request(path, body) {
@@ -12,17 +12,24 @@ export function useAnnouncements() {
   const [items, setItems] = useState([]);
   const [error, setError] = useState('');
   const [popup, setPopup] = useState(null);
-  async function refresh() {
-    try { const next = await request('/api/announcements'); setItems(next); setError(''); }
-    catch (failure) { setError(failure.message); }
-  }
-  useEffect(() => { refresh(); const timer = setInterval(refresh, 60000); return () => clearInterval(timer); }, []);
+  const requestId = useRef(0);
+  const refresh = useCallback(async () => {
+    const serial = ++requestId.current;
+    try { const next = await request('/api/announcements?refresh=1'); if (serial === requestId.current) { setItems(next); setError(''); } }
+    catch (failure) { if (serial === requestId.current) setError(failure.message); }
+  }, []);
+  useEffect(() => {
+    refresh(); const timer = setInterval(refresh, 60000);
+    window.addEventListener('focus', refresh);
+    return () => { clearInterval(timer); window.removeEventListener('focus', refresh); requestId.current += 1; };
+  }, [refresh]);
   useEffect(() => {
     const unread = items.find((item) => item.kind === 'popup' && !item.read);
     setPopup(unread || null);
   }, [items]);
   async function read(item) {
-    await request('/api/announcements/read', { id: item.id, revision: item.revision });
+    try { await request('/api/announcements/read', { id: item.id, revision: item.revision }); }
+    catch (failure) { await refresh(); throw failure; }
     setItems((current) => current.map((entry) => entry.id === item.id && entry.revision === item.revision ? { ...entry, read: true } : entry));
   }
   return { items, error, popup, refresh, read, unread: items.filter((item) => !item.read).length };
@@ -44,6 +51,7 @@ export function AnnouncementsView({ inbox }) {
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState('');
   const [error, setError] = useState('');
+  useEffect(() => { inbox.refresh(); }, [inbox.refresh]);
   const pageCount = Math.max(1, Math.ceil(inbox.items.length / 10));
   const activePage = Math.min(page, pageCount);
   async function open(item) {
