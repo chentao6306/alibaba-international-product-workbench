@@ -33,3 +33,19 @@ CREATE TABLE IF NOT EXISTS client_logins (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE(alibaba_account, device_id)
 );
+
+ALTER TABLE licenses ADD COLUMN IF NOT EXISTS allow_multi_device BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE licenses ADD COLUMN IF NOT EXISTS active_device_id TEXT;
+CREATE TABLE IF NOT EXISTS announcements (
+  id UUID PRIMARY KEY,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('notice','popup')),
+  status TEXT NOT NULL CHECK (status IN ('draft','published','withdrawn')),
+  revision INTEGER NOT NULL DEFAULT 1,
+  author TEXT NOT NULL,
+  published_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS announcements_published ON announcements(status, published_at DESC);

@@ -1,6 +1,8 @@
 import path from 'node:path';
 import { hasExplicitHumanChallenge, hidePage, launchPersistent, revealPage, settlePage, syncAlibabaCookies, waitForHumanVerification } from './browser-runtime.js';
 import { SOURCE_LANGUAGE_HEADERS, withSourceLocale } from './source-locale.js';
+import { parseCollectionUrl, sourcePlatform } from './source-platform.js';
+import { extractMarketplaceProduct, marketplaceDescriptionHtml } from './marketplace-source-data.js';
 
 function absoluteUrl(value, base) {
   if (!value) return '';
@@ -386,6 +388,147 @@ export class ShopCollector {
       }
       return products;
     });
+  }
+
+  async collectLinks(links, onProgress = () => {}, options = {}) {
+    const products = [];
+    const completed = new Set(options.completedKeys || []);
+    for (const [index, link] of links.entries()) {
+      if (options.shouldStop?.()) throw Object.assign(new Error('已暂停采集'), { code: 'COLLECT_PAUSED' });
+      const key = `${link.platform}:${link.sourceId}`;
+      if (completed.has(key)) continue;
+      const base = { sourceId: link.sourceId, sourceUrl: link.url, sourcePlatform: link.platform };
+      let product;
+      let error = '';
+      try {
+        [product] = await this.enrichProducts([base], options);
+        if (!product) throw new Error('来源商品详情为空');
+        products.push(product);
+      } catch (failure) {
+        if (failure.code === 'COLLECT_PAUSED' || options.shouldStop?.()) throw failure;
+        error = failure.message;
+      }
+      if (onProgress({ stage: 'detail', current: index + 1, total: links.length, product, error, key, url: link.url }) === false) {
+        throw Object.assign(new Error('已暂停采集'), { code: 'COLLECT_PAUSED' });
+      }
+      if (Number(options.delaySeconds) > 0) await new Promise((resolve) => setTimeout(resolve, Number(options.delaySeconds) * 1000));
+    }
+    return products;
+  }
+
+  async enrichProducts(products, options = {}) {
+    const result = [];
+    for (const product of products) {
+      if (sourcePlatform(product) === 'alibaba.com') {
+        if (!this.detailReader) throw new Error('国际站详情采集服务不可用');
+        const [enriched] = await this.detailReader([product], () => {}, options);
+        const title = enriched?.title || enriched?.sourceOriginalTitle || enriched?.sourceTitle || '';
+        if (!title || !(enriched.mainImages || enriched.images || []).length) throw new Error(enriched?.collectWarning || '未读取到有效商品标题和主图，请重新采集');
+        result.push({ ...enriched, title, sourceTitle: enriched.sourceTitle || enriched.sourceOriginalTitle || title,
+          categoryPath: enriched.categoryPath?.length ? enriched.categoryPath : enriched.sourceCategoryPath || [],
+          sourcePlatform: 'alibaba.com',
+        });
+      } else {
+        result.push(await this.withPage((page) => this.readMarketplaceDetail(page, product)));
+      }
+    }
+    return result;
+  }
+
+  async collectSearch(link, onProgress = () => {}, options = {}) {
+    const discovered = await this.withPage(async (page) => {
+      const items = new Map();
+      const seenPages = new Set();
+      const start = Math.max(1, Number(options.startPage || 1));
+      const end = Math.max(start, Number(options.endPage || 1));
+      await page.goto(link.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      for (let pageNumber = 1; pageNumber <= end; pageNumber += 1) {
+        if (options.shouldStop?.()) throw Object.assign(new Error('已暂停采集'), { code: 'COLLECT_PAUSED' });
+        await settlePage(page);
+        await waitForHumanVerification(page);
+        await page.locator('a[href*="/product-detail/"]').first().waitFor({ timeout: 20000 }).catch(() => {});
+        let previousCount = 0;
+        for (let scroll = 0; scroll < 8; scroll += 1) {
+          const count = await page.locator('a[href*="/product-detail/"]').count();
+          await page.evaluate(() => window.scrollBy(0, Math.max(700, window.innerHeight)));
+          await page.waitForTimeout(500);
+          if (scroll > 2 && count === previousCount) break;
+          previousCount = count;
+        }
+        const hrefs = await page.locator('a[href*="/product-detail/"]').evaluateAll((nodes) => [...new Set(nodes.map((node) => node.href))]);
+        const pageLinks = hrefs.map((href) => { try { return parseCollectionUrl(href, 'product', 'alibaba.com'); } catch { return null; } }).filter(Boolean);
+        const signature = [...new Set(pageLinks.map((item) => item.sourceId))].sort().join(',');
+        if (!signature) throw new Error('搜索结果未返回商品：链接可能已过期或需要登录，请重新复制完整的以图搜品结果链接');
+        if (seenPages.has(signature)) break;
+        seenPages.add(signature);
+        if (pageNumber >= start) for (const item of pageLinks) items.set(item.sourceId, item);
+        onProgress({ stage: 'listing', page: pageNumber, found: items.size });
+        if (pageNumber >= end || items.size >= Number(options.maxProducts || 1000)) break;
+        const next = page.locator('a[rel="next"], button[aria-label="Next"], .next-pagination-next, .pagination-next').filter({ visible: true }).first();
+        if (!await next.count() || await next.isDisabled().catch(() => false) || await next.getAttribute('aria-disabled') === 'true') break;
+        await next.click();
+        await page.waitForTimeout(1000);
+      }
+      return [...items.values()].slice(0, Math.min(1000, Number(options.maxProducts || 1000)));
+    });
+    if (!discovered.length) throw new Error('指定页码没有返回商品，请检查起始页和结束页');
+    return this.collectLinks(discovered, onProgress, options);
+  }
+
+  async readMarketplaceDetail(page, base) {
+    const platform = sourcePlatform(base);
+    await page.goto(base.sourceUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await settlePage(page);
+    const login = /login|passport|signin/i.test(new URL(page.url()).hostname + new URL(page.url()).pathname);
+    if (login) throw new Error(`${platform === '1688' ? '1688' : '速卖通'}需要登录，请在采集页打开平台登录后重试`);
+    await waitForHumanVerification(page);
+    await page.locator('v-detail-l, #desc-lazyload-container, #product-description, .module-od-product-description, [class*="description--origin"]').first().scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+    await page.waitForTimeout(1000);
+    const globals = await page.evaluate(() => {
+      const result = {};
+      for (const key of ['runParams', '__INIT_DATA', '__INIT_DATA__', '__GLOBAL_DATA', '__GLOBAL_DATA__', 'context']) {
+        try { if (window[key]) result[key] = JSON.parse(JSON.stringify(window[key])); } catch {}
+      }
+      const shadow = document.querySelector('v-detail-l')?.shadowRoot;
+      if (shadow) result.shadowDescription = shadow.innerHTML;
+      return result;
+    });
+    const parsed = extractMarketplaceProduct(await page.content(), platform, base.sourceUrl, globals);
+    if (!parsed.title || !parsed.mainImages.length || (!Number(parsed.price) && !parsed.skus.length)) throw new Error('未读取到完整商品数据（标题、图片或价格），请完成平台登录或验证后重试');
+    if (!parsed.detailImages.length && parsed.descriptionUrl) {
+      const url = new URL(parsed.descriptionUrl);
+      if (url.protocol === 'https:' && (/^(?:itemcdn\.tmall\.com)$/.test(url.hostname) || /(^|\.)(?:1688\.com|alicdn\.com|aliexpress\.com)$/.test(url.hostname))) {
+        const response = await page.request.get(url.href, { timeout: 30000 });
+        if (response.ok()) {
+          const content = marketplaceDescriptionHtml(await response.text());
+          const detail = extractMarketplaceProduct(`<div id="product-description">${content}</div>`, platform, url.href);
+          parsed.descriptionHtml = detail.descriptionHtml;
+          parsed.description = detail.description;
+          parsed.detailImages = detail.detailImages;
+        }
+      }
+    }
+    // Refresh source fields without discarding an explicit target category or USD pricing.
+    return { ...base, ...parsed, sourceId: base.sourceId,
+      ...(base.source?.snapshot && base.title !== base.source.snapshot.title ? { title: base.title } : {}),
+      categoryId: base.categoryId || '', categoryPath: base.categoryPath || [],
+      ...(base.priceConversion ? {
+        price: base.price, currencySymbol: base.currencySymbol, priceTiers: base.priceTiers,
+        skus: base.skus, fobPrice: base.fobPrice, priceMode: base.priceMode, priceConversion: base.priceConversion,
+      } : {}),
+    };
+  }
+
+  async openMarketplace(platform) {
+    if (!['1688', 'aliexpress'].includes(platform)) throw new Error('不支持该平台');
+    await this.resetContext();
+    this.context = await launchPersistent(this.profileDir, { headless: false });
+    this.context.on('close', () => { this.context = null; this.verificationPage = null; this.visible = false; });
+    this.visible = true;
+    this.verificationPage = this.context.pages()[0] || await this.context.newPage();
+    await this.verificationPage.goto(platform === '1688' ? 'https://www.1688.com/' : 'https://www.aliexpress.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await revealPage(this.verificationPage);
+    return this.status();
   }
 
   async readProductDetail(page, base) {

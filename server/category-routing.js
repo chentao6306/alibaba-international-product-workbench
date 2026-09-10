@@ -1,3 +1,5 @@
+import { sourcePlatform } from './source-platform.js';
+
 const BUILTIN_CATEGORY_IDS = new Map([
   ['drones accessories', '201346401']
 ]);
@@ -57,22 +59,21 @@ export function categoryLeafKey(value) {
 }
 
 export function productCategory(product = {}) {
+  const international = sourcePlatform(product) === 'alibaba.com';
   let path = normalizedCategoryPath(
-    product.categoryPath?.length ? product.categoryPath : product.sourceCategoryPath
+    product.categoryPath?.length ? product.categoryPath : international ? product.sourceCategoryPath : []
   );
   const snapshot = product.source?.snapshot || {};
   let id = normalizeCategoryId(
     product.categoryId
-    || product.sourceCategoryId
-    || snapshot.categoryId
-    || snapshot.sourceCategoryId
+    || (international && (product.sourceCategoryId || snapshot.categoryId || snapshot.sourceCategoryId))
   );
   // A previous reference-template operation could have copied a drone leaf
   // onto a phone product. Prefer the immutable source taxonomy in that one
   // unambiguous case so existing workspaces recover without manual edits.
   const sourcePath = normalizedCategoryPath(product.sourceCategoryPath);
   const phoneTitle = /\b(?:smartphone|mobile\s+phone|cell\s+phone|iphone|android\s+phone|phone\s+1[0-9])\b/i.test(String(product.title || ''));
-  if (phoneTitle && categoryLeafKey(path) === 'drones accessories'
+  if (international && phoneTitle && categoryLeafKey(path) === 'drones accessories'
     && categoryLeafKey(sourcePath) && categoryLeafKey(sourcePath) !== 'drones accessories') {
     path = sourcePath;
     id = normalizeCategoryId(product.sourceCategoryId || snapshot.sourceCategoryId);
@@ -151,7 +152,7 @@ export function resolvePublishRoute(product, settings = {}) {
   return {
     categoryId: '', category: category.pathText, url: '', source: 'unresolved', automatic: false,
     error: category.pathText
-      ? `类目“${category.pathText}”缺少叶子类目 ID，请重新采集详情或人工绑定一次该类目发布页`
+      ? `类目“${category.pathText}”缺少国际站叶子类目 ID，请补采详情或选择目标类目`
       : '商品没有具体类目，请先选择目标类目'
   };
 }
@@ -160,9 +161,12 @@ export function createPublishPlan(products = [], settings = {}) {
   const groups = new Map();
   for (const product of products) {
     const route = resolvePublishRoute(product, settings);
-    const key = route.categoryId ? `id:${route.categoryId}` : `path:${categoryPathKey(route.category) || product.id}`;
+    const platform = sourcePlatform(product);
+    const routeKey = route.categoryId ? `id:${route.categoryId}` : `path:${categoryPathKey(route.category) || product.id}`;
+    const key = platform === 'alibaba.com' ? routeKey : `${platform}:${routeKey}`;
     const group = groups.get(key) || {
       key,
+      sourcePlatform: platform,
       categoryId: route.categoryId,
       category: route.category,
       url: route.url,

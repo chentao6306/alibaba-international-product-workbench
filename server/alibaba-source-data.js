@@ -103,9 +103,12 @@ function structuredPrice(detailData) {
   const range = price.productRangePrices || {};
   // The dollar fields are Alibaba's stable USD source values. priceRangeLow
   // follows the visitor currency and can change with cookies or destination.
-  const minimum = priceValue(range, 'dollarPriceRangeLow', 'priceRangeLow', 'minPrice', 'minimumPrice');
-  const maximum = priceValue(range, 'dollarPriceRangeHigh', 'priceRangeHigh', 'maxPrice', 'maximumPrice');
-  const symbol = currencySymbol(detailData, price);
+  const fixedPrice = priceValue(price, 'fixedDollarPrice', 'fixedPrice');
+  const minimum = priceValue(range, 'dollarPriceRangeLow', 'priceRangeLow', 'minPrice', 'minimumPrice') ?? fixedPrice;
+  const maximum = priceValue(range, 'dollarPriceRangeHigh', 'priceRangeHigh', 'maxPrice', 'maximumPrice') ?? fixedPrice;
+  const hasDollarPrice = price.fixedDollarPrice != null || range.dollarPriceRangeLow != null
+    || (Array.isArray(price.productLadderPrices) && price.productLadderPrices.some((tier) => tier?.dollarPrice != null));
+  const symbol = hasDollarPrice ? '$' : currencySymbol(detailData, price);
   const unit = clean(price.unit || detailData?.nodeMap?.module_sample_new?.privateData?.priceList?.[0]?.priceUnit || '');
   const formattedText = minimum != null && maximum != null
     ? `${symbol}${minimum.toFixed(2)}${maximum !== minimum ? `-${Number(maximum.toFixed(2))}` : ''}`
@@ -130,12 +133,39 @@ function structuredPrice(detailData) {
     minPrice: effectiveMinimum.toFixed(2), maxPrice: effectiveMaximum.toFixed(2), currencySymbol: symbol,
     formattedText: (minimum != null && maximum != null ? formattedText : stableLadderText)
       || `${symbol}${effectiveMinimum.toFixed(2)}-${effectiveMaximum.toFixed(2)}`,
-    unit, source: minimum != null && maximum != null ? 'detailData.productRangePrices' : 'detailData.productLadderPrices'
+    unit, source: fixedPrice != null ? 'detailData.fixedPrice'
+      : minimum != null && maximum != null ? 'detailData.productRangePrices' : 'detailData.productLadderPrices'
   } : null;
   return {
     price, sourcePriceRange, tiers, minimum: effectiveMinimum, maximum: effectiveMaximum,
     symbol, unit, formattedText: sourcePriceRange?.formattedText || formattedText
   };
+}
+
+// Structured descriptions are available before their lazy DOM mounts. Only
+// read product-detail sections; recommendation cards are separate products.
+export function extractAlibabaDescription(detailData) {
+  const source = detailData?.nodeMap?.module_description?.privateData || {};
+  const sections = ['productDescription', 'specification', 'sizeChart', 'dimensionDrawing', 'productDetails', 'customizationImages', 'productCustomization', 'packingLogistics'];
+  const order = Array.isArray(source.viewOrder) ? source.viewOrder.filter((key) => sections.includes(key)) : sections;
+  const escape = (value) => String(value || '').replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
+  const images = [];
+  const text = [];
+  const html = [];
+  for (const key of order) {
+    for (const item of Array.isArray(source[key]?.details) ? source[key].details : []) {
+      if (item?.type === 'image' && /^https?:\/\//i.test(item.url || '')) {
+        if (!images.includes(item.url)) {
+          images.push(item.url);
+          html.push(`<p><img src="${escape(item.url)}" /></p>`);
+        }
+      } else if (item?.type === 'text' && typeof item.text === 'string' && item.text.trim()) {
+        text.push(item.text.trim());
+        html.push(`<p>${escape(item.text.trim())}</p>`);
+      }
+    }
+  }
+  return { html: html.join(''), text: text.join('\n'), images };
 }
 
 function structuredVariants(detailData) {
@@ -199,6 +229,6 @@ export function extractAlibabaSourceData(detailData) {
       exactSkuPricesPublished: variants.skus.length > 0 && variants.skus.every((sku) => Number(sku.price) > 0),
       exactSkuStockPublished: variants.skus.length > 0 && variants.skus.every((sku) => Number.isFinite(Number(sku.stock)))
     },
-    evidence: { method: 'detailData', firstSkuId: variants.firstSkuId, categoryId }
+    evidence: { method: 'detailData', firstSkuId: variants.firstSkuId, categoryId, skuCount: variants.skus.length }
   };
 }

@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, safeStorage } from 'electron';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -84,13 +85,13 @@ async function authRequest(endpoint, body, token = '') {
   let response;
   try {
     response = await fetch(`${authBaseUrl}${endpoint}`, {
-      method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body)
+      method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body), signal: AbortSignal.timeout(20000)
     });
   } catch {
-    throw new Error('登录失败');
+    throw new Error('暂时无法连接授权服务器，请检查网络后重试');
   }
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error('登录失败');
+  if (!response.ok) throw Object.assign(new Error(data.reason || data.error || '授权验证失败'), { status: response.status });
   return data;
 }
 
@@ -553,6 +554,7 @@ async function startLocalServer() {
   process.env.PORT = String(localPort);
   process.env.DATA_DIR = dataDir;
   process.env.KUA_YIPU_DESKTOP = '1';
+  process.env.KUA_YIPU_ACCOUNT = currentSession?.username || 'local';
   process.env.KUA_YIPU_LOCAL_GATE = localGate;
   // A packaged client must use the Chromium shipped in resources/chromium.
   // Development builds may still use the local Playwright cache.
@@ -582,12 +584,16 @@ ipcMain.handle('auth:login', async (_event, payload) => {
   const username = String(payload?.username || '').trim();
   const password = String(payload?.password || '');
   if (!username || !password) throw new Error('请输入 Alibaba 国际站账号和密码');
-  const deviceId = crypto.createHash('sha256').update(`${app.getPath('userData')}|${username}`).digest('hex');
-  const authorization = await authRequest('/api/client/login', { username, deviceId, appVersion: app.getVersion(), deviceName: `${process.platform}-${process.arch}` });
+  const deviceFile = path.join(app.getPath('userData'), 'device-id');
+  let installationId = fs.existsSync(deviceFile) ? fs.readFileSync(deviceFile, 'utf8').trim() : '';
+  if (!/^[a-f0-9-]{36}$/i.test(installationId)) { installationId = crypto.randomUUID(); fs.writeFileSync(deviceFile, installationId); }
+  const deviceId = crypto.createHash('sha256').update(`${installationId}|${os.hostname()}|${username}`).digest('hex');
+  const authorization = await authRequest('/api/client/login', { username, deviceId, appVersion: app.getVersion(), deviceName: `${os.hostname()} (${process.platform}-${process.arch})` });
   if (!authorization.authorized || !authorization.token) throw new Error('登录失败');
   currentSession = { ...authorization, username, deviceId, checkedAt: Date.now() };
   try {
     await startAlibabaLogin(username, password);
+    process.env.KUA_YIPU_ACCOUNT = username;
     if (payload.remember) saveCredentials({ username, password }); else clearCredentials();
     return { username, expiresAt: authorization.expiresAt, token: authorization.token };
   } catch (error) {
@@ -598,12 +604,16 @@ ipcMain.handle('auth:login', async (_event, payload) => {
 ipcMain.handle('auth:session', () => currentSession ? { username: currentSession.username, expiresAt: currentSession.expiresAt } : null);
 ipcMain.handle('auth:heartbeat', async () => {
   if (!currentSession) return { authorized: false, reason: '尚未登录' };
+  const checkedSession = currentSession;
   try {
-    const result = await authRequest('/api/client/heartbeat', {}, currentSession.token);
+    const result = await authRequest('/api/client/heartbeat', {}, checkedSession.token);
+    if (currentSession !== checkedSession) return { authorized: Boolean(currentSession) };
     if (!result.authorized) { currentSession = null; mainWindow?.close(); }
     else currentSession = { ...currentSession, token: result.token || currentSession.token, expiresAt: result.expiresAt || currentSession.expiresAt, checkedAt: Date.now() };
     return result;
   } catch (error) {
+    if (currentSession !== checkedSession) return { authorized: Boolean(currentSession) };
+    if (![401, 403].includes(error.status) && Date.now() - currentSession.checkedAt < 10 * 60 * 1000 && Date.now() < new Date(currentSession.expiresAt).getTime()) return { authorized: true, temporaryNetworkError: true };
     currentSession = null; mainWindow?.close();
     throw error;
   }

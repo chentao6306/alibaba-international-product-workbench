@@ -44,29 +44,39 @@ import { isExplicitHumanVerificationSignal, normalizeAlibabaCookies } from '../s
 import { userFacingError } from '../server/browser-error.js';
 import { runWithProgressTimeout } from '../server/progress-timeout.js';
 
-test('publish progress timeout resets whenever the current stage advances', async () => {
+test('publish progress timeout resets whenever the current stage advances', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const stages = [];
-  const result = await runWithProgressTimeout(async (progress) => {
-    await new Promise((resolve) => setTimeout(resolve, 15));
-    progress('uploading images');
-    await new Promise((resolve) => setTimeout(resolve, 15));
-    progress('submitting');
-    await new Promise((resolve) => setTimeout(resolve, 15));
-    return 'ok';
+  let advance;
+  let finish;
+  const pending = runWithProgressTimeout((progress) => {
+    advance = progress;
+    return new Promise((resolve) => { finish = resolve; });
   }, { timeoutMs: 25, onProgress: (stage) => stages.push(stage) });
-  assert.equal(result, 'ok');
+  await Promise.resolve();
+  t.mock.timers.tick(20);
+  advance('uploading images');
+  t.mock.timers.tick(20);
+  advance('submitting');
+  t.mock.timers.tick(20);
+  finish('ok');
+  assert.equal(await pending, 'ok');
   assert.deepEqual(stages, ['uploading images', 'submitting']);
 });
 
-test('publish progress timeout reports the stalled stage', async () => {
+test('publish progress timeout reports the stalled stage', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   let timedOutStage = '';
-  await assert.rejects(
+  const rejected = assert.rejects(
     runWithProgressTimeout(async (progress) => {
       progress('uploading main images');
       await new Promise((resolve) => setTimeout(resolve, 60));
     }, { timeoutMs: 20, onTimeout: (stage) => { timedOutStage = stage; } }),
     (error) => error.code === 'PUBLISH_STAGE_TIMEOUT' && error.stage === 'uploading main images'
   );
+  await Promise.resolve();
+  t.mock.timers.tick(20);
+  await rejected;
   assert.equal(timedOutStage, 'uploading main images');
 });
 

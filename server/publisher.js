@@ -4,12 +4,14 @@ import crypto from 'node:crypto';
 import sharp from 'sharp';
 import { load } from 'cheerio';
 import { hasExplicitHumanChallenge, hidePage, launchPersistent, revealPage, settlePage, syncAlibabaCookies, waitForHumanVerification } from './browser-runtime.js';
-import { extractAlibabaSourceData, parseAlibabaDetailDataScript } from './alibaba-source-data.js';
+import { extractAlibabaDescription, extractAlibabaSourceData, parseAlibabaDetailDataScript } from './alibaba-source-data.js';
 import { SOURCE_LANGUAGE_HEADERS, withSourceLocale } from './source-locale.js';
 import { categoryIdFromUrl, normalizeCategoryId } from './category-routing.js';
 import { REQUIRED_ATTRIBUTE_ALIASES } from './publish-reference.js';
+import { sourcePlatform, crossPlatformPublishErrors } from './source-platform.js';
 
 const WORKBENCH_URL = 'https://i.alibaba.com/';
+const SOURCE_DESCRIPTION_SELECTOR = '[data-module-name="module_description"], [data-testid="module-description"], [data-module-name="module_structure_description"], [data-testid="module-details-structure-description"]';
 const TITLE_SELECTORS = [
   'input[name="productTitle"]',
   'input[placeholder*="商品标题"]', 'input[placeholder*="标题"]',
@@ -47,7 +49,7 @@ export function sanitizeCollectedProduct(product) {
   return {
     ...product,
     ...(categoryPath.length ? { sourceCategoryPath: categoryPath } : {}),
-    ...(sourceCategoryId ? { sourceCategoryId, categoryId: product.categoryId || sourceCategoryId } : {}),
+    ...(sourceCategoryId ? { sourceCategoryId, categoryId: product.categoryId || (sourcePlatform(product) === 'alibaba.com' ? sourceCategoryId : '') } : {}),
     productType, keywords, subtitle, description,
     ...(descriptionHtml ? { descriptionHtml } : {})
   };
@@ -103,7 +105,7 @@ export function categoryMismatchMessage(product, category) {
   }
   const targetPath = sanitizeCategoryPath(product?.categoryPath);
   const sourcePath = sanitizeCategoryPath(product?.sourceCategoryPath);
-  const expectedPath = targetPath.length ? targetPath : sourcePath;
+  const expectedPath = targetPath.length ? targetPath : sourcePlatform(product) === 'alibaba.com' ? sourcePath : [];
   const actualPath = String(category || '').split(/\s*(?:>>|>|\/|\\)\s*/).map((value) => value.trim()).filter(Boolean);
   if (expectedPath.length && actualPath.length) {
     const expectedLeaf = canonicalCategoryLeaf(expectedPath.at(-1));
@@ -944,11 +946,12 @@ export function hasCompleteSourceData(product) {
   return (product.mainImages || product.images || []).length >= 4
     && (product.detailImages || []).length >= 1
     && (product.attributes || []).length >= 2
-    && Boolean(product.origin);
+    && Boolean(product.origin)
+    && Boolean(String(product.description || product.descriptionHtml || '').trim());
 }
 
 export function validateProductData(product) {
-  const errors = [];
+  const errors = crossPlatformPublishErrors(product);
   const mainImages = product.mainImages || product.images || [];
   if (!String(product.title || '').trim()) errors.push('缺少商品标题');
   if (numericValue(product.price) <= 0) errors.push('销售价格无效');
@@ -1611,6 +1614,13 @@ export async function fillChoice(page, locator, value) {
     const options = await menu.count()
       ? menu.locator('.options-item')
       : page.locator('[role="option"]:visible, .next-menu-item:visible, .next-select-menu-item:visible');
+    // Alibaba's search can return no results for a complete option label
+    // containing parentheses. Select an already loaded exact value first.
+    const loaded = await options.allTextContents();
+    const exactIndex = loaded.findIndex((text) => attributeOptionMatchScore(candidate, text) >= 90);
+    if (exactIndex >= 0) {
+      return options.nth(exactIndex).click({ timeout: 4000 }).then(() => true).catch(() => false);
+    }
     // The menu virtualizes its options. Search reveals values outside the
     // first nine rows, including 6.6-inch screens and 6000-6999mAh batteries.
     const search = menu.locator('.options-search input');
@@ -2635,12 +2645,12 @@ export function requiredLabelsFromError(message) {
   return [...new Set(labels)].slice(0, 12);
 }
 
-async function recoverRequiredAttributes(page, product, labels, onProgress = () => {}) {
+export async function recoverRequiredAttributes(page, product, labels, onProgress = () => {}) {
   const items = [...(product.attributes || []), ...(product.customAttributes || [])]
     .filter((item) => item?.name && item?.value);
   const normalized = (value) => String(value || '').toLowerCase().replace(/[\s_\-/]+/g, ' ').trim();
   const recovered = [];
-    for (const rawLabel of labels) {
+  for (const rawLabel of labels) {
     const aliases = requiredLabelAliases(rawLabel);
     if (!aliases.length) continue;
     const field = await fieldByAnyLabel(page, aliases);
@@ -2659,13 +2669,39 @@ async function recoverRequiredAttributes(page, product, labels, onProgress = () 
     }
     if (!filled && value) {
       const type = String(await field.getAttribute('type').catch(() => '')).toLowerCase();
-      if (!['checkbox', 'radio'].includes(type)) {
+      const isChoice = await field.getAttribute('role').catch(() => '') === 'combobox'
+        || await field.getAttribute('readonly').catch(() => null) !== null
+        || await field.evaluate((node) => node.tagName === 'SELECT').catch(() => false);
+      if (!isChoice && !['checkbox', 'radio'].includes(type)) {
         filled = await fillAndVerify(field, value, aliases[0]).then(() => true).catch(() => false);
       }
     }
     if (filled) recovered.push(aliases[0]);
   }
   return recovered;
+}
+
+export async function setImageUploadFiles(input, files, options = {}) {
+  const expected = files.map((file) => ({ name: path.basename(file), size: fs.statSync(file).size }));
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await input.setInputFiles(files, { timeout: options.timeout ?? 30000 });
+      return;
+    } catch (error) {
+      if (!/timeout|detached|not attached/i.test(String(error?.message || error))) throw error;
+      // A slow change handler can time out after the files were accepted.
+      // Inspect the queue and FileList before dispatching another upload.
+      if (options.hasStarted && await options.hasStarted().catch(() => false)) return;
+      const selected = await input.evaluate((node) => [...(node.files || [])]
+        .map((file) => ({ name: file.name, size: file.size }))).catch(() => []);
+      if (JSON.stringify(selected) === JSON.stringify(expected)) return;
+      if (attempt === 1) {
+        const failure = new Error('国际站图片上传控件响应超时，自动重试后仍未接收图片，请重试该商品', { cause: error });
+        failure.code = 'IMAGE_UPLOAD_TIMEOUT';
+        throw failure;
+      }
+    }
+  }
 }
 
 async function specControlIsChecked(control) {
@@ -3592,7 +3628,7 @@ export class SellerPublisher {
     // bounded window to populate before extracting it. This replaces the old
     // unconditional iframe wait that added 8 seconds even when no iframe
     // existed.
-    await page.locator('[data-module-name="module_description"], [data-testid="module-description"]').first().scrollIntoViewIfNeeded().catch(() => {});
+    await page.locator(SOURCE_DESCRIPTION_SELECTOR).first().scrollIntoViewIfNeeded().catch(() => {});
     await page.locator('[data-testid="module-attribute-row"], [data-module-name*="attribute" i], [data-module-name*="specification" i], table').first().scrollIntoViewIfNeeded().catch(() => {});
     await page.locator('[data-module-name="module_product_specification"] iframe, iframe[src*="descIframe"]')
       .first().scrollIntoViewIfNeeded().catch(() => {});
@@ -3612,7 +3648,9 @@ export class SellerPublisher {
     const detailDataScript = await page.evaluate(() => [...document.scripts]
       .map((script) => script.textContent || '')
       .find((text) => /(?:window\.)?detailData\s*=\s*\{/.test(text)) || '').catch(() => '');
-    const structuredSource = extractAlibabaSourceData(parseAlibabaDetailDataScript(detailDataScript));
+    const detailData = parseAlibabaDetailDataScript(detailDataScript);
+    const structuredSource = extractAlibabaSourceData(detailData);
+    const structuredDescription = extractAlibabaDescription(detailData);
     let detailFrame = page.frames().find((frame) => /descIframe\.html/i.test(frame.url()));
     if (detailFrame) {
       await detailFrame.waitForFunction(() => {
@@ -3655,7 +3693,7 @@ export class SellerPublisher {
         images
       };
     }).catch(() => null) : null;
-    const detail = await page.evaluate(() => {
+    const detail = await page.evaluate((descriptionSelector) => {
       const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
       const absolute = (value) => {
         if (!String(value || '').trim()) return '';
@@ -3694,7 +3732,13 @@ export class SellerPublisher {
           .filter((image) => /_960x960|_720x720/.test(image.currentSrc || image.src))
           .map((image) => image.currentSrc || image.src)
       ]).slice(0, 6);
-      const descriptionModule = document.querySelector('[data-module-name="module_description"], [data-testid="module-description"]');
+      const descriptionModule = document.querySelector(descriptionSelector)?.cloneNode(true);
+      descriptionModule?.querySelectorAll('script, style, link, noscript, svg, button, [data-module-name="module_report"], [data-module-name*="recommend"]')
+        .forEach((node) => node.remove());
+      descriptionModule?.querySelectorAll('img').forEach((image) => {
+        const url = absolute(image.getAttribute('data-src') || image.getAttribute('data-original') || image.getAttribute('src'));
+        if (url) image.setAttribute('src', url);
+      });
       // Alibaba changes gallery markup frequently. When the size suffix or
       // JSON-LD gallery is absent, use loaded product images outside the rich
       // text module as a conservative fallback instead of returning zero
@@ -3704,16 +3748,14 @@ export class SellerPublisher {
           .map((image) => ({
             url: image.currentSrc || image.src || image.getAttribute('data-src') || image.getAttribute('data-original') || '',
             width: image.naturalWidth || Number(image.getAttribute('width') || 0),
-            insideDescription: Boolean(image.closest('[data-module-name="module_description"], [data-testid="module-description"]'))
+            insideDescription: Boolean(image.closest(descriptionSelector))
           }))
           .filter((item) => item.url && /\/kf\//i.test(item.url) && !item.insideDescription && item.width >= 120)
           .map((item) => item.url);
         mainImages = [...new Set([...mainImages, ...unique(galleryImages)])].slice(0, 6);
       }
-      const sourceDetailImages = unique([...((descriptionModule || document).querySelectorAll('img'))]
-        .filter((image) => /\/kf\//.test(image.currentSrc || image.src)
-          && (image.naturalWidth >= 300 || /id-w-\[100%\]|_\d+x\d+/.test(String(image.className) + ' ' + (image.currentSrc || image.src))))
-        .map((image) => image.currentSrc || image.src)).filter((url) => !mainImages.includes(url)).slice(0, 30);
+      const sourceDetailImages = unique([...(descriptionModule?.querySelectorAll('img') || [])]
+        .map((image) => image.src).filter((url) => /\/kf\//i.test(url))).slice(0, 30);
       // Do not silently turn main images into detail images. A product with
       // no real detail-image module must remain incomplete so the publisher
       // can stop and ask for review instead of inventing source data.
@@ -3844,7 +3886,7 @@ export class SellerPublisher {
         productType: categoryPath.at(-1) || '', categoryPath, categoryId: categoryIdCandidates[0] || '', priceText, subtitle, keywords,
         salesUnit, paymentMethod, shippingText, services: { sourceTexts: sourceServices, customizations }, certificates,
         descriptionHtml,
-        description: highlights.join('\n') || clean(descriptionModule?.innerText).slice(0, 12000),
+        description: highlights.join('\n') || clean(descriptionModule?.textContent).slice(0, 12000),
         videoUrl: absolute(video?.contentUrl || ''),
         dataCompleteness: {
           mainImages: mainImages.length, detailImages: detailImages.length,
@@ -3857,7 +3899,7 @@ export class SellerPublisher {
         metaLanguage: document.querySelector('meta[http-equiv="content-language"], meta[name="language"]')?.content || '',
         renderTextSample: clean(bodyText).slice(0, 3000)
       };
-    });
+    }, SOURCE_DESCRIPTION_SELECTOR);
     // Alibaba defers attributes/description until the corresponding section
     // enters the viewport. If the first snapshot contains only the gallery,
     // trigger lazy modules and retry once before persisting an incomplete
@@ -3871,6 +3913,15 @@ export class SellerPublisher {
       await page.waitForTimeout(1400);
       return this.readSourceProduct(page, base, retry + 1);
     }
+    if (structuredDescription.html && (!detail.descriptionHtml || !detail.detailImages.length)) {
+      detail.descriptionHtml = structuredDescription.html.slice(0, 90000);
+      detail.description = structuredDescription.text.slice(0, 12000);
+      detail.detailImages = structuredDescription.images.slice(0, 30);
+      Object.assign(detail.dataCompleteness, {
+        detailImages: detail.detailImages.length, sourceDetailImages: detail.detailImages.length,
+        detailImagesDerived: false, descriptionHtml: true, descriptionSource: 'detailData.module_description'
+      });
+    }
     if (iframeDetail?.html && iframeDetail.html.length > 80) {
       detail.descriptionHtml = iframeDetail.html.slice(0, 90000);
       detail.description = iframeDetail.text.slice(0, 12000);
@@ -3880,6 +3931,7 @@ export class SellerPublisher {
       detail.dataCompleteness.sourceDetailImages = detail.detailImages.length;
       detail.dataCompleteness.detailImagesDerived = false;
       detail.dataCompleteness.descriptionHtml = true;
+      detail.dataCompleteness.descriptionSource = 'description-iframe';
     } else if (!detail.description || /^(?:视频描述|video description)$/i.test(detail.description)) {
       detail.description = '';
     }
@@ -4077,11 +4129,18 @@ export class SellerPublisher {
       return result;
     };
     if (!images.length) return finishBatchUpload();
+    const assignFiles = async (input, files) => {
+      const before = await mainImageFormState(page);
+      await setImageUploadFiles(input, files, { hasStarted: async () => {
+        const current = await mainImageFormState(page);
+        return current.uploading > before.uploading || current.occupied > before.occupied;
+      } });
+    };
     const firstTrigger = placeholders().first();
     const firstSlot = firstTrigger.locator('xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " image-upload-list-item ")][1]');
     const firstInput = firstSlot.locator('input[type="file"][accept*="image" i], input[type="file"]').last();
     if (await firstInput.count().catch(() => 0) && await firstInput.getAttribute('multiple') !== null) {
-      await firstInput.setInputFiles(images);
+      await assignFiles(firstInput, images);
       return finishBatchUpload();
     }
     // Alibaba renders several unrelated "本地上传" labels (the AI assistant,
@@ -4128,7 +4187,7 @@ export class SellerPublisher {
       let slotInput = slot.locator('input[type="file"][accept*="image" i], input[type="file"]');
       let assignedDirectly = false;
       if (await slotInput.count().catch(() => 0)) {
-        await slotInput.last().setInputFiles([image]);
+        await assignFiles(slotInput.last(), [image]);
         assignedDirectly = true;
       }
       if (!assignedDirectly) {
@@ -4140,7 +4199,7 @@ export class SellerPublisher {
         // input before trying to click a localized popover label.
         const portalImageInputs = page.locator('input[type="file"][accept*="image" i][multiple]');
         if (index === 0 && await portalImageInputs.count().catch(() => 0)) {
-          await portalImageInputs.last().setInputFiles(images);
+          await assignFiles(portalImageInputs.last(), images);
           return finishBatchUpload();
         }
         let localUpload = await findLocalUpload(trigger, 900);
@@ -4160,10 +4219,10 @@ export class SellerPublisher {
         const chooser = await chooserPromise;
         if (chooser) {
           if (index === 0 && chooser.isMultiple()) {
-            await chooser.setFiles(images);
+            await chooser.setFiles(images, { timeout: 30000 });
             return finishBatchUpload();
           }
-          await chooser.setFiles([image]);
+          await chooser.setFiles([image], { timeout: 30000 });
         } else {
           const uploadHost = localUpload.locator('xpath=ancestor-or-self::*[.//input[@type="file"]][1]');
           let scopedInput = uploadHost.locator('input[type="file"][accept*="image" i], input[type="file"]').last();
@@ -4179,10 +4238,10 @@ export class SellerPublisher {
             throw new Error(`国际站主图第 ${index + 1} 个槽位未打开文件选择窗口${clicked ? '' : '（本地上传按钮点击失败）'}`);
           }
           if (index === 0 && await scopedInput.getAttribute('multiple') !== null) {
-            await scopedInput.setInputFiles(images);
+            await assignFiles(scopedInput, images);
             return finishBatchUpload();
           }
-          await scopedInput.setInputFiles([image]);
+          await assignFiles(scopedInput, [image]);
         }
       }
 
@@ -5453,11 +5512,18 @@ export class SellerPublisher {
       } else if (isRequiredAttributeError(actionError)) {
         const emptyLabels = [...new Set([
           ...await visibleEmptyAttributeLabels(page),
+          ...(error.requiredFields || []),
           ...requiredLabelsFromError(actionError)
         ])];
         const recovered = await recoverRequiredAttributes(page, product, emptyLabels, reportStage);
         const cleared = await clearEmptySaleAttributeSelections(page);
-        if (!cleared.length && !recovered.length) {
+        const hasLogisticsError = /物流属性|重量、体积|packaging|shipping/i.test(actionError);
+        if (hasLogisticsError) {
+          reportStage('清除平台允许留空的整组物流信息后重试');
+          await forceClearLogisticsSection(page);
+          logisticsWarning = '平台要求物流信息完整或全部留空，本次已清空可选物流字段；本地包装资料保留';
+        }
+        if (!cleared.length && !recovered.length && !hasLogisticsError) {
           error.requiredFields = emptyLabels;
           throw error;
         }

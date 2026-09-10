@@ -1,6 +1,6 @@
 {
   "name": "alibaba-international-product-workbench",
-  "version": "1.2.33",
+  "version": "1.4.0",
   "main": "electron/main.js",
   "description": "抄得快 Alibaba.com 国际站商品采集与发布工作台",
   "author": "抄得快",
@@ -23,6 +23,7 @@
   "dependencies": {
     "cheerio": "^1.1.2",
     "express": "^5.1.0",
+    "json5": "2.2.3",
     "lucide-react": "^0.468.0",
     "pg": "^8.13.1",
     "playwright-core": "1.62.1",

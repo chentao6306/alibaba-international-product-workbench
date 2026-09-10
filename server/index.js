@@ -19,6 +19,9 @@ import { buildAlibabaPublishUrl, createPublishPlan, normalizeCategoryId, product
 import { findPublishedReferenceRepair } from './publish-reference.js';
 import { userFacingError } from './browser-error.js';
 import { runWithProgressTimeout } from './progress-timeout.js';
+import { collectionUrls, convertProductPrices, crossPlatformPublishErrors, parseCollectionUrl, sourcePlatform } from './source-platform.js';
+import { cleanupWorkspace } from './storage-cleanup.js';
+import { AnnouncementInbox } from './announcements.js';
 
 // In the packaged desktop build the server module is unpacked while the
 // frontend remains inside app.asar. APP_ROOT_DIR keeps both layouts working.
@@ -51,6 +54,7 @@ function directoryBytes(directory) {
 }
 
 const store = new JsonStore(path.join(dataDir, 'workspace.json'));
+const inbox = new AnnouncementInbox(path.join(dataDir, 'announcement-reads.json'), process.env.KUA_YIPU_AUTH_URL || 'http://106.55.45.126', process.env.KUA_YIPU_ACCOUNT || 'local');
 const publisher = new SellerPublisher(dataDir);
 const collector = new ShopCollector(dataDir, (products, onProgress) => publisher.enrichSourceProducts(products, onProgress));
 store.update((state) => {
@@ -66,6 +70,8 @@ store.update((state) => {
   if (invalidCategoryBinding) state.settings.publishPageUrl = '';
   if (invalidCategoryBinding) state.settings.publishCategory = '';
   for (const product of state.products) {
+    product.sourcePlatform = sourcePlatform(product);
+    if (product.sourcePlatform !== 'alibaba.com') continue;
     if (!product.sourceCategoryId && product.categoryId) product.sourceCategoryId = product.categoryId;
     if (!product.categoryId && product.sourceCategoryId) product.categoryId = product.sourceCategoryId;
     const inferredCategory = productCategory(product);
@@ -218,6 +224,11 @@ if (process.env.KUA_YIPU_DESKTOP === '1') {
 }
 app.use('/media', express.static(mediaDir, { fallthrough: false, maxAge: '1d' }));
 const activePublishJobs = new Set();
+const activeCollectJobs = new Set();
+let collectionQueue = Promise.resolve();
+function queueCollection(jobId) {
+  collectionQueue = collectionQueue.catch(() => {}).then(() => startCollectJob(jobId));
+}
 
 function publicState() {
   const state = store.read();
@@ -301,34 +312,40 @@ function saveCollectedProduct(groupId, raw, options = {}) {
   if (!raw) return null;
   const now = new Date().toISOString();
   return store.update((draft) => {
-    const target = draft.groups.find((item) => item.id === groupId);
-    if (!target) return null;
-    let product = draft.products.find((item) => item.groupId === groupId && item.sourceId === raw.sourceId);
+    const target = groupId ? draft.groups.find((item) => item.id === groupId) : null;
+    if (groupId && !target) return null;
+    const platform = sourcePlatform(raw);
+    let product = draft.products.find((item) => (groupId ? item.groupId === groupId : true) && sourcePlatform(item) === platform && item.sourceId === raw.sourceId);
     const priceNumber = Number(raw.price || 0);
     const markup = Number(draft.settings.priceMarkup || 0);
     const normalized = {
       ...raw,
-      price: priceNumber ? (priceNumber * (1 + markup / 100)).toFixed(2) : '',
-      stock: Number(raw.stock || draft.settings.defaultStock || 100),
+      sourcePlatform: platform,
+      collectionMethod: options.collectionMethod || 'shop',
+      price: platform === 'alibaba.com' && markup ? (priceNumber * (1 + markup / 100)).toFixed(2) : raw.price ?? '',
+      stock: raw.stock == null || raw.stock === '' ? Number(draft.settings.defaultStock ?? 100) : Number(raw.stock),
       deliveryCountry: options.destinationCountry || raw.deliveryCountry || '',
       updatedAt: now
     };
     if (!product) {
-      product = syncProductModel({ id: newId(), shopId: target.shopId, groupId, selected: false, status: 'ready', createdAt: now, ...normalized }, { captureSource: true, sourceSnapshot: raw, capturedAt: now });
+      product = syncProductModel({ id: newId(), shopId: target?.shopId || '', groupId: groupId || '', selected: false, status: 'ready', createdAt: now, ...normalized }, { captureSource: true, sourceSnapshot: raw, capturedAt: now });
       draft.products.unshift(product);
     } else {
+      if (options.collectionMethod) return product;
       Object.assign(product, normalized);
       // Re-reading a group updates the working copy, but does not overwrite
       // the immutable source snapshot. An explicit “refresh detail” is the
       // operation that intentionally replaces that snapshot.
       syncProductModel(product, { captureSource: false, capturedAt: now });
     }
-    target.collectedCount = Math.max(Number(target.collectedCount || 0), draft.products.filter((item) => item.groupId === groupId).length);
+    if (target) target.collectedCount = Math.max(Number(target.collectedCount || 0), draft.products.filter((item) => item.groupId === groupId).length);
     return product;
   });
 }
 
 async function startCollectJob(jobId) {
+  const queued = store.read().jobs.find((item) => item.id === jobId);
+  if (queued?.metadata?.collectionMethod) return startLinkCollectJob(jobId);
   const initial = store.read();
   const job = initial.jobs.find((item) => item.id === jobId && item.type === 'collect');
   const group = initial.groups.find((item) => item.id === job?.metadata?.groupId);
@@ -420,7 +437,82 @@ app.post('/api/groups/:id/collect', (request, response, next) => {
   const job = store.createJob('collect', { groupId: group.id, groupName: group.name, options });
   store.update((draft) => { const target = draft.groups.find((item) => item.id === group.id); target.status = 'collecting'; target.activeJobId = job.id; });
   response.status(202).json(job);
-  setImmediate(() => startCollectJob(job.id));
+  setImmediate(() => queueCollection(job.id));
+});
+
+async function startLinkCollectJob(jobId) {
+  if (activeCollectJobs.has(jobId)) return;
+  const job = store.read().jobs.find((item) => item.id === jobId);
+  if (!job || !['queued', 'running'].includes(job.status)) return;
+  activeCollectJobs.add(jobId);
+  const metadata = job.metadata;
+  const completedKeys = new Set(metadata.completedKeys || []);
+  const failures = [...(metadata.failures || [])];
+  const options = { ...metadata.options, collectionMethod: metadata.collectionMethod,
+    completedKeys: [...completedKeys],
+    shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read().jobs.find((item) => item.id === jobId)?.status),
+  };
+  try {
+    store.patchJob(jobId, { status: 'running', message: '正在读取来源商品' });
+    const progress = (event) => {
+      if (event.product) saveCollectedProduct('', event.product, options);
+      const status = store.read().jobs.find((item) => item.id === jobId)?.status;
+      if (['cancelled', 'paused'].includes(status)) return false;
+      if (event.key) completedKeys.add(event.key);
+      if (event.error) failures.push({ source: event.key, url: event.url, error: userFacingError(new Error(event.error)) });
+      store.patchJob(jobId, { progress: completedKeys.size, total: event.total || job.total || 0,
+        metadata: { ...metadata, completedKeys: [...completedKeys], failures },
+        message: event.stage === 'listing' ? `正在读取结果第 ${event.page} 页，已发现 ${event.found} 件`
+          : `已处理 ${event.current}/${event.total} 件，失败 ${failures.length} 件`,
+      });
+      return !options.shouldStop();
+    };
+    const products = metadata.collectionMethod === 'image-search'
+      ? await collector.collectSearch(metadata.links[0], progress, options)
+      : await collector.collectLinks(metadata.links, progress, options);
+    if (options.shouldStop()) throw Object.assign(new Error('已暂停采集'), { code: 'COLLECT_PAUSED' });
+    store.patchJob(jobId, { status: failures.length === completedKeys.size ? 'failed' : 'completed', progress: completedKeys.size, total: completedKeys.size,
+      message: `采集完成，成功 ${completedKeys.size - failures.length} 件，失败 ${failures.length} 件${failures.length ? `：${failures[0].error}` : ''}` });
+  } catch (error) {
+    if (store.read().jobs.find((item) => item.id === jobId)?.status === 'cancelled') return;
+    store.patchJob(jobId, { status: options.shouldStop() || error.code === 'COLLECT_PAUSED' ? 'paused' : 'failed', message: userFacingError(error) });
+  } finally { activeCollectJobs.delete(jobId); }
+}
+
+app.post('/api/collect/links', (request, response, next) => {
+  try {
+    const method = request.body.method === 'image-search' ? 'image-search' : 'product';
+    const links = collectionUrls(request.body.urls, method, request.body.platform);
+    const unfinished = store.read().jobs.find((item) => item.type === 'collect' && item.metadata?.collectionMethod === method
+      && item.metadata?.sourcePlatform === links[0].platform && ['queued', 'running', 'paused', 'pause_requested'].includes(item.status));
+    if (unfinished) throw Object.assign(new Error('当前入口已有采集任务，请先继续或取消该任务'), { status: 409 });
+    const number = (value, fallback, max) => Math.max(1, Math.min(max, Math.floor(Number(value) || fallback)));
+    const options = {
+      startPage: number(request.body.startPage, 1, 100), endPage: number(request.body.endPage, 1, 100),
+      maxProducts: number(request.body.maxProducts, 100, 1000), delaySeconds: Math.max(0, Math.min(60, Number(request.body.delaySeconds) || 0)),
+    };
+    if (options.endPage < options.startPage) throw new Error('结束页不能小于起始页');
+    const job = store.createJob('collect', { collectionMethod: method, sourcePlatform: links[0].platform, links, options });
+    response.status(202).json(job);
+    setImmediate(() => queueCollection(job.id));
+  } catch (error) { next(Object.assign(error, { status: error.status || 400 })); }
+});
+
+app.post('/api/collect/login', async (request, response, next) => {
+  try {
+    if (store.read().jobs.some((job) => job.type === 'collect' && ['running', 'queued'].includes(job.status))) throw new Error('请先暂停采集任务再打开平台登录');
+    response.json(await collector.openMarketplace(request.body.platform));
+  } catch (error) { next(error); }
+});
+
+app.post('/api/categories/from-product', async (request, response, next) => {
+  try {
+    const link = parseCollectionUrl(request.body.url, 'product', 'alibaba.com');
+    const [product] = await collector.enrichProducts([{ sourceId: link.sourceId, sourceUrl: link.url }]);
+    const category = productCategory(product);
+    if (!category.id) throw new Error('该商品未公开具体类目，请使用另一个同类商品链接');
+    response.json({ path: category.pathText || category.id, id: category.id });
+  } catch (error) { next(error); }
 });
 
 app.post('/api/collector/open', async (request, response, next) => {
@@ -435,11 +527,13 @@ app.patch('/api/products/:id', (request, response, next) => {
     'categoryPath', 'categoryId', 'customAttributes', 'descriptionHtml', 'structuredDescription',
     'services', 'certificates', 'regionalPricing', 'shipping', 'freightTemplate', 'deliveryCountry',
     'deliveryOptions', 'salesUnit', 'paymentMethod', 'fobPrice', 'priceMode', 'skuPriceMode'
+    , 'currencySymbol'
   ];
   const updated = store.update((state) => {
     const product = state.products.find((item) => item.id === request.params.id);
     if (!product) return null;
     const patch = Object.fromEntries(Object.entries(request.body).filter(([key]) => allowed.includes(key)));
+    if (request.body.usdRate && product.currencySymbol !== '$') Object.assign(patch, convertProductPrices({ ...product, ...patch }, request.body.usdRate));
     recordProductMutation(product, patch, { actor: 'user', action: 'single-edit' });
     return product;
   });
@@ -456,7 +550,7 @@ app.post('/api/products/batch-update', (request, response, next) => {
       'title', 'subtitle', 'price', 'stock', 'moq', 'description', 'descriptionHtml', 'structuredDescription',
       'mainImage', 'images', 'mainImages', 'detailImages', 'attributes', 'variantGroups', 'skus', 'priceTiers',
       'origin', 'model', 'brand', 'productType', 'videoUrl', 'keywords', 'customAttributes', 'services',
-      'categoryPath', 'categoryId',
+      'categoryPath', 'categoryId', 'currencySymbol',
       'attributeOperation', 'variantOperation', 'skuRows',
       'certificates', 'regionalPricing', 'shipping', 'freightTemplate', 'deliveryCountry', 'deliveryOptions',
       'salesUnit', 'paymentMethod', 'fobPrice', 'priceMode', 'skuPriceMode', 'packaging', 'deliveryTime'
@@ -466,12 +560,14 @@ app.post('/api/products/batch-update', (request, response, next) => {
       const now = new Date().toISOString();
       state.products.filter((product) => ids.has(product.id)).forEach((product, index) => {
         const next = { ...safePatch };
+        if (patch.usdRate && product.currencySymbol !== '$') Object.assign(next, convertProductPrices(product, patch.usdRate));
         if (Array.isArray(patch.title)) next.title = patch.title[index] || product.title;
         if (patch.priceTransform) {
-          const base = Number(product.price || 0);
+          const priced = { ...product, ...next };
+          const base = Number(priced.price || 0);
           const nextPrice = base * (1 + Number(patch.priceTransform.percent || 0) / 100) + Number(patch.priceTransform.fixed || 0);
           next.price = Math.max(0, nextPrice).toFixed(2);
-          next.priceTiers = (product.priceTiers || []).map((tier) => ({ ...tier, price: Math.max(0, Number(tier.price || 0) * (1 + Number(patch.priceTransform.percent || 0) / 100) + Number(patch.priceTransform.fixed || 0)).toFixed(2) }));
+          next.priceTiers = (priced.priceTiers || []).map((tier) => ({ ...tier, price: Math.max(0, Number(tier.price || 0) * (1 + Number(patch.priceTransform.percent || 0) / 100) + Number(patch.priceTransform.fixed || 0)).toFixed(2) }));
         }
         if (patch.skuTransform) next.skus = (product.skus || []).map((sku) => ({ ...sku, ...(patch.skuTransform.price == null ? {} : { price: patch.skuTransform.price }), ...(patch.skuTransform.stock == null ? {} : { stock: patch.skuTransform.stock }) }));
         if (Array.isArray(patch.skuRows)) {
@@ -545,7 +641,7 @@ app.post('/api/products/:id/refresh-detail', async (request, response, next) => 
     const product = state.products.find((item) => item.id === request.params.id);
     if (!product) return next(Object.assign(new Error('没有找到该商品'), { status: 404 }));
     const [enriched] = await Promise.race([
-      publisher.enrichSourceProducts([product]),
+      collector.enrichProducts([product]),
       // A real Alibaba CAPTCHA is shown to the user and may reasonably take
       // several minutes. Keep the API request alive through that interaction.
       new Promise((_, reject) => setTimeout(() => reject(new Error('重新采集详情超时，请完成验证码后重试')), 330000))
@@ -678,9 +774,9 @@ async function runPublishJob(jobId) {
       });
       store.patchJob(jobId, { status: 'running', progress: index, total, message: `正在处理 ${index + 1}/${total}：${product.title}` });
       try {
-        if (!hasCompleteSourceData(product)) {
+        if (sourcePlatform(product) === 'alibaba.com' && (!hasCompleteSourceData(product) || !resolvePublishRoute(product, state.settings).url)) {
           store.patchJob(jobId, { message: `正在补全商品资料 ${index + 1}/${total}：${product.title}` });
-          const [enriched] = await publisher.enrichSourceProducts([product]);
+          const [enriched] = await collector.enrichProducts([product]);
           store.update((draft) => {
             const target = draft.products.find((item) => item.id === product.id);
             if (target) Object.assign(target, enriched, { status: 'ready', updatedAt: new Date().toISOString() });
@@ -688,6 +784,8 @@ async function runPublishJob(jobId) {
           product = { ...product, ...enriched };
         }
         const settings = store.read().settings;
+        const sourceErrors = crossPlatformPublishErrors(product);
+        if (sourceErrors.length) throw new Error(sourceErrors.join('；'));
         const route = resolvePublishRoute(product, settings);
         if (route.error || !route.url) throw new Error(route.error || '该商品没有可用的国际站发布页');
         const publishSnapshot = createPublishSnapshot(product, { mode, category: route.category, categoryId: route.categoryId, publishPageUrl: route.url });
@@ -820,13 +918,10 @@ app.post('/api/publish', (request, response, next) => {
   if (!products.length) return next(Object.assign(new Error('请至少选择一件商品'), { status: 400 }));
   const mode = request.body.mode === 'submit' ? 'submit' : 'draft';
   const plan = createPublishPlan(products, state.settings);
-  const unresolved = plan.filter((group) => group.error || !group.url);
-  if (unresolved.length) {
-    return next(Object.assign(new Error(`有 ${unresolved.length} 个商品类目无法自动路由：${unresolved.map((group) => group.error || group.category || group.categoryId).join('；')}`), { status: 400 }));
-  }
   const job = store.createJob('publish', {
     productIds: products.map((item) => item.id), mode,
-    categoryGroups: plan.map((group) => ({ categoryId: group.categoryId, category: group.category, productIds: group.products.map((item) => item.id) }))
+    sourcePlatforms: [...new Set(products.map(sourcePlatform))],
+    categoryGroups: plan.map((group) => ({ sourcePlatform: group.sourcePlatform, categoryId: group.categoryId, category: group.category, productIds: group.products.map((item) => item.id) }))
   });
   store.patchJob(job.id, { total: products.length });
   response.status(202).json({ ...job, total: products.length });
@@ -856,7 +951,7 @@ app.post('/api/jobs/:id/resume', (request, response, next) => {
   }
   const updated = store.patchJob(job.id, { status: 'queued', message: `等待继续，已处理 ${job.progress}/${job.total} 件` });
   response.json(updated);
-  setImmediate(() => job.type === 'collect' ? startCollectJob(job.id) : runPublishJob(job.id));
+  setImmediate(() => job.type === 'collect' ? queueCollection(job.id) : runPublishJob(job.id));
 });
 
 app.post('/api/jobs/:id/cancel', (request, response, next) => {
@@ -908,14 +1003,20 @@ app.post('/api/products/find-replace', (request, response, next) => {
   } catch (error) { next(error); }
 });
 
-app.get('/api/publish/plan', (request, response, next) => {
+function publishPlanResponse(request, response, next) {
   try {
     const state = store.read();
-    const ids = new Set(Array.isArray(request.query.ids) ? request.query.ids : String(request.query.ids || '').split(',').filter(Boolean));
-    const products = ids.size ? state.products.filter((item) => ids.has(item.id)) : state.products.filter((item) => item.selected);
-    response.json({ groups: createPublishPlan(products, state.settings), bindings: publishBindings(state.settings) });
+    const provided = request.method === 'POST' ? request.body.ids : request.query.ids;
+    const ids = new Set(Array.isArray(provided) ? provided : String(provided || '').split(',').filter(Boolean));
+    const products = provided != null ? state.products.filter((item) => ids.has(item.id)) : state.products.filter((item) => item.selected);
+    const groups = createPublishPlan(products, state.settings).map((group) => ({ ...group,
+      products: group.products.map((product) => ({ id: product.id, sourcePlatform: sourcePlatform(product) })),
+    }));
+    response.json({ groups, total: products.length, bindings: publishBindings(state.settings) });
   } catch (error) { next(error); }
-});
+}
+app.get('/api/publish/plan', publishPlanResponse);
+app.post('/api/publish/plan', publishPlanResponse);
 
 app.post('/api/products/reference', (request, response, next) => {
   try {
@@ -933,21 +1034,12 @@ app.post('/api/products/reference', (request, response, next) => {
         && entry.data && typeof entry.data === 'object'
       );
       const referenceTemplate = successfulSnapshot ? { ...reference, ...successfulSnapshot.data } : reference;
-      const referenceCategory = productCategory(referenceTemplate);
-      for (const product of state.products.filter((item) => ids.has(item.id) && item.id !== reference.id)) {
-        const targetCategory = productCategory(product);
-        const mismatch = targetCategory.id && referenceCategory.id && targetCategory.id !== referenceCategory.id
-          ? `引用商品类目“${referenceCategory.pathText || referenceCategory.id}”与目标商品类目“${targetCategory.pathText || targetCategory.id}”不一致，请选择同类目成功商品`
-          : categoryMismatchMessage(product, referenceCategory.pathText);
-        if (mismatch) throw Object.assign(new Error(mismatch), { status: 400 });
-      }
+      const active = findWorkspaceJobs(state, { productIds: [...ids] }, ['queued', 'running', 'pause_requested']);
+      if (active.length) throw Object.assign(new Error('所选商品正在处理，请暂停任务后再引用资料'), { status: 409 });
       const changed = [];
       for (const product of state.products) {
-        if (!ids.has(product.id) || product.id === reference.id) continue;
-        // A failed product can have plenty of source data while still missing
-        // Alibaba-controlled values. Use the successful product as a complete
-        // publish template instead of only filling blank fields.
-        const patch = applyPublishedProductReference(product, referenceTemplate, { preserveCategory: true });
+        if (!ids.has(product.id) || product.id === reference.id || product.status === 'published') continue;
+        const patch = applyPublishedProductReference(product, referenceTemplate, { preserveCategory: true, onlyMissing: true });
         if (!Object.keys(patch).length) continue;
         // A template reference is an explicit recovery action for a failed
         // listing. Reset the working status and remove the stale failure
@@ -974,6 +1066,20 @@ app.get('/api/storage', (_request, response) => {
     videos,
     bytes: { root: directoryBytes(dataDir), workspace: directoryBytes(workspace), media: directoryBytes(mediaDir), images: directoryBytes(images), videos: directoryBytes(videos) }
   });
+});
+
+app.get('/api/announcements', async (_request, response) => {
+  inbox.account = process.env.KUA_YIPU_ACCOUNT || 'local';
+  response.json(await inbox.list());
+});
+app.post('/api/announcements/read', (request, response) => {
+  inbox.account = process.env.KUA_YIPU_ACCOUNT || 'local';
+  response.json(inbox.markRead(request.body?.id, request.body?.revision));
+});
+
+app.post('/api/storage/cleanup', (request, response, next) => {
+  try { response.json(cleanupWorkspace(store, dataDir, request.body)); }
+  catch (error) { next(error); }
 });
 
 app.post('/api/media/upload', (request, response, next) => {

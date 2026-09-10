@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { crossPlatformPublishErrors, sourcePlatform } from './source-platform.js';
 
 export const PRODUCT_SCHEMA_VERSION = 5;
 
@@ -160,6 +161,11 @@ export function applyPublishedProductReference(target, reference, options = {}) 
     'services', 'certificates', 'deliveryTime', 'salesUnit', 'packaging'
   ]) cloneIfPresent(field);
 
+  if (options.onlyMissing) {
+    const packaging = copyMissingProductData(target, reference).packaging;
+    if (packaging) patch.packaging = packaging;
+  }
+
   // Older captures sometimes kept these category values as top-level fields
   // instead of attribute rows. Materialize the aliases the publisher knows so
   // a reference remains usable across old and new workspace schemas.
@@ -275,6 +281,7 @@ function snapshotFields(product) {
     paymentMethod: product.paymentMethod || '', fobPrice: product.fobPrice || '', priceMode: product.priceMode || '',
     origin: product.origin || '', model: product.model || '', brand: product.brand || '', productType: product.productType || '',
     packaging: product.packaging || {}, deliveryTime: list(product.deliveryTime), shipping: product.shipping || {},
+    ...(product.sourcePackaging ? { sourcePackaging: product.sourcePackaging } : {}),
     freightTemplate: product.freightTemplate || '', services: product.services || {}, certificates: list(product.certificates),
     description: product.description || '', descriptionHtml: product.descriptionHtml || '',
     structuredDescription: product.structuredDescription || null, regionalPricing: product.regionalPricing || {}
@@ -320,6 +327,7 @@ export function auditProduct(product) {
   }
 
   if (!text(product.title)) add('basic.title.missing', 'basic', 'error', 'title', '缺少商品标题');
+  crossPlatformPublishErrors(product).forEach((message, index) => add(`source.platform.${index}`, 'publish', 'warning', 'sourcePlatform', `上架前：${message}`));
   if (!list(product.categoryPath || product.sourceCategoryPath).length && !text(product.categoryId)) add('taxonomy.category.missing', 'taxonomy', 'warning', 'categoryPath', '未识别商品类目');
   if (!text(product.subtitle)) add('basic.subtitle.missing', 'basic', 'info', 'subtitle', '未采集副标题');
   if (!list(product.keywords).length) add('basic.keywords.missing', 'basic', 'warning', 'keywords', '未采集商品关键词');
@@ -329,7 +337,19 @@ export function auditProduct(product) {
   if (!text(product.origin)) add('attributes.origin.missing', 'attributes', 'error', 'origin', '缺少产地');
   if (groups.length && !skus.length) add('sku.rows.missing', 'variants', 'error', 'skus', '存在规格但缺少SKU明细');
   const expectedSkuCount = groups.reduce((count, group) => count * Math.max(1, list(group.options).length), groups.length ? 1 : 0);
-  if (groups.length && skus.length && expectedSkuCount !== skus.length) add('sku.rows.incomplete', 'variants', 'error', 'skus', `SKU组合不完整（应有${expectedSkuCount}行，当前${skus.length}行）`);
+  const sourceSkuCount = Number(product.sourceStructuredEvidence?.skuCount || product.dataCompleteness?.structuredSkus || 0);
+  const validSourceCombinations = skus.map((sku) => {
+    const platform = sourcePlatform(product);
+    const structuredSource = sku.source === 'detailData.skuInfoMap' || (platform !== 'alibaba.com'
+      && sku.source === platform && product.sourceStructuredEvidence?.platform === platform
+      && product.sourceStructuredEvidence?.skuIds?.includes(sku.id));
+    if (!structuredSource || sku.derived || !sku.evidence?.combination) return '';
+    if (!groups.every((group) => list(group.options).includes(sku.attributes?.[group.name]))) return '';
+    return JSON.stringify(groups.map((group) => sku.attributes[group.name]));
+  });
+  const completeSourceSkuMap = sourceSkuCount > 0 && sourceSkuCount === skus.length
+    && validSourceCombinations.every(Boolean) && new Set(validSourceCombinations).size === skus.length;
+  if (groups.length && skus.length && expectedSkuCount !== skus.length && !completeSourceSkuMap) add('sku.rows.incomplete', 'variants', 'error', 'skus', `SKU组合不完整（应有${expectedSkuCount}行，当前${skus.length}行）`);
   if (groups.length && skus.length && skus.every((sku) => sku.derived || sku.source === 'derived')) add('sku.derived.only', 'variants', 'warning', 'skus', 'SKU由规格组合推导，不是来源页面真实SKU');
   if (skus.some((sku) => !text(sku.code || sku.skuCode))) add('sku.code.missing', 'variants', 'info', 'skus', '部分SKU缺少商品编码');
   if (skus.some((sku) => sku.price != null && sku.price !== '' && !positive(sku.price))) add('sku.price.invalid', 'variants', 'error', 'skus', '部分SKU价格无效');
@@ -367,10 +387,11 @@ export function auditProduct(product) {
 }
 
 export function syncProductModel(product, options = {}) {
+  product.sourcePlatform = sourcePlatform(product);
   const previousSchemaVersion = Number(product.schemaVersion || 0);
   product.schemaVersion = PRODUCT_SCHEMA_VERSION;
   product.source = product.source || {
-    platform: /1688\.com/i.test(product.sourceUrl || '') ? '1688' : 'alibaba.com',
+    platform: product.sourcePlatform,
     productId: product.sourceId || '', url: product.sourceUrl || '', capturedAt: options.capturedAt || product.updatedAt || nowIso(),
     shopId: product.shopId || '', groupId: product.groupId || '', evidence: product.evidence || {}
   };
