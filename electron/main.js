@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { AuthorizationLease } from './auth-lease.js';
+import { AuthorizationLease, isRetryableAuthorizationError } from './auth-lease.js';
 import { matchesAlibabaSession } from './alibaba-identity.js';
 import { readPrivateSession, writePrivateSession } from '../server/private-session-storage.js';
 import { authorizationEndpoint } from '../server/auth-endpoint.js';
@@ -39,6 +39,8 @@ let quitPromptOpen = false;
 const localGate = crypto.randomBytes(32).toString('hex');
 const authorizationLease = new AuthorizationLease();
 let heartbeatPromise;
+let authorizationConnection = { state: 'connected', message: '' };
+let authorizationWorkPaused = false;
 let nextHeartbeat = 0;
 let hasSingleInstanceLock = false;
 
@@ -120,9 +122,14 @@ async function authRequest(endpoint, body, token = '') {
       method: 'POST', redirect: 'error', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body), signal: AbortSignal.timeout(20000)
     });
   } catch {
-    throw new Error('暂时无法连接授权服务器，请检查网络后重试');
+    throw Object.assign(new Error('暂时无法连接授权服务器，请检查网络后重试'), { retryable: true });
   }
-  const data = await response.json().catch(() => ({}));
+  let data;
+  try { data = await response.json(); }
+  catch {
+    if (response.ok) throw Object.assign(new Error('授权服务响应中断，正在等待重试'), { retryable: true });
+    data = {};
+  }
   data.serverTime ||= response.headers.get('date');
   if (!response.ok) throw Object.assign(new Error(data.reason || data.error || '授权验证失败'), { status: response.status });
   return data;
@@ -637,6 +644,8 @@ handleLocalIpc('auth:login', async (_event, payload) => {
   if (!authorization.authorized || !authorization.token) throw new Error('登录失败');
   if (suppliedCode) activationCredentials(username, suppliedCode);
   currentSession = { ...authorization, username, deviceId, checkedAt: Date.now() };
+  authorizationConnection = { state: 'connected', message: '' };
+  authorizationWorkPaused = false;
   try {
     await startAlibabaLogin(username, password);
     process.env.KUA_YIPU_ACCOUNT = username;
@@ -653,12 +662,22 @@ handleLocalIpc('auth:session', () => currentSession?.verified && authorizationLe
 function revokeLocalSession() {
   authorizationLease.clear();
   currentSession = null;
+  authorizationConnection = { state: 'revoked', message: '软件授权已失效，请重新登录' };
   serverModulePromise?.then((module) => module.suspendAuthorizedWork?.()).catch(() => {});
   if (isWindowAlive(mainWindow)) {
     if (!isWindowAlive(loginWindow)) createLoginWindow();
     mainWindow.destroy();
   }
 }
+
+function pauseDisconnectedWork() {
+  authorizationConnection = { state: 'paused', message: '授权连接中断，已暂停后续任务，正在自动重连' };
+  if (authorizationWorkPaused) return;
+  authorizationWorkPaused = true;
+  serverModulePromise?.then((module) => module.suspendAuthorizedWork?.({ graceful: true })).catch(() => {});
+}
+
+handleLocalIpc('auth:connection', () => ({ ...authorizationConnection, remainingSeconds: authorizationLease.remainingSeconds() }));
 
 async function checkAuthorization() {
   if (heartbeatPromise) return heartbeatPromise;
@@ -675,10 +694,18 @@ async function refreshAuthorization() {
     if (currentSession !== checkedSession) return { authorized: Boolean(currentSession) };
     authorizationLease.renew(result, started);
     currentSession = { ...currentSession, token: result.token || currentSession.token, expiresAt: result.expiresAt };
+    authorizationConnection = { state: 'connected', message: authorizationWorkPaused ? '授权连接已恢复，暂停的任务可继续' : '' };
+    authorizationWorkPaused = false;
     nextHeartbeat = performance.now() + 30000;
     return { authorized: true, expiresAt: result.expiresAt };
   } catch (error) {
     if (currentSession !== checkedSession) return { authorized: Boolean(currentSession) };
+    if (checkedSession.verified && isRetryableAuthorizationError(error) && !authorizationLease.expired()) {
+      nextHeartbeat = performance.now() + 5000;
+      if (authorizationLease.valid()) authorizationConnection = { state: 'retrying', message: '授权连接暂时中断，正在重试，任务继续运行' };
+      else pauseDisconnectedWork();
+      return { authorized: authorizationLease.valid(), reconnecting: true };
+    }
     revokeLocalSession();
     throw error;
   }
@@ -918,7 +945,8 @@ app.whenReady().then(() => {
   createLoginWindow();
   setInterval(() => {
     if (!currentSession?.verified) return;
-    if (!authorizationLease.valid()) { revokeLocalSession(); return; }
+    if (authorizationLease.expired()) { revokeLocalSession(); return; }
+    if (!authorizationLease.valid()) pauseDisconnectedWork();
     if (performance.now() >= nextHeartbeat) checkAuthorization().catch(() => {});
   }, 5000).unref();
   ensureLocalServer().catch((error) => {
@@ -954,7 +982,7 @@ globalThis.__KUA_YIPU_SELLER_BRIDGE = {
   }
 };
 
-globalThis.__KUA_YIPU_AUTHORIZATION = { valid: () => Boolean(currentSession?.verified && authorizationLease.valid()) };
+globalThis.__KUA_YIPU_AUTHORIZATION = { valid: () => Boolean(currentSession?.verified && authorizationLease.valid()), canRead: () => Boolean(currentSession?.verified) };
 globalThis.__KUA_YIPU_SECURE_STORAGE = {
   encrypt: (value) => {
     if (!safeStorage.isEncryptionAvailable()) throw new Error('系统无法加密 API 密钥');

@@ -63,7 +63,7 @@ async function processingPatch(product) {
   try { apiKey = secureSettings.key(); } catch {}
   return prepareMarketplaceProduct(product, store.read().settings.marketplaceProcessing || DEFAULT_PROCESSING, { apiKey });
 }
-const inbox = new AnnouncementInbox(path.join(dataDir, 'announcement-reads.json'), process.env.KUA_YIPU_AUTH_URL || 'https://106.55.45.126:80', process.env.KUA_YIPU_ACCOUNT || 'local');
+const inbox = new AnnouncementInbox(path.join(dataDir, 'announcement-reads.json'), process.env.KUA_YIPU_AUTH_URL || 'https://106.55.45.126', process.env.KUA_YIPU_ACCOUNT || 'local');
 const publisher = new SellerPublisher(dataDir);
 const collector = new ShopCollector(dataDir, (products, onProgress, options) => publisher.enrichSourceProducts(products, onProgress, options));
 store.update((state) => {
@@ -236,7 +236,10 @@ if (process.env.KUA_YIPU_DESKTOP === '1') {
     if (!process.env.KUA_YIPU_LOCAL_GATE || request.headers['x-kua-yipu-gate'] !== process.env.KUA_YIPU_LOCAL_GATE) {
       return response.status(401).json({ error: '请从抄得快登录后进入工作台' });
     }
-    if (!globalThis.__KUA_YIPU_AUTHORIZATION?.valid()) return response.status(401).json({ error: '授权校验已失效，请连接网络后重新登录' });
+    if (!globalThis.__KUA_YIPU_AUTHORIZATION?.valid()
+      && !(request.method === 'GET' && request.path === '/state' && globalThis.__KUA_YIPU_AUTHORIZATION?.canRead?.())) {
+      return response.status(401).json({ error: '授权连接中断，任务已保留，请等待重新连接' });
+    }
     next();
   });
 }
@@ -873,6 +876,9 @@ async function runPublishJob(jobId) {
           product = { ...product, ...enriched };
         }
         const settings = store.read().settings;
+        if (['pause_requested', 'paused'].includes(store.read().jobs.find((item) => item.id === jobId)?.status)) {
+          throw Object.assign(new Error('任务已暂停，已完成数据已保存'), { code: 'PUBLISH_PAUSED' });
+        }
         const sourceErrors = crossPlatformPublishErrors(product);
         if (sourceErrors.length) throw new Error(sourceErrors.join('；'));
         const route = resolvePublishRoute(product, settings);
@@ -1242,11 +1248,11 @@ export async function shutdownServer() {
   await new Promise((resolve) => active.close(() => resolve()));
 }
 
-export async function suspendAuthorizedWork() {
+export async function suspendAuthorizedWork({ graceful = false } = {}) {
   const jobs = store.read().jobs.filter((job) => ['queued', 'running', 'pause_requested'].includes(job.status));
   for (const job of jobs) {
-    store.patchJob(job.id, { status: 'paused', message: '授权校验中断，任务已暂停，请联网后重新登录' });
-    if (job.type === 'publish') publisher.requestPublishStop(job.id);
+    store.patchJob(job.id, { status: graceful && job.status !== 'queued' ? 'pause_requested' : 'paused', message: graceful ? '授权连接中断，当前商品处理结束后暂停，已完成数据保留' : '授权校验中断，任务已暂停，请联网后重新登录' });
+    if (!graceful && job.type === 'publish') publisher.requestPublishStop(job.id);
   }
-  await collector.resetContext();
+  if (!graceful) await collector.resetContext();
 }

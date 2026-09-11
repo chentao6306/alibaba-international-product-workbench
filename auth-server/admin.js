@@ -62,6 +62,13 @@ async function loadAccounts() {
   licenses = data.items;
   $('licenses').innerHTML = `<table><thead><tr><th>Alibaba 账号</th><th>状态</th><th>到期（北京时间）</th><th>最近活动</th><th>设备</th><th>多端登录</th><th>操作</th></tr></thead><tbody>${licenses.map((item, index) => `<tr><td class="account">${escape(item.alibaba_account)}<small title="${escape(item.note)}">${escape(item.note)}</small>${!item.deleted_at ? `<small class="${item.credential_required ? 'credential-ready' : 'credential-pending'}">${item.credential_required ? '授权码已启用' : '授权安全待升级'}</small>` : ''}${item.deleted_at ? `<small>删除于 ${escape(time(item.deleted_at))}</small>` : ''}</td><td>${badge(item.display_status)}</td><td>${escape(time(item.expires_at))}</td><td>${escape(time(item.last_seen_at))}</td><td>${item.device_count}</td><td>${item.deleted_at ? '-' : `<label class="switch-label"><input type="checkbox" role="switch" aria-label="${escape(item.alibaba_account)} 多端登录" data-device="${index}" ${item.allow_multi_device ? 'checked' : ''}>允许</label>`}</td><td>${item.deleted_at ? '<span class="muted">授权已删除</span>' : `<div class="actions"><button class="secondary" data-action="credential" data-index="${index}">${item.credential_required ? '重置授权码' : '启用授权码'}</button><button class="secondary" data-action="extend" data-index="${index}">延长</button><button class="secondary" data-action="reduce" data-index="${index}">减少</button>${item.display_status === 'active' ? `<button class="secondary" data-action="pause" data-index="${index}">停用</button>` : ['paused', 'revoked'].includes(item.status) ? `<button class="secondary" data-action="resume" data-index="${index}">恢复</button>` : ''}${item.status !== 'revoked' ? `<button class="danger" data-action="revoke" data-index="${index}">注销</button>` : ''}<button class="danger" data-action="delete" data-index="${index}">删除</button></div>`}</td></tr>`).join('')}</tbody></table>${!licenses.length ? '<div class="empty">没有匹配的账号</div>' : ''}`;
   highlightStats();
+  $('licenses').querySelectorAll('[data-action="credential"]').forEach((button) => {
+    const index = button.dataset.index;
+    const control = document.createElement('button');
+    control.className = 'secondary'; control.dataset.action = 'connection'; control.dataset.index = index;
+    control.textContent = `断线宽限 ${licenses[index].offline_grace_minutes ?? 5} 分钟`;
+    button.after(control);
+  });
   $('licenses').querySelectorAll('[data-action]').forEach((button) => { button.onclick = () => openAction(licenses[button.dataset.index], button.dataset.action); });
   $('licenses').querySelectorAll('[data-device]').forEach((input) => { input.onchange = () => { const item = licenses[input.dataset.device]; const value = input.checked; input.checked = item.allow_multi_device; openAction(item, 'devices', value); }; });
   pages($('licensePages'), data, (value) => { page = value; loadAccounts().catch((error) => message(error.message)); });
@@ -71,6 +78,12 @@ function openAction(item, type, allowMultiDevice) {
   $('actionHeading').textContent = ({ credential: item.credential_required ? '重置软件授权码' : '启用软件授权码', extend: '延长授权', reduce: '减少授权天数', pause: '停用账号', resume: '恢复账号', revoke: '注销授权', delete: '删除用户', deleteNotice: '删除公告', devices: '更改登录策略' })[type];
   $('actionText').textContent = type === 'deleteNotice' ? `确认删除公告“${item.title}”？用户端同步后将移除这条公告。此操作无法撤销。` : type === 'delete' ? `确认删除用户“${item.alibaba_account}”？授权将失效，设备记录将清除，账号移入“已删除”。` : type === 'devices' ? `${item.alibaba_account}：${allowMultiDevice ? '允许多台电脑同时登录。' : '仅允许最后登录的设备继续使用，其他设备将在下次授权检查时退出。'}` : `${item.alibaba_account}${['pause', 'revoke'].includes(type) ? ' 的现有客户端将失去使用授权。' : ''}`;
   const adjusting = ['extend', 'reduce'].includes(type);
+  $('connectionField').hidden = type !== 'connection'; $('offlineGraceMinutes').disabled = type !== 'connection';
+  $('offlineGraceMinutes').value = item.offline_grace_minutes ?? 5;
+  if (type === 'connection') {
+    $('actionHeading').textContent = '授权连接中断策略';
+    $('actionText').textContent = `${item.alibaba_account}：从最后一次成功校验开始计时，超过宽限后保留界面和进度并暂停后续任务。授权到期或停用仍失效。下次成功心跳生效，需要客户端 1.4.7 或更新版本。`;
+  }
   if (type === 'credential') $('actionText').textContent = `${item.alibaba_account}：现有会话会失效。请先确认客户已安装 1.4.6 或更新版本，并将生成的新授权码交给客户。启用后不再允许旧版无授权码登录。`;
   $('extendField').hidden = !adjusting; $('extendDays').disabled = !adjusting;
   $('daysLabel').textContent = type === 'reduce' ? '减少天数' : '延长天数';
@@ -92,7 +105,7 @@ $('actionForm').onsubmit = async (event) => {
   try {
     const removing = ['delete', 'deleteNotice'].includes(action.type);
     const announcement = action.type === 'deleteNotice';
-    const updated = await api(`/api/admin/${announcement ? 'announcements' : 'licenses'}/${action.item.id}`, { method: removing ? 'DELETE' : 'PATCH', ...(removing ? {} : { body: JSON.stringify({ action: action.type, days: Number($('extendDays').value), allowMultiDevice: action.allowMultiDevice }) }) });
+    const updated = await api(`/api/admin/${announcement ? 'announcements' : 'licenses'}/${action.item.id}`, { method: removing ? 'DELETE' : 'PATCH', ...(removing ? {} : { body: JSON.stringify({ action: action.type, days: Number($('extendDays').value), allowMultiDevice: action.allowMultiDevice, offlineGraceMinutes: Number($('offlineGraceMinutes').value) }) }) });
     $('actionDialog').close();
     showCredential(updated);
     if (announcement) await loadNotices(); else await Promise.all([loadAccounts(), stats()]);

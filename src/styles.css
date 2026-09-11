@@ -472,6 +472,11 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--orange); }
 .processing-toggles, .processing-actions { display: flex; flex-wrap: wrap; gap: 16px 24px; align-items: center; }
 .processing-toggles label { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; }
 .processing-toggles input { width: 17px; height: 17px; }
+.authorization-connection { position: sticky; top: 0; z-index: 20; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 18px; padding: 12px 0; background: #f3f5f6; border-bottom: 1px solid #d7dfe3; color: #866213; font-size: 14px; }
+.authorization-connection > svg { flex-shrink: 0; }
+.authorization-connection > span { flex: 1; min-width: 180px; overflow-wrap: anywhere; }
+.authorization-connection.paused { color: #aa4033; }
+.authorization-connection.connected { color: #167a66; }
 .brand .brand-logo { width: 44px; height: 44px; flex: 0 0 44px; object-fit: contain; }
 .collection-tasks { margin: 18px 0; border-top: 1px solid #ccd9dc; border-bottom: 1px solid #ccd9dc; background: #f5fafa; }
 .collection-task-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 16px; align-items: center; }

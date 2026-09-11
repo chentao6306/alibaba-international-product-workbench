@@ -2,12 +2,12 @@ import assert from 'node:assert/strict';
 import tls from 'node:tls';
 import net from 'node:net';
 
-const base = 'https://106.55.45.126:80';
+const base = 'https://106.55.45.126';
 const request = (route, options = {}) => fetch(base + route, { ...options, redirect: 'manual', signal: AbortSignal.timeout(15000) });
 const results = {};
 const health = await request('/health');
 assert.equal(health.status, 200);
-assert.equal((await health.json()).version, '1.4.6');
+assert.equal((await health.json()).version, '1.4.7');
 assert.equal(health.headers.get('x-content-type-options'), 'nosniff');
 assert.match(health.headers.get('content-security-policy'), /frame-ancestors 'none'/);
 results.healthAndHeaders = true;
@@ -28,7 +28,7 @@ const legacy = await fetch('http://106.55.45.126/', { redirect: 'manual', signal
 assert.equal(legacy.status, 308); assert.equal(legacy.headers.get('location'), base + '/');
 results.adminHttpsRedirect = true;
 results.tls = await new Promise((resolve, reject) => {
-  const socket = tls.connect({ host: '106.55.45.126', port: 80, rejectUnauthorized: true }, () => {
+  const socket = tls.connect({ host: '106.55.45.126', port: 443, rejectUnauthorized: true }, () => {
     const certificate = socket.getPeerCertificate();
     resolve({ authorized: socket.authorized, protocol: socket.getProtocol(), expires: certificate.valid_to }); socket.end();
   });

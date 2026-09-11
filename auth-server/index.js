@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { clientAllowed, licenseState, pagination, announcementInput, licenseFilters } from './policy.js';
 import { configureHttpSecurity } from './http-security.js';
-import { createActivationCredential, validActivation, publicLicense, clientSessionAllowed, clientClaims, tokenCodec, requireCredentialTransport } from './security.js';
+import { createActivationCredential, validActivation, publicLicense, clientSessionAllowed, clientClaims, tokenCodec, requireCredentialTransport, offlineGraceMinutes } from './security.js';
 import { promisify } from 'node:util';
 
 const app = express();
@@ -36,7 +36,7 @@ const requireAdmin = async (request, response, next) => {
   if (!stored || stored.password_fingerprint !== passwordFingerprint(stored.password_hash)) return response.status(401).json({ error: '管理员登录已失效' });
   request.admin = auth; next();
 };
-const session = (license, deviceId) => ({ authorized: true, serverTime: new Date().toISOString(), expiresAt: license.expires_at, token: sign(clientClaims(license, deviceId)) });
+const session = (license, deviceId) => ({ authorized: true, serverTime: new Date().toISOString(), expiresAt: license.expires_at, offlineGraceSeconds: offlineGraceMinutes(license.offline_grace_minutes) * 60, token: sign(clientClaims(license, deviceId)) });
 async function transaction(work) {
   const client = await pool.connect();
   try { await client.query('BEGIN'); const result = await work(client); await client.query('COMMIT'); return result; }
@@ -45,7 +45,7 @@ async function transaction(work) {
 }
 const event = (client, licenseId, action, actor, metadata = {}) => client.query('INSERT INTO license_events (id,license_id,action,actor,metadata) VALUES ($1,$2,$3,$4,$5)', [id(), licenseId, action, actor, JSON.stringify(metadata)]);
 
-app.get('/health', (_request, response) => response.json({ ok: true, service: 'kua-yipu-auth', version: '1.4.6' }));
+app.get('/health', (_request, response) => response.json({ ok: true, service: 'kua-yipu-auth', version: '1.4.7' }));
 app.get('/', (_request, response) => response.sendFile(path.join(__dirname, 'admin.html')));
 for (const file of ['admin.js', 'admin.css']) app.get(`/${file}`, (_request, response) => response.sendFile(path.join(__dirname, file)));
 app.post('/api/admin/login', async (request, response) => {
@@ -134,13 +134,16 @@ app.post('/api/admin/licenses', requireAdmin, async (request, response) => {
 });
 app.patch('/api/admin/licenses/:id', requireAdmin, async (request, response) => {
   const action = normalize(request.body?.action);
-  if (!['pause', 'resume', 'revoke', 'extend', 'reduce', 'devices', 'credential'].includes(action)) throw fail('不支持的授权操作');
+  if (!['pause', 'resume', 'revoke', 'extend', 'reduce', 'devices', 'credential', 'connection'].includes(action)) throw fail('不支持的授权操作');
   response.json(await transaction(async (client) => {
     const existing = (await client.query('SELECT * FROM licenses WHERE id=$1 FOR UPDATE', [request.params.id])).rows[0];
     if (!existing) throw fail('授权账号不存在', 404);
     if (existing.deleted_at) throw fail('账号已删除，不能修改原授权', 409);
     const values = [existing.id]; let query; let credential;
-    if (action === 'credential') {
+    if (action === 'connection') {
+      values.push(offlineGraceMinutes(request.body.offlineGraceMinutes));
+      query = 'UPDATE licenses SET offline_grace_minutes=$2,updated_at=now() WHERE id=$1 RETURNING *';
+    } else if (action === 'credential') {
       credential = createActivationCredential();
       values.push(credential.credentialHash);
       query = 'UPDATE licenses SET credential_required=true,credential_hash=$2,credential_version=credential_version+1,updated_at=now() WHERE id=$1 RETURNING *';
@@ -160,7 +163,7 @@ app.patch('/api/admin/licenses/:id', requireAdmin, async (request, response) => 
       values.push({ pause: 'paused', resume: 'active', revoke: 'revoked' }[action]);
     }
     const updated = (await client.query(query, values)).rows[0];
-    await event(client, existing.id, action, request.admin.username, { days: request.body.days || null, allowMultiDevice: updated.allow_multi_device, previousExpiresAt: existing.expires_at, expiresAt: updated.expires_at });
+    await event(client, existing.id, action, request.admin.username, { days: request.body.days || null, allowMultiDevice: updated.allow_multi_device, previousExpiresAt: existing.expires_at, expiresAt: updated.expires_at, previousOfflineGraceMinutes: existing.offline_grace_minutes, offlineGraceMinutes: updated.offline_grace_minutes });
     return { ...publicLicense(updated), ...(credential ? { activationCode: credential.activationCode } : {}) };
   }));
 });

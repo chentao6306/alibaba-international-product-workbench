@@ -33,6 +33,14 @@ test('authorization service supports filtering, expiration correction, deletion,
     const license = (await api('/api/admin/licenses', { alibabaAccount: 'test-account', days: 1 })).data;
     const a = (await api('/api/client/login', { username: 'test-account', deviceId: 'A' })).data.token;
     const b = (await api('/api/client/login', { username: 'test-account', deviceId: 'B' })).data.token;
+    assert.equal((await api('/api/client/heartbeat', {}, 'POST', a)).data.offlineGraceSeconds, 300);
+    assert.equal((await api(`/api/admin/licenses/${license.id}`, { action: 'connection', offlineGraceMinutes: 12 }, 'PATCH', '')).status, 401);
+    assert.equal((await api(`/api/admin/licenses/${license.id}`, { action: 'connection', offlineGraceMinutes: 12 }, 'PATCH')).data.offline_grace_minutes, 12);
+    assert.equal((await api('/api/client/heartbeat', {}, 'POST', a)).data.offlineGraceSeconds, 720);
+    assert.equal((await api('/api/admin/licenses?search=test-account', null, 'GET')).data.items[0].offline_grace_minutes, 12);
+    for (const invalid of [0, 61, 1.5, '5', null]) assert.equal((await api(`/api/admin/licenses/${license.id}`, { action: 'connection', offlineGraceMinutes: invalid }, 'PATCH')).status, 400);
+    const connectionHistory = (await api(`/api/admin/licenses/${license.id}/history`, null, 'GET')).data;
+    assert.ok(connectionHistory.some((entry) => entry.action === 'connection'));
     assert.equal((await api('/api/client/heartbeat', {}, 'POST', a)).status, 200);
     assert.equal((await api('/api/client/heartbeat', {}, 'POST', b)).status, 200);
     await api(`/api/admin/licenses/${license.id}`, { action: 'devices', allowMultiDevice: false }, 'PATCH');

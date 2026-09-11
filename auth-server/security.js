@@ -1,5 +1,12 @@
 import crypto from 'node:crypto';
 
+export function offlineGraceMinutes(value = 5) {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 60) {
+    throw Object.assign(new Error('断线宽限时间必须为 1 至 60 分钟的整数'), { status: 400 });
+  }
+  return value;
+}
+
 export function createActivationCredential() {
   const activationCode = `CDK-${crypto.randomBytes(32).toString('base64url')}`;
   return { activationCode, credentialHash: crypto.createHash('sha256').update(activationCode).digest('hex') };
@@ -32,7 +39,7 @@ export function clientSessionAllowed(license, auth) {
 export function clientClaims(license, deviceId) {
   return { aud: 'client', account: license.alibaba_account, licenseId: license.id, deviceId,
     credentialVersion: Number(license.credential_version || 0), credentialVerified: Boolean(license.credential_required),
-    exp: Math.min(new Date(license.expires_at).getTime(), Date.now() + 10 * 60 * 1000) };
+    exp: Math.min(new Date(license.expires_at).getTime(), Date.now() + Math.max(10, offlineGraceMinutes(license.offline_grace_minutes) + 2) * 60000) };
 }
 
 export function tokenCodec(secret) {

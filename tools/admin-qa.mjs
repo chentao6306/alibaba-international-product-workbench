@@ -55,6 +55,18 @@ try {
   await page.waitForFunction(() => document.querySelector('#licensePages').textContent.includes('2 / 2'));
   await filtered(() => page.locator('[data-filter="active"]').click());
   const row = page.locator('#licenses tbody tr').first();
+  await row.locator('[data-action="connection"]').click();
+  await page.locator('#offlineGraceMinutes').fill('12');
+  await page.screenshot({ path: path.join(root, 'connection-policy-desktop.png') });
+  await page.setViewportSize({ width: 430, height: 932 });
+  await page.screenshot({ path: path.join(root, 'connection-policy-mobile.png') });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await filtered(() => page.locator('#confirmAction').click());
+  await row.locator('[data-action="connection"]').filter({ hasText: '12 分钟' }).waitFor();
+  await row.locator('[data-action="connection"]').click();
+  assert.equal(await page.locator('#offlineGraceMinutes').inputValue(), '12');
+  await page.locator('#cancelAction').click();
   await row.locator('[data-action="credential"]').click();
   await page.locator('#confirmAction').click();
   await page.locator('#credentialDialog').waitFor();

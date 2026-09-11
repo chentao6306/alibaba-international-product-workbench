@@ -12,6 +12,7 @@ import { useAnnouncements, AnnouncementPopup, AnnouncementsView } from './Announ
 import CollectionFolders from './CollectionFolders.jsx';
 import CollectionTasks from './CollectionTasks.jsx';
 import OriginCountrySelect from './OriginCountrySelect.jsx';
+import AuthorizationConnection from './AuthorizationConnection.jsx';
 
 const EMPTY = { shops: [], groups: [], collectionFolders: [], products: [], jobs: [], settings: {}, browser: {}, collectorBrowser: {} };
 
@@ -957,12 +958,6 @@ export default function App() {
     const timer = setInterval(() => refresh().catch(() => {}), 5000);
     return () => { mounted.current = false; clearInterval(timer); };
   }, []);
-  useEffect(() => {
-    const heartbeat = window.kuaYipu?.heartbeat;
-    if (!heartbeat) return undefined;
-    const timer = setInterval(() => heartbeat().catch(() => {}), 60 * 1000);
-    return () => clearInterval(timer);
-  }, []);
   function notify(text, type = 'success') { setNotice({ text, type }); setTimeout(() => setNotice(null), 4200); }
   function navigate(id, nextPlatform) { setView(id); if (nextPlatform) setPlatform(nextPlatform); setMenuOpen(false); }
   const folderId = state.settings.activeCollectionFolderId || '';
@@ -970,7 +965,7 @@ export default function App() {
   return <div className="app-shell">
     <aside className={`sidebar ${menuOpen ? 'open' : ''}`}><div className="brand"><img className="brand-logo" src="/brand.png" alt="抄得快" /><span><strong>抄得快</strong><small>国际站商品工作台</small></span><button className="icon-button close-nav" onClick={() => setMenuOpen(false)}><X size={18} /></button></div><nav>{NAV.map(({ id, label, icon: Icon }) => <button key={id} className={view === id ? 'active' : ''} onClick={() => navigate(id)}><Icon size={19} /><span>{label}</span>{id === 'products' && state.products.length > 0 && <b>{state.products.length}</b>}{id === 'publish' && state.products.some((item) => item.selected) && <b>{state.products.filter((item) => item.selected).length}</b>}{id === 'announcements' && inbox.unread > 0 && <i className="unread-dot" aria-label="有未读公告" />}<ChevronRight size={15} /></button>)}</nav><div className="sidebar-foot"><span className={`system-dot ${state.browser.browserOpen ? 'online' : ''}`} /><div><strong>本地服务</strong><small>运行正常</small></div></div></aside>
     {menuOpen && <button className="nav-backdrop" onClick={() => setMenuOpen(false)} />}
-    <main>{view === 'source' && <SourceView {...props} />}{COLLECTION_VIEWS[view] && <LinkCollectionView key={view} entry={view} {...props} />}{view === 'products' && <ProductsView {...props} />}{view === 'publish' && <PublishView {...props} />}{view === 'settings' && <SettingsView {...props} />}{view === 'announcements' && <><Header title="公告" onMenu={() => setMenuOpen(true)} /><AnnouncementsView inbox={inbox} /></>}</main><AnnouncementPopup inbox={inbox} />
+    <main><AuthorizationConnection />{view === 'source' && <SourceView {...props} />}{COLLECTION_VIEWS[view] && <LinkCollectionView key={view} entry={view} {...props} />}{view === 'products' && <ProductsView {...props} />}{view === 'publish' && <PublishView {...props} />}{view === 'settings' && <SettingsView {...props} />}{view === 'announcements' && <><Header title="公告" onMenu={() => setMenuOpen(true)} /><AnnouncementsView inbox={inbox} /></>}</main><AnnouncementPopup inbox={inbox} />
     <Notice notice={notice} onClose={() => setNotice(null)} />
   </div>;
 }

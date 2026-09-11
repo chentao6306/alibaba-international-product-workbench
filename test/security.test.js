@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { AuthorizationLease } from '../electron/auth-lease.js';
+import { AuthorizationLease, isRetryableAuthorizationError } from '../electron/auth-lease.js';
 import { matchesAlibabaSession } from '../electron/alibaba-identity.js';
 import { SecureSettings } from '../server/secure-settings.js';
 import { readPrivateSession, writePrivateSession } from '../server/private-session-storage.js';
@@ -16,7 +16,7 @@ import { authorizationEndpoint } from '../server/auth-endpoint.js';
 import { tokenCodec, clientSessionAllowed } from '../auth-server/security.js';
 
 test('authorization transport rejects HTTP and credential-bearing or redirected endpoints', () => {
-  assert.equal(authorizationEndpoint(), 'https://106.55.45.126:80');
+  assert.equal(authorizationEndpoint(), 'https://106.55.45.126');
   for (const url of ['http://106.55.45.126', 'https://user:secret@106.55.45.126', 'https://106.55.45.126/path', 'https://106.55.45.126?url=http://other', 'file:///local']) assert.throws(() => authorizationEndpoint(url));
   assert.throws(() => authorizationEndpoint('http://127.0.0.1:8790'));
   assert.equal(authorizationEndpoint('http://127.0.0.1:8790', { development: true }), 'http://127.0.0.1:8790');
@@ -60,6 +60,27 @@ test('authorization expires on monotonic elapsed time regardless of client clock
   assert.throws(() => lease.renew({ ...response, serverTime: null }));
   assert.throws(() => lease.renew({ ...response, authorized: false }));
   assert.equal(lease.valid(), false);
+});
+
+test('server-configured connection grace is bounded by license expiry and never extended by failures', () => {
+  let elapsed = 100;
+  const lease = new AuthorizationLease({ now: () => elapsed });
+  const response = { authorized: true, serverTime: '2026-09-21T00:00:00Z', expiresAt: '2026-09-22T00:00:00Z', offlineGraceSeconds: 300 };
+  lease.renew(response);
+  elapsed += 120000;
+  assert.equal(lease.valid(), true); assert.equal(lease.remainingSeconds(), 180);
+  elapsed += 180001;
+  assert.equal(lease.valid(), false); assert.equal(lease.expired(), false);
+  lease.renew({ ...response, offlineGraceSeconds: 60 });
+  assert.equal(lease.remainingSeconds(), 60);
+  lease.renew({ ...response, expiresAt: '2026-09-21T00:00:20Z' });
+  elapsed += 20001;
+  assert.equal(lease.valid(), false); assert.equal(lease.expired(), true);
+  for (const invalid of [0, 59, 3601, '300', null, NaN]) assert.throws(() => lease.renew({ ...response, offlineGraceSeconds: invalid }));
+  for (const status of [401, 403, 400, 426]) assert.equal(isRetryableAuthorizationError({ status }), false);
+  for (const status of [408, 429, 500, 502, 503, 504]) assert.equal(isRetryableAuthorizationError({ status }), true);
+  assert.equal(isRetryableAuthorizationError({ retryable: true }), true);
+  assert.equal(isRetryableAuthorizationError(new Error('invalid authorization')), false);
 });
 
 test('stores integration secrets encrypted and fails closed without the platform encryption provider', () => {

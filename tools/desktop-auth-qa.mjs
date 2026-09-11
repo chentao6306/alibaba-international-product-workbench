@@ -11,9 +11,11 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-auth-qa-'));
 let authorized = true;
 let heartbeats = 0;
 let codeLogins = 0;
+let unavailable = false;
 const testCode = 'CDK-' + 'q'.repeat(43);
 const authServer = http.createServer(async (request, response) => {
   response.setHeader('content-type', 'application/json');
+  if (unavailable && request.url.includes('heartbeat')) { response.writeHead(503); response.end('{"error":"QA temporary outage"}'); return; }
   if (request.url.includes('/login')) {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString());
@@ -22,7 +24,7 @@ const authServer = http.createServer(async (request, response) => {
   }
   if (!authorized) { response.writeHead(403); response.end('{"error":"QA authorization revoked"}'); return; }
   if (request.url.includes('heartbeat')) heartbeats++;
-  response.end(JSON.stringify({ authorized: true, token: 'qa-session', serverTime: new Date().toISOString(), expiresAt: new Date(Date.now() + 3600000).toISOString() }));
+  response.end(JSON.stringify({ authorized: true, token: 'qa-session', serverTime: new Date().toISOString(), expiresAt: new Date(Date.now() + 3600000).toISOString(), offlineGraceSeconds: 60 }));
 });
 await new Promise((resolve) => authServer.listen(0, '127.0.0.1', resolve));
 const free = net.createServer();
@@ -58,13 +60,45 @@ try {
   const userData = await app.evaluate(({ app }) => app.getPath('userData'));
   assert.equal(fs.readFileSync(path.join(userData, 'alibaba-cookies.json')).includes('qa-account'), false);
   assert.equal(fs.readFileSync(path.join(userData, 'activation-credentials.bin')).includes(testCode), false);
+  unavailable = true;
+  await main.evaluate(() => window.kuaYipu.heartbeat());
+  assert.equal(main.isClosed(), false);
+  assert.equal((await main.evaluate(() => window.kuaYipu.connection())).state, 'retrying');
+  assert.equal(await main.evaluate(async () => (await fetch('/api/state')).status), 200);
+  await main.locator('.authorization-connection.retrying').waitFor();
+  await main.screenshot({ path: path.join(root, 'retrying.png') });
+  unavailable = false;
+  await main.evaluate(() => window.kuaYipu.heartbeat());
+  assert.equal((await main.evaluate(() => window.kuaYipu.connection())).state, 'connected');
+  unavailable = true;
+  await app.evaluate(() => {
+    const monotonic = performance.now.bind(performance);
+    Object.defineProperty(performance, 'now', { configurable: true, value: () => monotonic() + 65000 });
+  });
+  await main.evaluate(() => window.kuaYipu.heartbeat());
+  assert.equal(main.isClosed(), false);
+  assert.equal((await main.evaluate(() => window.kuaYipu.connection())).state, 'paused');
+  assert.equal(await main.evaluate(async () => (await fetch('/api/state')).status), 200);
+  assert.equal(await main.evaluate(async () => (await fetch('/api/collection-folders', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"name":"blocked"}' })).status), 401);
+  await main.locator('.authorization-connection.paused').waitFor();
+  assert.ok((await main.locator('.authorization-connection.paused').boundingBox()).y >= 0);
+  await main.screenshot({ path: path.join(root, 'paused.png') });
+  await main.setViewportSize({ width: 430, height: 932 });
+  await main.waitForFunction(() => document.querySelector('.sidebar').getBoundingClientRect().right <= 0);
+  assert.equal(await main.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await main.screenshot({ path: path.join(root, 'paused-mobile.png') });
+  await main.setViewportSize({ width: 1440, height: 1000 });
+  unavailable = false;
+  await main.evaluate(() => window.kuaYipu.heartbeat());
+  assert.equal((await main.evaluate(() => window.kuaYipu.connection())).state, 'connected');
+  assert.equal(await main.evaluate(async () => (await fetch('/api/collection-folders', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"name":"restored"}' })).status), 201);
   authorized = false;
   const closed = main.waitForEvent('close');
   await main.evaluate(() => window.kuaYipu.heartbeat()).catch(() => {});
   await closed;
   assert.equal((await fetch(`http://127.0.0.1:${port}/api/state`)).status, 401);
   assert.equal(codeLogins, 1);
-  console.log(JSON.stringify({ ok: true, verified: ['signed-in-identity', 'heartbeat-before-entry', 'renderer-api-gate', 'encrypted-session-export', 'encrypted-activation-code', 'revocation-closes-workbench'] }));
+  console.log(JSON.stringify({ ok: true, screenshots: root, verified: ['signed-in-identity', 'heartbeat-before-entry', 'renderer-api-gate', 'encrypted-session-export', 'encrypted-activation-code', 'temporary-outage-keeps-workbench', 'grace-expiry-preserves-workbench-and-blocks-writes', 'reconnection-without-login', 'revocation-closes-workbench'] }));
 } finally {
   if (app) { try { execFileSync('taskkill', ['/PID', String(app.process().pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }); } catch {} }
   authServer.closeAllConnections();
