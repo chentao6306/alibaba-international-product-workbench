@@ -1,0 +1,61 @@
+const selector = '#struct-productGroup .product-group-select';
+const popupSelector = '.posting-field-group:visible';
+
+export function normalizeSellerGroup(value) {
+  if (!value || !value.id) return null;
+  const id = String(value.id);
+  if (!/^\d{1,30}$/.test(id)) throw Object.assign(new Error('国际站商品分组无效，请重新读取分组'), { status: 400 });
+  return { id, name: String(value.name || '').slice(0, 200), path: String(value.path || value.name || '').slice(0, 1000) };
+}
+
+async function openTree(page) {
+  const control = page.locator(selector);
+  await control.waitFor({ state: 'visible', timeout: 30000 });
+  if (await control.getAttribute('aria-expanded') !== 'true') await control.click();
+  const popup = page.locator(popupSelector);
+  await popup.waitFor({ state: 'visible', timeout: 15000 });
+  await popup.locator('[role="tree"]').waitFor({ state: 'visible', timeout: 15000 });
+  await popup.locator('li.next-tree-node[value]').first().waitFor({ state: 'attached', timeout: 10000 }).catch(() => {});
+  // Expand parents through the real tree control; names can repeat across branches.
+  for (let count = 0; count < 1000; count += 1) {
+    const switcher = popup.locator('[role="treeitem"][aria-expanded="false"] > .next-tree-switcher:not([class*="noop"])').first();
+    if (!await switcher.count()) return popup;
+    const id = normalizeSellerGroup({ id: await switcher.locator('../..').getAttribute('value') }).id;
+    await switcher.click();
+    await popup.locator(`li.next-tree-node[value="${id}"] > [role="treeitem"][aria-expanded="true"]`).waitFor({ state: 'visible', timeout: 10000 });
+  }
+  throw new Error('国际站分组数量过多，无法完整读取');
+}
+
+export async function readSellerGroups(page) {
+  const popup = await openTree(page);
+  try {
+    return await popup.locator('li.next-tree-node[value]').evaluateAll((nodes) => nodes.map((node) => {
+      const path = [];
+      for (let parent = node; parent; parent = parent.parentElement?.closest('li.next-tree-node[value]')) {
+        const label = parent.querySelector(':scope > [role="treeitem"]');
+        path.unshift(label?.getAttribute('aria-label') || label?.querySelector('.next-tree-node-label')?.textContent?.trim() || '');
+      }
+      return { id: node.getAttribute('value'), name: path.at(-1), path: path.join(' > '), disabled: node.querySelector(':scope > [role="treeitem"]')?.getAttribute('aria-disabled') === 'true' };
+    }).filter((item) => item.id && item.name && !item.disabled));
+  } finally { await page.keyboard.press('Escape'); }
+}
+
+export async function applySellerGroup(page, value) {
+  const group = normalizeSellerGroup(value);
+  if (!group) return null;
+  const popup = await openTree(page);
+  const item = popup.locator(`li.next-tree-node[value="${group.id}"] > [role="treeitem"]`);
+  if (await item.count() !== 1 || await item.getAttribute('aria-disabled') === 'true') {
+    await page.keyboard.press('Escape');
+    throw Object.assign(new Error(`国际站商品分组不存在或不可选：${group.path || group.id}，请重新读取分组`), { code: 'SELLER_GROUP_UNAVAILABLE' });
+  }
+  const name = await item.getAttribute('aria-label');
+  await item.locator('.next-tree-node-label').click();
+  await openTree(page);
+  const selected = page.locator(popupSelector).locator(`li.next-tree-node[value="${group.id}"] > [role="treeitem"]`);
+  const accepted = await selected.getAttribute('aria-selected') === 'true';
+  await page.keyboard.press('Escape');
+  if (!accepted) throw Object.assign(new Error(`国际站未接受商品分组：${group.path || group.id}`), { code: 'SELLER_GROUP_UNAVAILABLE' });
+  return { ...group, name: name || group.name };
+}

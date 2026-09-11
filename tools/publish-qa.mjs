@@ -111,7 +111,8 @@ try {
         await publisher.fillPriceFields(page, product);
       } else if (['draft', 'submit'].includes(action)) {
         try {
-          report.result = await publisher.publishProduct(product, buildAlibabaPublishUrl(category.id), action, category.pathText, 'qa', progress);
+          const sellerGroup = process.env.QA_SELLER_GROUP_ID ? { id: process.env.QA_SELLER_GROUP_ID, name: process.env.QA_SELLER_GROUP_NAME || '' } : null;
+          report.result = await publisher.publishProduct(product, buildAlibabaPublishUrl(category.id), action, category.pathText, 'qa', progress, { sellerGroup });
         } catch (error) {
           if (!process.env.QA_REFERENCE_FILE) throw error;
           const reference = JSON.parse(fs.readFileSync(process.env.QA_REFERENCE_FILE, 'utf8'));

@@ -399,6 +399,22 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--orange); }
 .cleanup-confirm { display: flex; gap: 10px; align-items: flex-start; }
 .cleanup-error { color: #b53c32; }
 .announcements-view .section-title { padding-left: 0; padding-right: 0; }
+.collection-folder-bar { display: flex; align-items: center; gap: 8px; padding: 12px 0 18px; border-bottom: 1px solid var(--border, #dce3e6); margin-bottom: 20px; min-width: 0; }
+.collection-folder-bar > label { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.collection-folder-bar label > span { flex-shrink: 0; font-size: 13px; }
+.collection-folder-bar select { width: 290px; max-width: 100%; min-width: 0; height: 40px; }
+.collection-folder-bar select, .move-folder-control select, .seller-group-picker select, .folder-dialog input { font: inherit; color: var(--ink); background: #fff; border: 1px solid #cbd5da; border-radius: 5px; padding: 8px 10px; }
+.folder-dialog { width: 440px; max-width: calc(100% - 32px); }
+.folder-dialog > label { display: grid; gap: 10px; margin: 20px 0; }
+.folder-dialog input { width: 100%; }
+.move-folder-control { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.move-folder-control select { max-width: 200px; height: 40px; }
+.seller-group-picker { display: grid; gap: 10px; padding: 0 0 20px; margin-bottom: 18px; border-bottom: 1px solid #dce3e6; }
+.seller-group-picker h2 { font-size: 16px; margin: 0; }
+.seller-group-picker > div { display: flex; gap: 6px; min-width: 0; }
+.seller-group-picker select { min-width: 0; width: 100%; height: 42px; }
+.seller-group-picker small { overflow-wrap: anywhere; }
+@media (max-width: 600px) { .collection-folder-bar { flex-wrap: wrap; } .collection-folder-bar > label { flex: 1; } .collection-folder-bar select { width: 100%; } }
 .announcement-item { border-bottom: 1px solid #dce3e6; }
 .announcement-row { display: flex; align-items: center; gap: 12px; background: transparent; border: 0; text-align: left; padding: 18px 0; width: 100%; color: inherit; }
 .announcement-row strong { flex: 1; min-width: 0; overflow-wrap: anywhere; }

@@ -6,6 +6,7 @@ const EMPTY_STATE = {
   version: 2,
   shops: [],
   groups: [],
+  collectionFolders: [],
   products: [],
   jobs: [],
   settings: {

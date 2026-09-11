@@ -6,10 +6,12 @@ import { load } from 'cheerio';
 import { hasExplicitHumanChallenge, hidePage, launchPersistent, revealPage, settlePage, syncAlibabaCookies, waitForHumanVerification } from './browser-runtime.js';
 import { extractAlibabaDescription, extractAlibabaSourceData, parseAlibabaDetailDataScript } from './alibaba-source-data.js';
 import { SOURCE_LANGUAGE_HEADERS, withSourceLocale } from './source-locale.js';
-import { categoryIdFromUrl, normalizeCategoryId } from './category-routing.js';
+import { buildAlibabaPublishUrl, categoryIdFromUrl, normalizeCategoryId } from './category-routing.js';
 import { REQUIRED_ATTRIBUTE_ALIASES } from './publish-reference.js';
 import { sourcePlatform, crossPlatformPublishErrors } from './source-platform.js';
 import { submitWithRepairs } from './publish-recovery.js';
+import { readSellerGroups, applySellerGroup } from './seller-groups.js';
+import { ImageDownloadQueue } from './image-download-queue.js';
 
 const WORKBENCH_URL = 'https://i.alibaba.com/';
 const SOURCE_DESCRIPTION_SELECTOR = '[data-module-name="module_description"], [data-testid="module-description"], [data-module-name="module_structure_description"], [data-testid="module-details-structure-description"]';
@@ -3037,6 +3039,7 @@ export class SellerPublisher {
     this.page = null;
     this.visible = false;
     this.publishStops = new Map();
+    this.imageDownloads = new ImageDownloadQueue(3);
   }
 
   async sourceBrowser() {
@@ -3958,7 +3961,8 @@ export class SellerPublisher {
       while (nextIndex < selectedUrls.length) {
         const index = nextIndex;
         nextIndex += 1;
-        paths[index] = await downloadOne(selectedUrls[index], index);
+        const key = JSON.stringify([product.sourceId || product.id, prefix, index, selectedUrls[index]]);
+        paths[index] = await this.imageDownloads.run(key, () => downloadOne(selectedUrls[index], index));
       }
     }));
     return paths.filter(Boolean);
@@ -5037,7 +5041,18 @@ export class SellerPublisher {
     return inserted ? urls.length : 0;
   }
 
-  async publishProduct(product, publishPageUrl, mode = 'draft', publishCategory = '', jobId = '', onStage = () => {}) {
+  async listSellerGroups(categoryId = '') {
+    const url = buildAlibabaPublishUrl(normalizeCategoryId(categoryId) || '201346401');
+    await this.open({ startUrl: url });
+    const page = await this.context.newPage();
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await waitForHumanVerification(page);
+      return await readSellerGroups(page);
+    } finally { await page.close(); }
+  }
+
+  async publishProduct(product, publishPageUrl, mode = 'draft', publishCategory = '', jobId = '', onStage = () => {}, options = {}) {
     const reportStage = (stage) => {
       try { onStage(stage); } catch {}
     };
@@ -5049,6 +5064,18 @@ export class SellerPublisher {
     if (mismatch) throw new Error(mismatch);
     const validationErrors = validateProductData(product);
     if (validationErrors.length) throw new Error(`商品资料未通过上架检查：${validationErrors.join('；')}`);
+    // Only download the current product's media in advance. All sets share
+    // three workers; browser uploads and submission remain sequential.
+    const mediaReady = Promise.allSettled([
+      this.downloadImageSet(product, product.mainImages?.length ? product.mainImages : [product.mainImage, ...(product.images || [])], 'main', 6),
+      this.downloadImageSet(product, product.detailImages || [], 'detail', 8),
+    ]);
+    try {
+      return await this.publishPreparedProduct(product, publishPageUrl, mode, publishCategory, jobId, reportStage, options);
+    } finally { await mediaReady; }
+  }
+
+  async publishPreparedProduct(product, publishPageUrl, mode, publishCategory, jobId, reportStage, options) {
     reportStage('连接国际站发布浏览器');
     const page = await this.currentSellerPage(publishPageUrl);
     page.setDefaultTimeout(5000);
@@ -5115,6 +5142,10 @@ export class SellerPublisher {
     const visibleMismatch = !categoryValidatedById && visibleCategory ? categoryMismatchMessage(product, visibleCategory) : '';
     if (visibleMismatch) {
       throw new Error(`国际站发布表单实际类目为“${visibleCategory}”：${visibleMismatch}`);
+    }
+    if (options.sellerGroup) {
+      reportStage('检查国际站目标分组');
+      await applySellerGroup(page, options.sellerGroup);
     }
     // Switching Alibaba's detail editor can rebuild the entire form. Do it
     // before filling prices, specifications and images so a late editor-mode
@@ -5327,8 +5358,14 @@ export class SellerPublisher {
     reportStage(mode === 'submit' ? '提交国际站并等待结果' : '保存国际站草稿');
     const originalUrl = page.url();
     let logisticsWarning = '';
+    let sellerGroup = null;
     const verification = await submitWithRepairs({
       submit: async () => {
+        if (options.sellerGroup) {
+          reportStage('设置并复核国际站商品分组');
+          sellerGroup = await applySellerGroup(page, options.sellerGroup);
+          reportStage(mode === 'submit' ? '提交国际站并等待结果' : '保存国际站草稿');
+        }
         for (const text of buttonTexts) {
           const candidate = page.getByRole('button', { name: text, exact: false }).last();
           if (await candidate.isVisible().catch(() => false) && !await candidate.isDisabled().catch(() => false)) {
@@ -5392,6 +5429,7 @@ export class SellerPublisher {
       message: `${mode === 'submit' ? '已提交发布' : '已保存草稿'}${videoWarning ? '（主图视频已降级为详情链接）' : ''}`,
       url: page.url(),
       verifiedBy: verification.verifiedBy,
+      sellerGroup,
       feedback: verification.feedback,
       requiredAttributes: verification.requiredAttributes || [],
       fieldMapping,

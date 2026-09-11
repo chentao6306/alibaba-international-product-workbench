@@ -8,8 +8,9 @@ import * as XLSX from 'xlsx';
 import { SOURCE_PLATFORMS, sourcePlatform, sourcePlatformLabel } from '../server/source-platform.js';
 import StorageCleanup from './StorageCleanup.jsx';
 import { useAnnouncements, AnnouncementPopup, AnnouncementsView } from './Announcements.jsx';
+import CollectionFolders from './CollectionFolders.jsx';
 
-const EMPTY = { shops: [], groups: [], products: [], jobs: [], settings: {}, browser: {}, collectorBrowser: {} };
+const EMPTY = { shops: [], groups: [], collectionFolders: [], products: [], jobs: [], settings: {}, browser: {}, collectorBrowser: {} };
 
 const CATEGORY_OPTIONS = [
   { path: 'Consumer Electronics >> Mobile Phone & Radio >> 5G smartphone', id: '201896803' },
@@ -66,19 +67,19 @@ const COLLECTION_VIEWS = {
   aliexpress: { title: '速卖通采集', platform: 'aliexpress', method: 'product', placeholder: 'https://www.aliexpress.com/item/...' },
 };
 
-function LinkCollectionView({ entry, state, refresh, notify, onMenu, navigate }) {
+function LinkCollectionView({ entry, state, refresh, notify, onMenu, navigate, folderId }) {
   const config = COLLECTION_VIEWS[entry];
   const [urls, setUrls] = useState('');
   const [busy, setBusy] = useState(false);
   const [options, setOptions] = useState({ startPage: 1, endPage: 1, maxProducts: 100, delaySeconds: 3 });
-  const jobs = state.jobs.filter((job) => job.type === 'collect' && job.metadata?.collectionMethod === config.method && job.metadata?.sourcePlatform === config.platform);
+  const jobs = state.jobs.filter((job) => job.type === 'collect' && job.metadata?.collectionMethod === config.method && job.metadata?.sourcePlatform === config.platform && job.metadata?.collectionFolderId === folderId);
   const active = jobs.some((job) => ['queued', 'running', 'pause_requested', 'paused'].includes(job.status));
   const running = jobs.some((job) => ['queued', 'running', 'pause_requested'].includes(job.status));
-  const products = state.products.filter((product) => sourcePlatform(product) === config.platform);
+  const products = state.products.filter((product) => product.collectionFolderId === folderId && sourcePlatform(product) === config.platform);
   async function submit(event) {
     event.preventDefault(); setBusy(true);
     try {
-      await api('/api/collect/links', { method: 'POST', body: JSON.stringify({ urls, platform: config.platform, method: config.method, ...options }) });
+      await api('/api/collect/links', { method: 'POST', body: JSON.stringify({ urls, platform: config.platform, method: config.method, collectionFolderId: folderId, ...options }) });
       await refresh(); notify('采集任务已创建');
     } catch (error) { notify(error.message, 'error'); } finally { setBusy(false); }
   }
@@ -89,6 +90,7 @@ function LinkCollectionView({ entry, state, refresh, notify, onMenu, navigate })
   }
   return <>
     <Header title={config.title} subtitle={`${sourcePlatformLabel({ sourcePlatform: config.platform })} → 阿里巴巴国际站`} onMenu={onMenu} />
+    <CollectionFolders {...{ state, folderId, refresh, notify }} />
     <section className="collection-entry">
       <div className="section-title"><h2>{config.method === 'image-search' ? '搜索结果链接' : '商品链接'}</h2>{config.platform !== 'alibaba.com' && <button className="secondary-button" onClick={login} disabled={busy || running}><ExternalLink size={16} />平台登录</button>}</div>
       <form onSubmit={submit} className="link-collection-form">
@@ -96,11 +98,11 @@ function LinkCollectionView({ entry, state, refresh, notify, onMenu, navigate })
         <div className="link-collection-options">
           {config.method === 'image-search' && [['startPage', '起始页'], ['endPage', '结束页'], ['maxProducts', '商品上限']].map(([key, label]) => <label key={key}><span>{label}</span><input type="number" min="1" max={key === 'maxProducts' ? 1000 : 100} value={options[key]} onChange={(event) => setOptions({ ...options, [key]: Number(event.target.value) })} /></label>)}
           <label><span>采集间隔（秒）</span><input type="number" min="0" max="60" step="0.5" value={options.delaySeconds} onChange={(event) => setOptions({ ...options, delaySeconds: Number(event.target.value) })} /></label>
-          <button className="primary-button" disabled={busy || active || !urls.trim()}>{busy ? <LoaderCircle size={17} className="spin" /> : <Play size={17} />}{active ? '采集任务未完成' : '开始采集'}</button>
+          <button className="primary-button" disabled={busy || active || !urls.trim() || !folderId}>{busy ? <LoaderCircle size={17} className="spin" /> : <Play size={17} />}{active ? '采集任务未完成' : '开始采集'}</button>
         </div>
       </form>
     </section>
-    <div className="collection-summary"><span>该平台已入库 <strong>{products.length}</strong> 件</span><button className="secondary-button" onClick={() => navigate('products', config.platform)}><Boxes size={16} />查看商品</button></div>
+    <div className="collection-summary"><span>当前分组已入库 <strong>{products.length}</strong> 件</span><button className="secondary-button" onClick={() => navigate('products', config.platform)}><Boxes size={16} />查看商品</button></div>
     <JobHistory jobs={jobs} refresh={refresh} notify={notify} />
   </>;
 }
@@ -166,7 +168,7 @@ function Metric({ icon: Icon, label, value, detail, tone }) {
   return <div className={`metric ${tone || ''}`}><Icon size={18} /><div><span>{label}</span><strong>{value}</strong><small>{detail}</small></div></div>;
 }
 
-function SourceView({ state, refresh, notify, onMenu }) {
+function SourceView({ state, refresh, notify, onMenu, folderId }) {
   const [url, setUrl] = useState('');
   const [reading, setReading] = useState(false);
   const [collectConfig, setCollectConfig] = useState({ startPage: 1, endPage: 10, delaySeconds: 3, destinationCountry: 'United States', sort: 'default' });
@@ -179,7 +181,7 @@ function SourceView({ state, refresh, notify, onMenu }) {
   const groupPageSize = 8;
   const shopPageCount = Math.max(1, Math.ceil(state.shops.length / shopPageSize));
   const visibleShops = state.shops.slice((shopPage - 1) * shopPageSize, shopPage * shopPageSize);
-  const collectJobs = state.jobs.filter((job) => job.type === 'collect' && ['queued', 'running', 'pause_requested', 'paused'].includes(job.status));
+  const collectJobs = state.jobs.filter((job) => job.type === 'collect' && job.metadata?.collectionFolderId === folderId && ['queued', 'running', 'pause_requested', 'paused'].includes(job.status));
 
   useEffect(() => { if (shopPage > shopPageCount) setShopPage(shopPageCount); }, [shopPage, shopPageCount]);
 
@@ -195,16 +197,18 @@ function SourceView({ state, refresh, notify, onMenu }) {
   }
 
   async function collect(group) {
+    if (!folderId) return notify('请先新建并选择采集分组', 'error');
     try {
-      await api(`/api/groups/${group.id}/collect`, { method: 'POST', body: JSON.stringify(collectConfig) });
+      await api(`/api/groups/${group.id}/collect`, { method: 'POST', body: JSON.stringify({ ...collectConfig, collectionFolderId: folderId }) });
       await refresh(); notify(`已开始读取“${group.name}”`);
     } catch (error) { notify(error.message, 'error'); }
   }
 
   async function collectMany(groups) {
+    if (!folderId) return notify('请先新建并选择采集分组', 'error');
     if (!groups.length) return notify('请先选择分组', 'error');
     try {
-      for (const group of groups) await api(`/api/groups/${group.id}/collect`, { method: 'POST', body: JSON.stringify(collectConfig) });
+      for (const group of groups) await api(`/api/groups/${group.id}/collect`, { method: 'POST', body: JSON.stringify({ ...collectConfig, collectionFolderId: folderId }) });
       await refresh(); notify(`已开始读取 ${groups.length} 个分组`);
     } catch (error) { notify(error.message, 'error'); }
   }
@@ -260,10 +264,11 @@ function SourceView({ state, refresh, notify, onMenu }) {
 
   return <>
     <Header title="店铺采集" subtitle="读取阿里巴巴国际站同行店铺与商品分组" onMenu={onMenu} />
+    <CollectionFolders {...{ state, folderId, refresh, notify }} />
     <div className="metrics">
       <Metric icon={Store} label="同行店铺" value={state.shops.length} detail="已读取" />
       <Metric icon={FolderTree} label="商品分组" value={state.groups.length} detail="可采集" tone="orange" />
-      <Metric icon={Boxes} label="商品资料" value={state.products.length} detail="已入库" tone="teal" />
+      <Metric icon={Boxes} label="当前采集分组" value={state.products.filter((product) => product.collectionFolderId === folderId).length} detail="已入库" tone="teal" />
     </div>
     <section className="panel source-entry">
       <div className="section-title"><div><h2>读取国际站同行店铺</h2><p>支持 *.en.alibaba.com 店铺首页、商品列表和分组链接</p></div></div>
@@ -355,7 +360,7 @@ function hasCategoryMismatch(product, category) {
     && /消费电子|consumer electronics/i.test(category || '');
 }
 
-function ProductsView({ state, refresh, notify, onMenu, platform, setPlatform, navigate }) {
+function ProductsView({ state, refresh, notify, onMenu, platform, setPlatform, navigate, folderId }) {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState('all');
   const [page, setPage] = useState(1);
@@ -365,7 +370,9 @@ function ProductsView({ state, refresh, notify, onMenu, platform, setPlatform, n
   const [findReplaceOpen, setFindReplaceOpen] = useState(false);
   const [referenceOpen, setReferenceOpen] = useState(false);
   const [refreshingId, setRefreshingId] = useState('');
-  const platformProducts = useMemo(() => state.products.filter((product) => platform === 'all' || sourcePlatform(product) === platform), [state.products, platform]);
+  const [moveFolderId, setMoveFolderId] = useState('');
+  const folderProducts = useMemo(() => state.products.filter((product) => product.collectionFolderId === folderId), [state.products, folderId]);
+  const platformProducts = useMemo(() => folderProducts.filter((product) => platform === 'all' || sourcePlatform(product) === platform), [folderProducts, platform]);
   const products = useMemo(() => platformProducts.filter((product) => {
     const matchesQuery = !query || product.title?.toLowerCase().includes(query.toLowerCase()) || product.sourceId?.includes(query);
     const matchesFilter = filter === 'all' || (filter === 'selected' ? product.selected : filter === 'incomplete' ? !productCompleteness(product).complete : product.status === filter);
@@ -388,6 +395,7 @@ function ProductsView({ state, refresh, notify, onMenu, platform, setPlatform, n
         ? '当前没有上架成功的商品可供引用'
         : '引用成功商品补全缺失的产地、包装和属性';
 
+  useEffect(() => { setPage(1); setMoveFolderId(''); setEditing(null); setBatchEditing(false); setFindReplaceOpen(false); setReferenceOpen(false); }, [folderId]);
   useEffect(() => { setPage(1); }, [query, filter, pageSize, platform]);
   useEffect(() => { if (page > pageCount) setPage(pageCount); }, [page, pageCount]);
 
@@ -432,21 +440,23 @@ function ProductsView({ state, refresh, notify, onMenu, platform, setPlatform, n
 
   return <>
     <Header title="商品工作台" subtitle="检查、修改并选择待上架商品" onMenu={onMenu} />
-    <PlatformTabs products={state.products} value={platform} onChange={setPlatform} />
+    <CollectionFolders {...{ state, folderId, refresh, notify }} />
+    <PlatformTabs products={folderProducts} value={platform} onChange={setPlatform} />
     <div className="toolbar">
       <div className="input-with-icon search-box"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索标题或商品 ID" /></div>
       <div className="segmented">{[['all', '全部'], ['selected', '已选择'], ['incomplete', '资料待补'], ['ready', '待上架'], ['drafted', '已存草稿'], ['published', '上架成功'], ['publish_failed', '上架失败']].map(([value, label]) => <button key={value} className={filter === value ? 'active' : ''} onClick={() => setFilter(value)}>{label}</button>)}</div>
       <button className="secondary-button" disabled={!products.length} onClick={() => selectAllProducts(!allProductsSelected)}><Check size={15} />{allProductsSelected ? '取消全选' : `全选当前结果 ${products.length}`}</button>
       {selectedProducts.length > 0 && <button className="primary-button" onClick={() => navigate('publish', platform)}><CloudUpload size={15} />选中商品上架 {selectedProducts.length}</button>}
-      <button className="secondary-button" disabled={!state.products.length} onClick={() => setFindReplaceOpen(true)}><Search size={15} />查找替换</button>
+      <button className="secondary-button" disabled={!platformProducts.length} onClick={() => setFindReplaceOpen(true)}><Search size={15} />查找替换</button>
       {selectedProducts.length > 0 && <button className="primary-button" onClick={() => setBatchEditing(true)}><Pencil size={15} />批量修改 {selectedProducts.length}</button>}
       <button className="secondary-button" disabled={!referenceEligibleProducts.length || !publishedReferenceProducts.length} title={referenceUnavailableReason} onClick={() => setReferenceOpen(true)}><ClipboardList size={15} />引用成功商品资料</button>
       {selectedProducts.length > 0 && <button className="secondary-button danger-button" onClick={removeSelected}><Trash2 size={15} />删除已勾选 {selectedProducts.length}</button>}
+      {selectedProducts.length > 0 && <div className="move-folder-control"><select aria-label="移动到分组" value={moveFolderId} onChange={(event) => setMoveFolderId(event.target.value)}><option value="">移动到分组</option>{(state.collectionFolders || []).filter((folder) => folder.id !== folderId).map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select><button className="icon-button" title="移动已选商品" disabled={!moveFolderId} onClick={() => api('/api/products/move-folder', { method: 'POST', body: JSON.stringify({ ids: selectedProducts.map((item) => item.id), collectionFolderId: moveFolderId }) }).then(refresh).then(() => notify('商品已移动')).catch((error) => notify(error.message, 'error'))}><FolderTree size={17} /></button></div>}
       <label className="page-size"><span>每页</span><select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}><option value="10">10</option><option value="20">20</option><option value="50">50</option></select></label>
       <span className="result-count">共 {products.length} 件</span>
     </div>
     <section className="panel product-panel">
-      {!state.products.length ? <EmptyState icon={Boxes} title="商品资料库为空" text="先到店铺采集页读取一个商品分组" /> : <div className="table-wrap"><table className="product-table">
+      {!products.length ? <EmptyState icon={Boxes} title="当前分组暂无匹配商品" text="" /> : <div className="table-wrap"><table className="product-table">
         <thead><tr><th className="check-cell"><input type="checkbox" checked={allChecked} onChange={(event) => select(pagedProducts.map((item) => item.id), event.target.checked)} title="勾选本页商品" /></th><th>商品</th><th>资料</th><th>售价</th><th>库存</th><th>状态</th><th className="action-cell">操作</th></tr></thead>
         <tbody>{pagedProducts.map((product) => { const completeness = productCompleteness(product); return <tr key={product.id} className={product.selected ? 'selected-row' : ''}>
           <td className="check-cell"><input type="checkbox" checked={Boolean(product.selected)} onChange={(event) => select([product.id], event.target.checked)} /></td>
@@ -774,8 +784,8 @@ function ProductEditor({ product, onClose, onSaved, notify }) {
   </aside></div>;
 }
 
-function PublishView({ state, refresh, notify, onMenu, platform, setPlatform }) {
-  const allSelected = state.products.filter((item) => item.selected);
+function PublishView({ state, refresh, notify, onMenu, platform, setPlatform, folderId }) {
+  const allSelected = state.products.filter((item) => item.selected && item.collectionFolderId === folderId);
   const selected = allSelected.filter((item) => platform === 'all' || sourcePlatform(item) === platform);
   const [mode, setMode] = useState(state.settings.publishMode || 'submit');
   const [busy, setBusy] = useState(false);
@@ -783,6 +793,10 @@ function PublishView({ state, refresh, notify, onMenu, platform, setPlatform }) 
   const [planError, setPlanError] = useState('');
   const [planLoading, setPlanLoading] = useState(false);
   const [planRetry, setPlanRetry] = useState(0);
+  const [sellerGroups, setSellerGroups] = useState([]);
+  const [sellerGroupId, setSellerGroupId] = useState('');
+  const [groupsLoading, setGroupsLoading] = useState(false);
+  const sellerGroup = sellerGroups.find((group) => group.id === sellerGroupId) || null;
   const [page, setPage] = useState(1);
   const pageCount = Math.max(1, Math.ceil(selected.length / 30));
   const selectionKey = JSON.stringify(selected.map((item) => [item.id, item.categoryId, item.categoryPath, item.updatedAt]));
@@ -798,7 +812,7 @@ function PublishView({ state, refresh, notify, onMenu, platform, setPlatform }) 
       .finally(() => { if (active) setPlanLoading(false); });
     return () => { active = false; };
   }, [selectionKey, planRetry]);
-  useEffect(() => { setPage(1); }, [platform]);
+  useEffect(() => { setPage(1); }, [platform, folderId]);
   useEffect(() => { if (page > pageCount) setPage(pageCount); }, [page, pageCount]);
   const unresolvedGroups = plan.groups.filter((group) => group.error || !group.url);
   const automaticGroups = plan.groups.filter((group) => !group.error && group.url);
@@ -810,7 +824,18 @@ function PublishView({ state, refresh, notify, onMenu, platform, setPlatform }) 
   }
   async function publish() {
     if (mode === 'submit' && !window.confirm(`将自动提交 ${selected.length} 件商品到阿里巴巴国际站，确定继续吗？`)) return;
-    run(() => api('/api/publish', { method: 'POST', body: JSON.stringify({ ids: selected.map((item) => item.id), mode }) }), '批量上架任务已开始');
+    if (groupsLoading) return;
+    run(() => api('/api/publish', { method: 'POST', body: JSON.stringify({ ids: selected.map((item) => item.id), mode, collectionFolderId: folderId, sellerGroup }) }), '批量上架任务已开始');
+  }
+  async function loadSellerGroups() {
+    setGroupsLoading(true);
+    try {
+      const { groups } = await api(`/api/seller/product-groups?categoryId=${encodeURIComponent(plan.groups.find((group) => group.categoryId)?.categoryId || '')}`);
+      setSellerGroups(groups);
+      if (!groups.some((group) => group.id === sellerGroupId)) setSellerGroupId('');
+      notify(groups.length ? `已读取 ${groups.length} 个国际站分组` : '国际站账号尚未设置商品分组');
+    } catch (error) { notify(error.message, 'error'); }
+    finally { setGroupsLoading(false); }
   }
   function pause(job) {
     run(() => api(`/api/jobs/${job.id}/pause`, { method: 'POST' }), '暂停请求已发送');
@@ -823,6 +848,7 @@ function PublishView({ state, refresh, notify, onMenu, platform, setPlatform }) 
   }
   return <>
     <Header title="上架任务" subtitle="发布到阿里巴巴国际站" onMenu={onMenu} />
+    <CollectionFolders {...{ state, folderId, refresh, notify }} />
     <PlatformTabs products={allSelected} value={platform} onChange={setPlatform} />
     <div className="publish-layout">
       <div className="publish-main">
@@ -839,14 +865,15 @@ function PublishView({ state, refresh, notify, onMenu, platform, setPlatform }) 
       </div>
       <aside className="publish-side"><section className="panel launch-panel"><h2>执行方式</h2><div className="mode-picker"><button className={mode === 'draft' ? 'active' : ''} onClick={() => setMode('draft')}><ClipboardList size={18} /><span><strong>保存草稿</strong><small>逐条填充并保存</small></span>{mode === 'draft' && <Check size={17} />}</button><button className={mode === 'submit' ? 'active warning' : ''} onClick={() => setMode('submit')}><CloudUpload size={18} /><span><strong>直接提交</strong><small>填充后自动发布</small></span>{mode === 'submit' && <Check size={17} />}</button></div>
           <dl><div><dt>已选择</dt><dd>{selected.length} 件</dd></div><div><dt>来源平台</dt><dd>{platform === 'all' ? '全部平台' : sourcePlatformLabel({ sourcePlatform: platform })}</dd></div><div><dt>类目任务</dt><dd>{planLoading ? '读取中' : planError ? '预览失败' : plan.groups.length ? `${plan.groups.length} 组` : '启动后检查'}</dd></div><div><dt>执行模式</dt><dd>{mode === 'draft' ? '保存草稿' : '直接提交'}</dd></div></dl>
+          <div className="seller-group-picker"><label htmlFor="seller-group">国际站目标分组</label><div><select id="seller-group" disabled={groupsLoading || Boolean(currentJob)} value={currentJob?.metadata?.sellerGroup?.id || sellerGroupId} onChange={(event) => setSellerGroupId(event.target.value)}><option value="">不指定分组</option>{currentJob?.metadata?.sellerGroup && !sellerGroups.some((group) => group.id === currentJob.metadata.sellerGroup.id) && <option value={currentJob.metadata.sellerGroup.id}>{currentJob.metadata.sellerGroup.path}</option>}{sellerGroups.map((group) => <option key={group.id} value={group.id}>{group.path}</option>)}</select><button className="icon-button" title="读取国际站分组" disabled={groupsLoading || Boolean(publishing)} onClick={loadSellerGroups}><RefreshCw size={18} className={groupsLoading ? 'spin' : ''} /></button></div></div>
           {pausedJob
             ? <><button className="primary-button publish-button" disabled={busy} onClick={() => resume(pausedJob)}><Play size={18} />继续处理剩余 {Math.max(0, pausedJob.total - pausedJob.progress)} 件</button><button className="secondary-button pause-button" disabled={busy} onClick={() => cancel(pausedJob)}><X size={17} />取消任务</button></>
-            : <button className="primary-button publish-button" disabled={busy || !selected.length || Boolean(publishing)} onClick={publish}>{publishing || busy ? <LoaderCircle className="spin" size={18} /> : <CloudUpload size={18} />}{publishing ? '任务执行中' : `开始处理 ${selected.length} 件`}</button>}
+            : <button className="primary-button publish-button" disabled={busy || groupsLoading || !selected.length || Boolean(publishing)} onClick={publish}>{publishing || busy ? <LoaderCircle className="spin" size={18} /> : <CloudUpload size={18} />}{publishing ? '任务执行中' : `开始处理 ${selected.length} 件`}</button>}
           {publishing && <button className="secondary-button pause-button" disabled={busy || publishing.status === 'pause_requested'} onClick={() => pause(publishing)}><Pause size={17} />{publishing.status === 'pause_requested' ? '正在暂停' : '暂停任务'}</button>}
           {currentJob && <div className="compact-progress"><div><span>{currentJob.message}</span><b>{currentJob.progress}/{currentJob.total}</b></div><div className="progress"><i style={{ width: currentJob.total ? `${currentJob.progress / currentJob.total * 100}%` : '10%' }} /></div></div>}
         </section></aside>
     </div>
-    <JobHistory jobs={state.jobs.filter((job) => job.type === 'publish' && (platform === 'all' || job.metadata?.sourcePlatforms?.includes(platform) || job.productIds?.some((id) => state.products.some((product) => product.id === id && sourcePlatform(product) === platform))))} refresh={refresh} notify={notify} />
+    <JobHistory jobs={state.jobs.filter((job) => job.type === 'publish' && (job.metadata?.collectionFolderId === folderId || job.metadata?.productIds?.some((id) => state.products.some((product) => product.id === id && product.collectionFolderId === folderId))) && (platform === 'all' || job.metadata?.sourcePlatforms?.includes(platform)))} refresh={refresh} notify={notify} />
   </>;
 }
 
@@ -934,7 +961,8 @@ export default function App() {
   }, []);
   function notify(text, type = 'success') { setNotice({ text, type }); setTimeout(() => setNotice(null), 4200); }
   function navigate(id, nextPlatform) { setView(id); if (nextPlatform) setPlatform(nextPlatform); setMenuOpen(false); }
-  const props = { state, refresh, notify, platform, setPlatform, navigate, onMenu: () => setMenuOpen(true) };
+  const folderId = state.settings.activeCollectionFolderId || '';
+  const props = { state, refresh, notify, platform, setPlatform, navigate, folderId, onMenu: () => setMenuOpen(true) };
   return <div className="app-shell">
     <aside className={`sidebar ${menuOpen ? 'open' : ''}`}><div className="brand"><div><Boxes size={20} /></div><span><strong>Alibaba.com</strong><small>国际站商品工作台</small></span><button className="icon-button close-nav" onClick={() => setMenuOpen(false)}><X size={18} /></button></div><nav>{NAV.map(({ id, label, icon: Icon }) => <button key={id} className={view === id ? 'active' : ''} onClick={() => navigate(id)}><Icon size={19} /><span>{label}</span>{id === 'products' && state.products.length > 0 && <b>{state.products.length}</b>}{id === 'publish' && state.products.some((item) => item.selected) && <b>{state.products.filter((item) => item.selected).length}</b>}{id === 'announcements' && inbox.unread > 0 && <i className="unread-dot" aria-label="有未读公告" />}<ChevronRight size={15} /></button>)}</nav><div className="sidebar-foot"><span className={`system-dot ${state.browser.browserOpen ? 'online' : ''}`} /><div><strong>本地服务</strong><small>运行正常</small></div></div></aside>
     {menuOpen && <button className="nav-backdrop" onClick={() => setMenuOpen(false)} />}

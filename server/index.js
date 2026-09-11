@@ -22,6 +22,8 @@ import { runWithProgressTimeout } from './progress-timeout.js';
 import { collectionUrls, convertProductPrices, crossPlatformPublishErrors, parseCollectionUrl, sourcePlatform } from './source-platform.js';
 import { cleanupWorkspace } from './storage-cleanup.js';
 import { AnnouncementInbox } from './announcements.js';
+import { normalizeSellerGroup } from './seller-groups.js';
+import { initializeCollectionFolders, requireCollectionFolder, saveCollectionFolder, deleteCollectionFolder, moveProductsToFolder, findCollectedProduct } from './collection-folders.js';
 
 // In the packaged desktop build the server module is unpacked while the
 // frontend remains inside app.asar. APP_ROOT_DIR keeps both layouts working.
@@ -58,6 +60,7 @@ const inbox = new AnnouncementInbox(path.join(dataDir, 'announcement-reads.json'
 const publisher = new SellerPublisher(dataDir);
 const collector = new ShopCollector(dataDir, (products, onProgress) => publisher.enrichSourceProducts(products, onProgress));
 store.update((state) => {
+  initializeCollectionFolders(state);
   const previousVersion = Number(state.version || 0);
   state.version = 6;
   if (!state.settings || typeof state.settings !== 'object') state.settings = {};
@@ -315,12 +318,13 @@ function saveCollectedProduct(groupId, raw, options = {}) {
     const target = groupId ? draft.groups.find((item) => item.id === groupId) : null;
     if (groupId && !target) return null;
     const platform = sourcePlatform(raw);
-    let product = draft.products.find((item) => (groupId ? item.groupId === groupId : true) && sourcePlatform(item) === platform && item.sourceId === raw.sourceId);
+    let product = findCollectedProduct(draft, raw, platform, options.collectionFolderId, sourcePlatform);
     const priceNumber = Number(raw.price || 0);
     const markup = Number(draft.settings.priceMarkup || 0);
     const normalized = {
       ...raw,
       sourcePlatform: platform,
+      collectionFolderId: options.collectionFolderId,
       collectionMethod: options.collectionMethod || 'shop',
       price: platform === 'alibaba.com' && markup ? (priceNumber * (1 + markup / 100)).toFixed(2) : raw.price ?? '',
       stock: raw.stock == null || raw.stock === '' ? Number(draft.settings.defaultStock ?? 100) : Number(raw.stock),
@@ -349,11 +353,12 @@ async function startCollectJob(jobId) {
   const initial = store.read();
   const job = initial.jobs.find((item) => item.id === jobId && item.type === 'collect');
   const group = initial.groups.find((item) => item.id === job?.metadata?.groupId);
+  const inJobFolder = (item) => item.groupId === group?.id && item.collectionFolderId === job?.metadata?.options?.collectionFolderId;
   if (!job || !group || job.status === 'cancelled') return;
   // A queued job can be paused before setImmediate() gets a chance to start
   // it. Do not turn that explicit pause back into a running job.
   if (job.status === 'paused') {
-    const count = initial.products.filter((item) => item.groupId === group.id).length;
+    const count = initial.products.filter(inJobFolder).length;
     store.update((draft) => {
       const target = draft.groups.find((item) => item.id === group.id);
       if (target) Object.assign(target, { status: 'ready', collectedCount: count, activeJobId: '' });
@@ -382,7 +387,7 @@ async function startCollectJob(jobId) {
     }, options);
     for (const raw of products) saveCollectedProduct(group.id, raw, options);
     if (store.read().jobs.find((item) => item.id === jobId)?.status === 'cancelled') return;
-    const count = store.read().products.filter((item) => item.groupId === group.id).length;
+    const count = store.read().products.filter(inJobFolder).length;
     const warningCount = products.filter((item) => item?.collectWarning).length;
     store.update((draft) => {
       const target = draft.groups.find((item) => item.id === group.id);
@@ -399,7 +404,7 @@ async function startCollectJob(jobId) {
   } catch (error) {
     const currentStatus = store.read().jobs.find((item) => item.id === jobId)?.status;
     if (currentStatus === 'cancelled') {
-      const count = store.read().products.filter((item) => item.groupId === group.id).length;
+      const count = store.read().products.filter(inJobFolder).length;
       store.update((draft) => {
         const target = draft.groups.find((item) => item.id === group.id);
         if (target?.activeJobId === jobId) Object.assign(target, { status: 'ready', collectedCount: count, activeJobId: '' });
@@ -408,7 +413,7 @@ async function startCollectJob(jobId) {
     }
     const paused = error.code === 'COLLECT_PAUSED' || ['pause_requested', 'paused'].includes(currentStatus);
     if (paused) {
-      const count = store.read().products.filter((item) => item.groupId === group.id).length;
+      const count = store.read().products.filter(inJobFolder).length;
       store.update((draft) => {
         const target = draft.groups.find((item) => item.id === group.id);
         if (target) Object.assign(target, { status: 'ready', collectedCount: count, activeJobId: '' });
@@ -428,13 +433,14 @@ async function startCollectJob(jobId) {
 
 app.post('/api/groups/:id/collect', (request, response, next) => {
   const state = store.read();
+  try { requireCollectionFolder(state, request.body.collectionFolderId); } catch (error) { return next(error); }
   const group = state.groups.find((item) => item.id === request.params.id);
   if (!group) return next(Object.assign(new Error('没有找到该分组'), { status: 404 }));
   const unfinished = state.jobs.find((item) => item.type === 'collect' && item.metadata?.groupId === group.id && ['queued', 'running', 'pause_requested', 'paused'].includes(item.status));
   if (unfinished) return next(Object.assign(new Error('该分组已有未完成的采集任务，请先继续或取消该任务'), { status: 409 }));
-  const options = { startPage: Math.max(1, Number(request.body.startPage || 1)), endPage: Math.max(1, Number(request.body.endPage || 100)), delaySeconds: Math.max(0, Number(request.body.delaySeconds || 0)), destinationCountry: String(request.body.destinationCountry || ''), sort: String(request.body.sort || 'default') };
+  const options = { collectionFolderId: request.body.collectionFolderId, startPage: Math.max(1, Number(request.body.startPage || 1)), endPage: Math.max(1, Number(request.body.endPage || 100)), delaySeconds: Math.max(0, Number(request.body.delaySeconds || 0)), destinationCountry: String(request.body.destinationCountry || ''), sort: String(request.body.sort || 'default') };
   if (options.endPage < options.startPage) options.endPage = options.startPage;
-  const job = store.createJob('collect', { groupId: group.id, groupName: group.name, options });
+  const job = store.createJob('collect', { groupId: group.id, groupName: group.name, collectionFolderId: options.collectionFolderId, options });
   store.update((draft) => { const target = draft.groups.find((item) => item.id === group.id); target.status = 'collecting'; target.activeJobId = job.id; });
   response.status(202).json(job);
   setImmediate(() => queueCollection(job.id));
@@ -481,18 +487,21 @@ async function startLinkCollectJob(jobId) {
 
 app.post('/api/collect/links', (request, response, next) => {
   try {
+    requireCollectionFolder(store.read(), request.body.collectionFolderId);
     const method = request.body.method === 'image-search' ? 'image-search' : 'product';
     const links = collectionUrls(request.body.urls, method, request.body.platform);
     const unfinished = store.read().jobs.find((item) => item.type === 'collect' && item.metadata?.collectionMethod === method
+      && item.metadata?.collectionFolderId === request.body.collectionFolderId
       && item.metadata?.sourcePlatform === links[0].platform && ['queued', 'running', 'paused', 'pause_requested'].includes(item.status));
     if (unfinished) throw Object.assign(new Error('当前入口已有采集任务，请先继续或取消该任务'), { status: 409 });
     const number = (value, fallback, max) => Math.max(1, Math.min(max, Math.floor(Number(value) || fallback)));
     const options = {
+      collectionFolderId: request.body.collectionFolderId,
       startPage: number(request.body.startPage, 1, 100), endPage: number(request.body.endPage, 1, 100),
       maxProducts: number(request.body.maxProducts, 100, 1000), delaySeconds: Math.max(0, Math.min(60, Number(request.body.delaySeconds) || 0)),
     };
     if (options.endPage < options.startPage) throw new Error('结束页不能小于起始页');
-    const job = store.createJob('collect', { collectionMethod: method, sourcePlatform: links[0].platform, links, options });
+    const job = store.createJob('collect', { collectionMethod: method, sourcePlatform: links[0].platform, collectionFolderId: options.collectionFolderId, links, options });
     response.status(202).json(job);
     setImmediate(() => queueCollection(job.id));
   } catch (error) { next(Object.assign(error, { status: error.status || 400 })); }
@@ -503,6 +512,22 @@ app.post('/api/collect/login', async (request, response, next) => {
     if (store.read().jobs.some((job) => job.type === 'collect' && ['running', 'queued'].includes(job.status))) throw new Error('请先暂停采集任务再打开平台登录');
     response.json(await collector.openMarketplace(request.body.platform));
   } catch (error) { next(error); }
+});
+
+app.post('/api/collection-folders', (request, response, next) => {
+  try { response.status(201).json(store.update((state) => saveCollectionFolder(state, request.body.name))); } catch (error) { next(error); }
+});
+app.patch('/api/collection-folders/:id', (request, response, next) => {
+  try { response.json(store.update((state) => saveCollectionFolder(state, request.body.name, request.params.id))); } catch (error) { next(error); }
+});
+app.post('/api/collection-folders/:id/select', (request, response, next) => {
+  try { response.json(store.update((state) => { requireCollectionFolder(state, request.params.id); state.settings.activeCollectionFolderId = request.params.id; return { ok: true }; })); } catch (error) { next(error); }
+});
+app.delete('/api/collection-folders/:id', (request, response, next) => {
+  try { response.json(store.update((state) => deleteCollectionFolder(state, request.params.id))); } catch (error) { next(error); }
+});
+app.post('/api/products/move-folder', (request, response, next) => {
+  try { response.json(store.update((state) => moveProductsToFolder(state, Array.isArray(request.body.ids) ? request.body.ids : [], request.body.collectionFolderId))); } catch (error) { next(error); }
 });
 
 app.post('/api/categories/from-product', async (request, response, next) => {
@@ -794,7 +819,7 @@ async function runPublishJob(jobId) {
         // stage has made no progress for an extended period.
         const stageTimeoutMs = Math.max(60000, Number(process.env.KUA_YIPU_PUBLISH_STAGE_TIMEOUT_MS || 180000));
         const result = await runWithProgressTimeout(
-          (reportStage) => publisher.publishProduct(product, route.url, mode, route.category, jobId, reportStage),
+          (reportStage) => publisher.publishProduct(product, route.url, mode, route.category, jobId, reportStage, { sellerGroup: job.metadata?.sellerGroup }),
           {
             timeoutMs: stageTimeoutMs,
             initialStage: '启动国际站发布流程',
@@ -879,7 +904,7 @@ async function runPublishJob(jobId) {
           store.patchJob(jobId, { status: 'paused', progress: index, total, message: `已立即暂停，当前商品未继续操作，已完成 ${index}/${total} 件` });
           return;
         }
-        if (requiresHuman || error.code === 'PUBLISH_ACCOUNT_LIMIT') {
+        if (requiresHuman || ['PUBLISH_ACCOUNT_LIMIT', 'SELLER_GROUP_UNAVAILABLE'].includes(error.code)) {
           store.patchJob(jobId, {
             status: 'paused', progress: index, total,
             message: `已暂停：${product.title} - ${message}。处理后可继续`
@@ -909,17 +934,35 @@ async function runPublishJob(jobId) {
   }
 }
 
+let readingSellerGroups = false;
+app.get('/api/seller/product-groups', async (request, response, next) => {
+  if (readingSellerGroups || store.read().jobs.some((job) => job.type === 'publish' && ['queued', 'running', 'pause_requested'].includes(job.status))) return next(Object.assign(new Error('正在处理上架任务或读取分组，请稍后重试'), { status: 409 }));
+  readingSellerGroups = true;
+  try { response.json({ groups: await publisher.listSellerGroups(normalizeCategoryId(request.query.categoryId)) }); }
+  catch (error) { next(error); }
+  finally { readingSellerGroups = false; }
+});
+
 app.post('/api/publish', (request, response, next) => {
   const state = store.read();
+  if (readingSellerGroups) return next(Object.assign(new Error('正在读取国际站分组，请稍后开始上架'), { status: 409 }));
   const existing = state.jobs.find((job) => job.type === 'publish' && ['queued', 'running', 'pause_requested', 'paused'].includes(job.status));
   if (existing) return next(Object.assign(new Error('已有未完成的上架任务，请先继续或完成该任务'), { status: 409 }));
   const ids = new Set(request.body.ids || state.products.filter((item) => item.selected).map((item) => item.id));
   const products = state.products.filter((item) => ids.has(item.id));
   if (!products.length) return next(Object.assign(new Error('请至少选择一件商品'), { status: 400 }));
+  let sellerGroup;
+  const folderId = request.body.collectionFolderId || products[0].collectionFolderId;
+  try {
+    requireCollectionFolder(state, folderId);
+    sellerGroup = normalizeSellerGroup(request.body.sellerGroup);
+    if (products.some((product) => product.collectionFolderId !== folderId)) throw Object.assign(new Error('请在同一个采集分组内选择上架商品'), { status: 400 });
+  } catch (error) { return next(error); }
   const mode = request.body.mode === 'submit' ? 'submit' : 'draft';
   const plan = createPublishPlan(products, state.settings);
   const job = store.createJob('publish', {
     productIds: products.map((item) => item.id), mode,
+    collectionFolderId: folderId, sellerGroup,
     sourcePlatforms: [...new Set(products.map(sourcePlatform))],
     categoryGroups: plan.map((group) => ({ sourcePlatform: group.sourcePlatform, categoryId: group.categoryId, category: group.category, productIds: group.products.map((item) => item.id) }))
   });
@@ -949,6 +992,7 @@ app.post('/api/jobs/:id/resume', (request, response, next) => {
   if (job.status !== 'paused') {
     return next(Object.assign(new Error('当前任务不能继续'), { status: 409 }));
   }
+  if (job.type === 'publish' && readingSellerGroups) return next(Object.assign(new Error('正在读取国际站分组，请稍后继续任务'), { status: 409 }));
   const updated = store.patchJob(job.id, { status: 'queued', message: `等待继续，已处理 ${job.progress}/${job.total} 件` });
   response.json(updated);
   setImmediate(() => job.type === 'collect' ? queueCollection(job.id) : runPublishJob(job.id));
