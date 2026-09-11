@@ -10,7 +10,8 @@ import { extractFile, listPackage } from '@electron/asar';
 import { getCurrentFuseWire, FuseV1Options } from '@electron/fuses';
 
 const release = path.resolve(process.argv[2]);
-const asar = path.join(release, 'win-unpacked/resources/app.asar');
+const applicationDirectory = process.argv[3] ? path.resolve(process.argv[3]) : path.join(release, 'win-unpacked');
+const asar = path.join(applicationDirectory, 'resources/app.asar');
 const metadata = JSON.parse(fs.readFileSync('package.json', 'utf8'));
 assert.equal(JSON.parse(extractFile(asar, 'package.json')).version, metadata.version);
 const entries = listPackage(asar);
@@ -24,10 +25,10 @@ for (const folder of ['server', 'electron']) {
     }
   }
 }
-assert.ok(fs.statSync(path.join(release, 'win-unpacked/resources/chromium/chrome.exe')).size > 1000000);
+assert.ok(fs.statSync(path.join(applicationDirectory, 'resources/chromium/chrome.exe')).size > 1000000);
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-package-qa-'));
 const executable = fs.readdirSync(path.join(release, 'win-unpacked')).find((name) => name.endsWith('.exe'));
-const executablePath = path.join(release, 'win-unpacked', executable);
+const executablePath = path.join(applicationDirectory, executable);
 const fuses = await getCurrentFuseWire(executablePath);
 for (const name of ['RunAsNode', 'EnableNodeOptionsEnvironmentVariable', 'EnableNodeCliInspectArguments']) assert.equal(fuses[FuseV1Options[name]], 48, name);
 for (const name of ['EnableEmbeddedAsarIntegrityValidation', 'OnlyLoadAppFromAsar', 'EnableCookieEncryption']) assert.equal(fuses[FuseV1Options[name]], 49, name);
@@ -70,4 +71,4 @@ try {
   if (child.exitCode === null) { try { execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }); } catch {} }
 }
 const installer = path.join(release, `chaodekuai-${metadata.version}-setup.exe`);
-console.log(JSON.stringify({ version: metadata.version, installer, bytes: fs.statSync(installer).size, sha256: createHash('sha256').update(fs.readFileSync(installer)).digest('hex'), screenshot: path.join(root, 'packaged-login.png') }));
+console.log(JSON.stringify({ version: metadata.version, installer, applicationDirectory, bytes: fs.statSync(installer).size, sha256: createHash('sha256').update(fs.readFileSync(installer)).digest('hex'), screenshot: path.join(root, 'packaged-login.png') }));
