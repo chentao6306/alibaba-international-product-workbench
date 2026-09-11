@@ -4,14 +4,16 @@ import pg from 'pg';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { clientAllowed, licenseState, pagination, announcementInput, licenseFilters } from './policy.js';
+import { configureHttpSecurity } from './http-security.js';
 
 const app = express();
+configureHttpSecurity(app);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 app.use(express.json({ limit: '128kb' }));
 const port = Number(process.env.PORT || 8790);
 const signingSecret = String(process.env.KUA_YIPU_AUTH_SECRET || '');
 if (!process.env.DATABASE_URL || signingSecret.length < 32) throw new Error('DATABASE_URL and KUA_YIPU_AUTH_SECRET (at least 32 chars) are required');
-const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 10, ssl: process.env.PGSSL === 'disable' ? false : { rejectUnauthorized: false } });
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 10, ssl: process.env.PGSSL === 'disable' ? false : { rejectUnauthorized: true } });
 const id = () => crypto.randomUUID();
 const normalize = (value) => String(value || '').trim();
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
@@ -25,6 +27,7 @@ const sign = (payload) => {
   return `${body}.${crypto.createHmac('sha256', signingSecret).update(body).digest('base64url')}`;
 };
 const verify = (token) => {
+  if (typeof token !== 'string' || token.length > 4096 || token.split('.').length !== 2) return null;
   const [body, mac] = String(token || '').split('.');
   if (!body || !mac) return null;
   const expected = crypto.createHmac('sha256', signingSecret).update(body).digest('base64url');
@@ -37,7 +40,7 @@ const requireAdmin = (request, response, next) => {
   if (!auth?.admin) return response.status(401).json({ error: '管理员登录已失效' });
   request.admin = auth; next();
 };
-const session = (license, deviceId) => ({ authorized: true, expiresAt: license.expires_at, token: sign({ account: license.alibaba_account, licenseId: license.id, deviceId, exp: Math.min(new Date(license.expires_at).getTime(), Date.now() + 10 * 60 * 1000) }) });
+const session = (license, deviceId) => ({ authorized: true, serverTime: new Date().toISOString(), expiresAt: license.expires_at, token: sign({ account: license.alibaba_account, licenseId: license.id, deviceId, exp: Math.min(new Date(license.expires_at).getTime(), Date.now() + 10 * 60 * 1000) }) });
 async function transaction(work) {
   const client = await pool.connect();
   try { await client.query('BEGIN'); const result = await work(client); await client.query('COMMIT'); return result; }
@@ -46,11 +49,12 @@ async function transaction(work) {
 }
 const event = (client, licenseId, action, actor, metadata = {}) => client.query('INSERT INTO license_events (id,license_id,action,actor,metadata) VALUES ($1,$2,$3,$4,$5)', [id(), licenseId, action, actor, JSON.stringify(metadata)]);
 
-app.get('/health', (_request, response) => response.json({ ok: true, service: 'kua-yipu-auth', version: '1.4.2' }));
+app.get('/health', (_request, response) => response.json({ ok: true, service: 'kua-yipu-auth', version: '1.4.4' }));
 app.get('/', (_request, response) => response.sendFile(path.join(__dirname, 'admin.html')));
 for (const file of ['admin.js', 'admin.css']) app.get(`/${file}`, (_request, response) => response.sendFile(path.join(__dirname, file)));
 app.post('/api/admin/login', async (request, response) => {
   const username = normalize(request.body?.username);
+  if (username.length > 200 || typeof request.body?.password !== 'string' || request.body.password.length > 1024) throw fail('管理员账号或密码格式不正确');
   const result = await pool.query('SELECT * FROM admin_users WHERE username=$1', [username]);
   const [, salt, expected] = String(result.rows[0]?.password_hash || '').split('$');
   const valid = salt && /^[a-f0-9]{128}$/i.test(expected || '') && crypto.timingSafeEqual(crypto.scryptSync(String(request.body?.password || ''), salt, 64), Buffer.from(expected, 'hex'));

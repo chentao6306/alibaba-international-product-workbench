@@ -94,7 +94,7 @@ export function extractMarketplaceProduct(html, platform, baseUrl, pageData = {}
     if (!value || typeof value !== 'string') return '';
     try { const url = new URL(value, baseUrl); return /^https?:$/.test(url.protocol) ? url.href : ''; } catch { return ''; }
   };
-  const images = (values) => [...new Set(values.flat(Infinity).map((item) => absolute(typeof item === 'string' ? item : item?.originalImageURI || item?.fullPathImageURI || item?.imageUrl || item?.url)).filter(Boolean))];
+  const images = (values) => [...new Set(values.flat(Infinity).map((item) => absolute(typeof item === 'string' ? item : item?.originalImageURI || item?.fullPathImageURI || item?.imageUrl || item?.url)).filter((url) => url && !/\.svg(?:[?#]|$)|-tps-\d{1,2}-\d{1,2}\./i.test(url)))];
   const ldProduct = nodes.find((node) => list(node['@type']).includes('Product') || node['@type'] === 'Product') || {};
   const subject = find('titleModule')?.subject || find('productInfoComponent')?.subject || find('subject') || ldProduct.name;
   const title = text(subject || $('meta[property="og:title"]').attr('content') || $('title').text() || $('h1').first().text()).replace(/\s*[-|]\s*(?:Alibaba|AliExpress|1688|阿里巴巴).*$/i, '');
@@ -151,7 +151,7 @@ export function extractMarketplaceProduct(html, platform, baseUrl, pageData = {}
   const offers = list(ldProduct.offers)[0] || ldProduct.offers || {};
   const currencyCode = platform === '1688' ? 'CNY' : text(find('currencyCode') || find('currency') || offers.priceCurrency || '');
   const currencySymbol = ({ USD: '$', CNY: '¥', EUR: '€', GBP: '£' })[currencyCode] || currencyCode;
-  const tiers = list(find('priceRange') || find('priceRangeList') || find('priceRanges')).map((tier) => ({ minQuantity: Number(tier.startQuantity || tier.beginAmount || tier.startAmount || 1), price: amount(tier.price), currencySymbol })).filter((tier) => tier.price);
+  const tiers = list(find('priceRange') || find('priceRangeList') || find('priceRanges')).map((tier) => ({ minQuantity: Number(tier.startQuantity ?? tier.beginAmount ?? tier.startAmount ?? tier.beginNumber ?? tier.minQuantity ?? 1), price: amount(tier.price), currencySymbol })).filter((tier) => tier.price && Number.isFinite(tier.minQuantity) && tier.minQuantity > 0);
   const price = tiers[0]?.price || amount(find('minPrice') || find('formatedPrice') || offers.price || offers.lowPrice || $('meta[property="product:price:amount"]').attr('content')) || skus.find((sku) => sku.price)?.price || '';
   const detailNode = pageData.shadowDescription ? load(`<div id="source-detail">${pageData.shadowDescription}</div>`)('#source-detail') : $('#desc-lazyload-container, #product-description, [class*="detail-desc-decorate"], [class*="description--origin"], [data-pl="product-description"]').first().clone();
   detailNode.find('script,style,iframe,button,object,embed,link,meta').remove();

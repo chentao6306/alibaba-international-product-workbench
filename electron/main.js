@@ -4,9 +4,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { AuthorizationLease } from './auth-lease.js';
+import { matchesAlibabaSession } from './alibaba-identity.js';
+import { readPrivateSession, writePrivateSession } from '../server/private-session-storage.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
+const appIcon = path.join(rootDir, app.isPackaged ? 'dist' : 'public', 'brand.png');
+app.on('browser-window-created', (_event, window) => {
+  window.setIcon(appIcon);
+  window.setMenuBarVisibility(false);
+});
+app.on('web-contents-created', (_event, contents) => {
+  if (app.isPackaged) contents.on('devtools-opened', () => contents.closeDevTools());
+  contents.on('will-attach-webview', (event) => event.preventDefault());
+});
 const localPort = Number(process.env.KUA_YIPU_PORT || 8787);
 // The IP fallback keeps the server-only rollout usable; replace it with the HTTPS domain before public sales.
 const authBaseUrl = String(process.env.KUA_YIPU_AUTH_URL || 'http://106.55.45.126').replace(/\/$/, '');
@@ -23,6 +35,9 @@ let shutdownStarted = false;
 let skipQuitPrompt = false;
 let quitPromptOpen = false;
 const localGate = crypto.randomBytes(32).toString('hex');
+const authorizationLease = new AuthorizationLease();
+let heartbeatPromise;
+let nextHeartbeat = 0;
 let hasSingleInstanceLock = false;
 
 function alibabaCookiesFile() {
@@ -32,8 +47,7 @@ function alibabaCookiesFile() {
 async function saveAlibabaCookies(login) {
   try {
     const cookies = await login.webContents.session.cookies.get({});
-    fs.mkdirSync(path.dirname(alibabaCookiesFile()), { recursive: true });
-    fs.writeFileSync(alibabaCookiesFile(), JSON.stringify(cookies), { mode: 0o600 });
+    writePrivateSession(alibabaCookiesFile(), cookies);
   } catch {
     // Cookie synchronization is best-effort; Alibaba may still expose public
     // listing data when the session cannot be exported.
@@ -45,13 +59,13 @@ async function saveAlibabaSession(login) {
   try {
     const url = login.webContents.getURL();
     const origin = new URL(url).origin;
-    if (!/alibaba\.com$/i.test(new URL(url).hostname)) return;
+    if (!/(^|\.)alibaba\.com$/i.test(new URL(url).hostname)) return;
     const storage = await login.webContents.executeJavaScript('Object.fromEntries(Object.entries(localStorage))', true);
     const file = path.join(path.dirname(alibabaCookiesFile()), 'alibaba-storage.json');
     let all = {};
-    try { all = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+    try { all = readPrivateSession(file); } catch {}
     all[origin] = storage && typeof storage === 'object' ? storage : {};
-    fs.writeFileSync(file, JSON.stringify(all), { mode: 0o600 });
+    writePrivateSession(file, all);
   } catch {
     // Some Alibaba pages disable script access during a redirect; cookies are
     // still persisted by saveAlibabaCookies above.
@@ -91,6 +105,7 @@ async function authRequest(endpoint, body, token = '') {
     throw new Error('暂时无法连接授权服务器，请检查网络后重试');
   }
   const data = await response.json().catch(() => ({}));
+  data.serverTime ||= response.headers.get('date');
   if (!response.ok) throw Object.assign(new Error(data.reason || data.error || '授权验证失败'), { status: response.status });
   return data;
 }
@@ -273,7 +288,7 @@ async function createMainWindow() {
   mainWindow = new BrowserWindow({ width: 1440, height: 960, minWidth: 1100, minHeight: 720, title: '抄得快', autoHideMenuBar: true, show: false, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false } });
   const window = mainWindow;
   window.webContents.session.webRequest.onBeforeSendHeaders({ urls: [`http://127.0.0.1:${localPort}/api/*`] }, (details, callback) => {
-    details.requestHeaders['X-Kua-Yipu-Gate'] = localGate;
+    if (details.webContentsId === window.webContents.id) details.requestHeaders['X-Kua-Yipu-Gate'] = localGate;
     callback({ requestHeaders: details.requestHeaders });
   });
   window.webContents.on('console-message', (_event, level, message, line, sourceId) => {
@@ -510,7 +525,7 @@ async function inspectAndHideAlibabaSellerWindow() {
 }
 
 async function enterSystem() {
-  if (!currentSession) throw new Error('登录失败');
+  if (!currentSession?.verified || !authorizationLease.valid()) throw new Error('请连接网络并重新验证授权');
   // Switch windows immediately. Server startup, cookie export, and renderer
   // loading are supervised in the background so the Alibaba page can never be
   // held in an endless "正在进入" state.
@@ -548,8 +563,7 @@ function ensureLocalServer() {
 }
 
 async function startLocalServer() {
-  const packagedEntry = path.join(process.resourcesPath || rootDir, 'app.asar.unpacked', 'server', 'index.js');
-  const entry = app.isPackaged && fs.existsSync(packagedEntry) ? packagedEntry : path.join(rootDir, 'server', 'index.js');
+  const entry = path.join(rootDir, 'server', 'index.js');
   const dataDir = path.join(app.getPath('userData'), '.data');
   process.env.PORT = String(localPort);
   process.env.DATA_DIR = dataDir;
@@ -569,7 +583,7 @@ async function startLocalServer() {
   await serverModule.serverReady;
   for (let attempt = 0; attempt < 50; attempt += 1) {
     try {
-      const response = await fetch(`http://127.0.0.1:${localPort}/api/state`, { headers: { 'x-kua-yipu-gate': localGate } });
+      const response = await fetch(`http://127.0.0.1:${localPort}/health`);
       const home = await fetch(`http://127.0.0.1:${localPort}/`);
       if (response.ok && home.ok && (await home.text()).includes('<!doctype html>')) return;
     } catch {}
@@ -578,9 +592,18 @@ async function startLocalServer() {
   throw new Error('本地工作台服务启动失败');
 }
 
-ipcMain.handle('credentials:load', () => loadCredentials());
-ipcMain.handle('credentials:clear', () => { clearCredentials(); return true; });
-ipcMain.handle('auth:login', async (_event, payload) => {
+function handleLocalIpc(channel, handler) {
+  ipcMain.handle(channel, (event, ...args) => {
+    const trustedWindow = [loginWindow, mainWindow].find((window) => isWindowAlive(window) && window.webContents === event.sender);
+    const trustedUrl = event.senderFrame?.url;
+    if (!trustedWindow || event.senderFrame !== event.sender.mainFrame || ![pathToFileURL(path.join(__dirname, 'login.html')).href, mainWindowUrl()].includes(trustedUrl)) throw new Error('拒绝未授权的页面请求');
+    return handler(event, ...args);
+  });
+}
+
+handleLocalIpc('credentials:load', () => loadCredentials());
+handleLocalIpc('credentials:clear', () => { clearCredentials(); return true; });
+handleLocalIpc('auth:login', async (_event, payload) => {
   const username = String(payload?.username || '').trim();
   const password = String(payload?.password || '');
   if (!username || !password) throw new Error('请输入 Alibaba 国际站账号和密码');
@@ -595,29 +618,49 @@ ipcMain.handle('auth:login', async (_event, payload) => {
     await startAlibabaLogin(username, password);
     process.env.KUA_YIPU_ACCOUNT = username;
     if (payload.remember) saveCredentials({ username, password }); else clearCredentials();
-    return { username, expiresAt: authorization.expiresAt, token: authorization.token };
+    return { username, expiresAt: currentSession?.expiresAt };
   } catch (error) {
     currentSession = null;
+    authorizationLease.clear();
     throw error;
   }
 });
-ipcMain.handle('auth:session', () => currentSession ? { username: currentSession.username, expiresAt: currentSession.expiresAt } : null);
-ipcMain.handle('auth:heartbeat', async () => {
+handleLocalIpc('auth:session', () => currentSession?.verified && authorizationLease.valid() ? { username: currentSession.username, expiresAt: currentSession.expiresAt } : null);
+
+function revokeLocalSession() {
+  authorizationLease.clear();
+  currentSession = null;
+  serverModulePromise?.then((module) => module.suspendAuthorizedWork?.()).catch(() => {});
+  if (isWindowAlive(mainWindow)) {
+    if (!isWindowAlive(loginWindow)) createLoginWindow();
+    mainWindow.destroy();
+  }
+}
+
+async function checkAuthorization() {
+  if (heartbeatPromise) return heartbeatPromise;
+  heartbeatPromise = refreshAuthorization().finally(() => { heartbeatPromise = null; });
+  return heartbeatPromise;
+}
+
+async function refreshAuthorization() {
   if (!currentSession) return { authorized: false, reason: '尚未登录' };
   const checkedSession = currentSession;
+  const started = performance.now();
   try {
     const result = await authRequest('/api/client/heartbeat', {}, checkedSession.token);
     if (currentSession !== checkedSession) return { authorized: Boolean(currentSession) };
-    if (!result.authorized) { currentSession = null; mainWindow?.close(); }
-    else currentSession = { ...currentSession, token: result.token || currentSession.token, expiresAt: result.expiresAt || currentSession.expiresAt, checkedAt: Date.now() };
-    return result;
+    authorizationLease.renew(result, started);
+    currentSession = { ...currentSession, token: result.token || currentSession.token, expiresAt: result.expiresAt };
+    nextHeartbeat = performance.now() + 30000;
+    return { authorized: true, expiresAt: result.expiresAt };
   } catch (error) {
     if (currentSession !== checkedSession) return { authorized: Boolean(currentSession) };
-    if (![401, 403].includes(error.status) && Date.now() - currentSession.checkedAt < 10 * 60 * 1000 && Date.now() < new Date(currentSession.expiresAt).getTime()) return { authorized: true, temporaryNetworkError: true };
-    currentSession = null; mainWindow?.close();
+    revokeLocalSession();
     throw error;
   }
-});
+}
+handleLocalIpc('auth:heartbeat', () => checkAuthorization());
 
 async function startAlibabaLogin(username, password) {
   const login = new BrowserWindow({ width: 1280, height: 900, title: 'Alibaba.com 登录', webPreferences: { contextIsolation: true, nodeIntegration: false, partition: `persist:kua-yipu-${username}` } });
@@ -628,6 +671,7 @@ async function startAlibabaLogin(username, password) {
   let submitAttempted = false;
   let timer;
   let timeout;
+  const hasMatchingSession = async () => matchesAlibabaSession(await login.webContents.session.cookies.get({ domain: 'alibaba.com' }), username, login.webContents.getURL());
   const setLoginField = (selectors, value) => login.webContents.executeJavaScript(`(() => {
     const selectors = ${JSON.stringify(selectors)};
     const node = selectors.map((selector) => document.querySelector(selector)).find(Boolean);
@@ -698,7 +742,12 @@ async function startAlibabaLogin(username, password) {
     const requestEnter = async () => {
       if (!loginSucceeded) {
         const currentUrl = login.webContents.getURL();
-        if (/login|passport/i.test(currentUrl)) return;
+        if (!await hasMatchingSession()) { showEntryError(new Error('请先登录与软件授权一致的 Alibaba 账号')); return; }
+        try {
+          await checkAuthorization();
+          if (!currentSession) throw new Error('授权校验失败');
+          currentSession.verified = true;
+        } catch (error) { showEntryError(error); return; }
         loginSucceeded = true;
         await saveAlibabaSession(login);
         settle(null, { url: currentUrl });
@@ -813,7 +862,10 @@ async function startAlibabaLogin(username, password) {
         return;
       }
       const hasLoginForm = await login.webContents.executeJavaScript(`Boolean(document.querySelector('input[type="password"], input[name="password"], input[name="loginId"], input[name="account"]'))`).catch(() => true);
-      if (!hasLoginForm && !/login|passport/i.test(url) && await pageLooksRendered()) {
+      if (!hasLoginForm && await hasMatchingSession() && await pageLooksRendered()) {
+        await checkAuthorization();
+        if (!currentSession) throw new Error('授权校验失败');
+        currentSession.verified = true;
         loginSucceeded = true;
         await injectEntryBar();
         await saveAlibabaSession(login);
@@ -841,6 +893,11 @@ app.whenReady().then(() => {
   // Show the login window immediately. Native modules and the local API warm
   // up in parallel so startup is responsive on first launch and after install.
   createLoginWindow();
+  setInterval(() => {
+    if (!currentSession?.verified) return;
+    if (!authorizationLease.valid()) { revokeLocalSession(); return; }
+    if (performance.now() >= nextHeartbeat) checkAuthorization().catch(() => {});
+  }, 5000).unref();
   ensureLocalServer().catch((error) => {
     if (isWindowAlive(loginWindow)) {
       dialog.showErrorBox('抄得快启动失败', `本地工作台服务启动失败：${error.message}`);
@@ -874,8 +931,19 @@ globalThis.__KUA_YIPU_SELLER_BRIDGE = {
   }
 };
 
-ipcMain.handle('auth:enter', async () => enterSystem());
-ipcMain.handle('alibaba:open-source', async (_event, url) => openAlibabaSourceWindow(url));
+globalThis.__KUA_YIPU_AUTHORIZATION = { valid: () => Boolean(currentSession?.verified && authorizationLease.valid()) };
+globalThis.__KUA_YIPU_SECURE_STORAGE = {
+  encrypt: (value) => {
+    if (!safeStorage.isEncryptionAvailable()) throw new Error('系统无法加密 API 密钥');
+    return safeStorage.encryptString(value);
+  },
+  decrypt: (value) => safeStorage.decryptString(value),
+};
+handleLocalIpc('auth:enter', async () => enterSystem());
+handleLocalIpc('alibaba:open-source', async (_event, url) => {
+  if (!currentSession?.verified || !authorizationLease.valid()) throw new Error('请先登录');
+  return openAlibabaSourceWindow(url);
+});
 app.on('before-quit', (event) => {
   if (shutdownStarted) return;
   shutdownStarted = true;

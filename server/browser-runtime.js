@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright-core';
+import { readPrivateSession } from './private-session-storage.js';
 
 const contextModes = new WeakMap();
 
@@ -31,7 +32,7 @@ function readAlibabaCookies() {
   const file = cookieFile();
   if (!file || !fs.existsSync(file)) return [];
   try {
-    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const raw = readPrivateSession(file);
     return normalizeAlibabaCookies(raw);
   } catch {
     return [];
@@ -44,10 +45,10 @@ export async function syncAlibabaCookies(context) {
   const file = storageFile();
   if (!file || !fs.existsSync(file)) return;
   let storage = {};
-  try { storage = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return; }
+  try { storage = readPrivateSession(file); } catch { return; }
   await context.addInitScript((entries) => {
     try {
-      if (!location.hostname.endsWith('alibaba.com')) return;
+      if (!/(^|\.)alibaba\.com$/i.test(location.hostname)) return;
       const values = entries[location.origin] || entries['https://www.alibaba.com'];
       if (!values || typeof values !== 'object') return;
       for (const [key, value] of Object.entries(values)) localStorage.setItem(key, String(value));

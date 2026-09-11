@@ -23,10 +23,11 @@ import { collectionUrls, convertProductPrices, crossPlatformPublishErrors, parse
 import { cleanupWorkspace } from './storage-cleanup.js';
 import { AnnouncementInbox } from './announcements.js';
 import { normalizeSellerGroup } from './seller-groups.js';
+import { SecureSettings } from './secure-settings.js';
+import { DEFAULT_PROCESSING, prepareMarketplaceProduct, processingSettings, translateProductTitle } from './product-processing.js';
 import { initializeCollectionFolders, requireCollectionFolder, saveCollectionFolder, deleteCollectionFolder, moveProductsToFolder, findCollectedProduct } from './collection-folders.js';
 
-// In the packaged desktop build the server module is unpacked while the
-// frontend remains inside app.asar. APP_ROOT_DIR keeps both layouts working.
+// APP_ROOT_DIR also supports desktop builds with assets inside app.asar.
 const rootDir = process.env.APP_ROOT_DIR
   ? path.resolve(process.env.APP_ROOT_DIR)
   : path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -56,9 +57,15 @@ function directoryBytes(directory) {
 }
 
 const store = new JsonStore(path.join(dataDir, 'workspace.json'));
+const secureSettings = new SecureSettings(dataDir);
+async function processingPatch(product) {
+  let apiKey = '';
+  try { apiKey = secureSettings.key(); } catch {}
+  return prepareMarketplaceProduct(product, store.read().settings.marketplaceProcessing || DEFAULT_PROCESSING, { apiKey });
+}
 const inbox = new AnnouncementInbox(path.join(dataDir, 'announcement-reads.json'), process.env.KUA_YIPU_AUTH_URL || 'http://106.55.45.126', process.env.KUA_YIPU_ACCOUNT || 'local');
 const publisher = new SellerPublisher(dataDir);
-const collector = new ShopCollector(dataDir, (products, onProgress) => publisher.enrichSourceProducts(products, onProgress));
+const collector = new ShopCollector(dataDir, (products, onProgress, options) => publisher.enrichSourceProducts(products, onProgress, options));
 store.update((state) => {
   initializeCollectionFolders(state);
   const previousVersion = Number(state.version || 0);
@@ -216,12 +223,15 @@ store.update((state) => {
   }
 });
 const app = express();
+app.disable('x-powered-by');
+app.get('/health', (_request, response) => response.json({ ok: true }));
 app.use(express.json({ limit: '12mb' }));
 if (process.env.KUA_YIPU_DESKTOP === '1') {
   app.use('/api', (request, response, next) => {
     if (!process.env.KUA_YIPU_LOCAL_GATE || request.headers['x-kua-yipu-gate'] !== process.env.KUA_YIPU_LOCAL_GATE) {
       return response.status(401).json({ error: '请从抄得快登录后进入工作台' });
     }
+    if (!globalThis.__KUA_YIPU_AUTHORIZATION?.valid()) return response.status(401).json({ error: '授权校验已失效，请连接网络后重新登录' });
     next();
   });
 }
@@ -313,6 +323,8 @@ app.post('/api/shops/read-groups', async (request, response, next) => {
 
 function saveCollectedProduct(groupId, raw, options = {}) {
   if (!raw) return null;
+  const { _collectedSnapshot: collectedSnapshot, ...working } = raw;
+  raw = working;
   const now = new Date().toISOString();
   return store.update((draft) => {
     const target = groupId ? draft.groups.find((item) => item.id === groupId) : null;
@@ -332,7 +344,7 @@ function saveCollectedProduct(groupId, raw, options = {}) {
       updatedAt: now
     };
     if (!product) {
-      product = syncProductModel({ id: newId(), shopId: target?.shopId || '', groupId: groupId || '', selected: false, status: 'ready', createdAt: now, ...normalized }, { captureSource: true, sourceSnapshot: raw, capturedAt: now });
+      product = syncProductModel({ id: newId(), shopId: target?.shopId || '', groupId: groupId || '', selected: false, status: 'ready', createdAt: now, ...normalized }, { captureSource: true, sourceSnapshot: collectedSnapshot || raw, capturedAt: now });
       draft.products.unshift(product);
     } else {
       if (options.collectionMethod) return product;
@@ -455,6 +467,7 @@ async function startLinkCollectJob(jobId) {
   const completedKeys = new Set(metadata.completedKeys || []);
   const failures = [...(metadata.failures || [])];
   const options = { ...metadata.options, collectionMethod: metadata.collectionMethod,
+    prepareProduct: async (product) => ({ ...product, ...await processingPatch(product), _collectedSnapshot: product }),
     completedKeys: [...completedKeys],
     shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read().jobs.find((item) => item.id === jobId)?.status),
   };
@@ -719,6 +732,51 @@ app.post('/api/products/delete', (request, response, next) => {
   try { response.json(deleteEntities({ productIds: request.body.ids || [] })); } catch (error) { next(error); }
 });
 
+app.get('/api/settings/processing', (_request, response) => {
+  response.json({ ...DEFAULT_PROCESSING, ...store.read().settings.marketplaceProcessing, apiKeyConfigured: secureSettings.configured() });
+});
+
+app.patch('/api/settings/processing', (request, response, next) => {
+  try {
+    const config = processingSettings(request.body);
+    if (Object.hasOwn(request.body, 'apiKey')) secureSettings.saveKey(request.body.apiKey);
+    store.update((state) => { state.settings.marketplaceProcessing = config; });
+    response.json({ ...config, apiKeyConfigured: secureSettings.configured() });
+  } catch (error) { next(Object.assign(error, { status: 400 })); }
+});
+
+app.post('/api/settings/processing/test', async (_request, response, next) => {
+  try {
+    const title = await translateProductTitle('不锈钢杯 500ml', { apiKey: secureSettings.key(), model: store.read().settings.marketplaceProcessing?.deepseekModel });
+    response.json({ ok: true, title });
+  } catch (error) { next(Object.assign(error, { status: 400 })); }
+});
+
+const processingProducts = new Set();
+app.post('/api/products/process', async (request, response, next) => {
+  const id = String(request.body?.id || '');
+  let acquired = false;
+  try {
+    const state = store.read();
+    const product = state.products.find((item) => item.id === id);
+    if (!product) return response.status(404).json({ error: '没有找到该商品' });
+    if (product.status === 'published' || findWorkspaceJobs(state, { productIds: [id] }, ['queued', 'running', 'pause_requested']).length || processingProducts.has(id)) return response.status(409).json({ error: '商品正在处理或已发布，请勿重复加工' });
+    processingProducts.add(id);
+    acquired = true;
+    const revision = JSON.stringify(product);
+    const patch = await processingPatch(product);
+    const updated = store.update((draft) => {
+      const current = draft.products.find((item) => item.id === id);
+      if (!current || JSON.stringify(current) !== revision) throw Object.assign(new Error('商品资料已变更，请重新加工'), { status: 409 });
+      if (process.env.KUA_YIPU_DESKTOP === '1' && !globalThis.__KUA_YIPU_AUTHORIZATION?.valid()) throw Object.assign(new Error('授权校验中断，加工结果未保存'), { status: 401 });
+      recordProductMutation(current, patch, { actor: 'user', action: 'marketplace-processing' });
+      return { id, warnings: current.processingWarnings || [] };
+    });
+    response.json(updated);
+  } catch (error) { next(error); }
+  finally { if (acquired) processingProducts.delete(id); }
+});
+
 app.patch('/api/settings', (request, response) => {
   const allowed = ['publishPageUrl', 'publishCategory', 'publishBindings', 'defaultStock', 'priceMarkup', 'publishMode'];
   const settings = store.update((state) => {
@@ -951,6 +1009,7 @@ app.post('/api/publish', (request, response, next) => {
   const ids = new Set(request.body.ids || state.products.filter((item) => item.selected).map((item) => item.id));
   const products = state.products.filter((item) => ids.has(item.id));
   if (!products.length) return next(Object.assign(new Error('请至少选择一件商品'), { status: 400 }));
+  if (products.some((product) => processingProducts.has(product.id))) return next(Object.assign(new Error('商品正在加工，请完成后再上架'), { status: 409 }));
   let sellerGroup;
   const folderId = request.body.collectionFolderId || products[0].collectionFolderId;
   try {
@@ -1083,7 +1142,7 @@ app.post('/api/products/reference', (request, response, next) => {
       const changed = [];
       for (const product of state.products) {
         if (!ids.has(product.id) || product.id === reference.id || product.status === 'published') continue;
-        const patch = applyPublishedProductReference(product, referenceTemplate, { preserveCategory: true, onlyMissing: true });
+        const patch = applyPublishedProductReference(product, referenceTemplate, { preserveCategory: Boolean(product.categoryId), onlyMissing: true });
         if (!Object.keys(patch).length) continue;
         // A template reference is an explicit recovery action for a failed
         // listing. Reset the working status and remove the stale failure
@@ -1175,4 +1234,13 @@ export async function shutdownServer() {
   listener = null;
   if (!active?.listening) return;
   await new Promise((resolve) => active.close(() => resolve()));
+}
+
+export async function suspendAuthorizedWork() {
+  const jobs = store.read().jobs.filter((job) => ['queued', 'running', 'pause_requested'].includes(job.status));
+  for (const job of jobs) {
+    store.patchJob(job.id, { status: 'paused', message: '授权校验中断，任务已暂停，请联网后重新登录' });
+    if (job.type === 'publish') publisher.requestPublishStop(job.id);
+  }
+  await collector.resetContext();
 }

@@ -66,7 +66,12 @@ export function crossPlatformPublishErrors(product) {
 export function convertProductPrices(product, rate) {
   const multiplier = Number(rate);
   if (!Number.isFinite(multiplier) || multiplier <= 0) throw new Error('换算汇率必须大于 0');
-  const price = (value) => Number(value) > 0 ? (Number(value) * multiplier).toFixed(2) : value;
+  const price = (value) => {
+    if (!(Number(value) > 0)) return value;
+    const converted = Number(value) * multiplier;
+    if (!Number.isFinite(converted) || converted < 0.005) throw new Error('换算后价格无效或低于 0.01 美元，请调整汇率或手动定价');
+    return converted.toFixed(2);
+  };
   const range = product.sourcePriceRange;
   const fob = product.fobPrice;
   return {

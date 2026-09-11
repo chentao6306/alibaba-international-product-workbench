@@ -1,6 +1,6 @@
 {
   "name": "alibaba-international-product-workbench",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "main": "electron/main.js",
   "description": "抄得快 Alibaba.com 国际站商品采集与发布工作台",
   "author": "抄得快",
@@ -10,7 +10,7 @@
     "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:web\"",
     "dev:server": "node --watch server/index.js",
     "dev:web": "vite --host 127.0.0.1",
-    "build": "vite build",
+    "build": "node tools/prepare-brand.mjs && vite build",
     "start": "node server/index.js",
     "desktop": "electron electron/main.js",
     "desktop:dev": "concurrently -k \"npm:dev:server\" \"npm:dev:web\" \"npm:desktop\"",
@@ -29,14 +29,15 @@
     "playwright-core": "1.62.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "sharp": "^0.35.3",
-    "xlsx": "^0.18.5"
+    "sharp": "0.35.4",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.4.1",
     "concurrently": "^9.1.2",
-    "electron": "^36.9.5",
+    "electron": "44.3.0",
     "electron-builder": "^26.15.3",
+    "esbuild": "0.25.12",
     "vite": "^6.2.2"
   },
   "build": {
@@ -48,17 +49,24 @@
     },
     "files": [
       "dist/**/*",
-      "server/**/*",
-      "electron/**/*",
+      { "from": ".packaged/server", "to": "server", "filter": ["**/*"] },
+      { "from": ".packaged/electron", "to": "electron", "filter": ["**/*"] },
       "node_modules/**/*",
       "package.json"
     ],
     "asarUnpack": [
-      "server/**/*",
-      "node_modules/**/*",
-      "node_modules/playwright-core/**/*",
-      "node_modules/sharp/**/*"
+      "**/*.node",
+      "**/*.dll"
     ],
+    "beforePack": "tools/prepare-package.mjs",
+    "electronFuses": {
+      "runAsNode": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableCookieEncryption": true,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true
+    },
     "extraResources": [
       {
         "from": "vendor/chromium",
@@ -70,7 +78,8 @@
     ],
     "asar": true,
     "win": {
-      "signAndEditExecutable": false,
+      "icon": "assets/brand.ico",
+      "signAndEditExecutable": true,
       "target": [
         {
           "target": "nsis",

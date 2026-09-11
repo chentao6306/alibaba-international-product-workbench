@@ -142,10 +142,10 @@ export function applyPublishedProductReference(target, reference, options = {}) 
       'targetCategoryId', 'internationalCategory', 'internationalCategoryPath',
       'categoryAttributes', 'publishCategory', 'publishCategoryId'
     ]) cloneIfPresent(field);
-    if (!patch.categoryPath && Array.isArray(reference?.sourceCategoryPath) && reference.sourceCategoryPath.length) {
+    if (!patch.categoryPath && (!options.onlyMissing || isBlank(target?.categoryPath)) && Array.isArray(reference?.sourceCategoryPath) && reference.sourceCategoryPath.length) {
       patch.categoryPath = clone(reference.sourceCategoryPath);
     }
-    if (!patch.categoryId && !isBlank(reference?.sourceCategoryId)) {
+    if (!patch.categoryId && (!options.onlyMissing || isBlank(target?.categoryId)) && !isBlank(reference?.sourceCategoryId) && (!reference.sourcePlatform || reference.sourcePlatform === 'alibaba.com')) {
       patch.categoryId = clone(reference.sourceCategoryId);
     }
   }

@@ -1588,6 +1588,7 @@ export function attributeOptionMatchScore(source, option) {
 
 export async function fillChoice(page, locator, value) {
   if (!locator || !value) return false;
+  if (!await locator.count().catch(() => 0)) return false;
   const expected = String(value).trim();
   const kind = await locator.evaluate((node) => ({ tag: node.tagName, type: node.type })).catch(() => null);
   if (!kind) return false;
@@ -1648,9 +1649,12 @@ export async function fillChoice(page, locator, value) {
         await locator.click({ force: true, timeout: 4000 }).catch(() => {});
       }
       await page.waitForTimeout(180);
-      const acceptsCustom = Number(await locator.getAttribute('maxcustomitems')) > 0;
+      // Opening an option menu can replace its input during a category rerender.
+      // An absent input is not a custom-value control and must not abort the item.
+      if (!await locator.count().catch(() => 0)) return false;
+      const acceptsCustom = Number(await locator.getAttribute('maxcustomitems', { timeout: 1000 }).catch(() => null)) > 0;
       if (acceptsCustom) {
-        await locator.fill(candidate);
+        await locator.fill(candidate, { timeout: 2000 }).catch(() => {});
         await page.waitForTimeout(250);
       }
       let chose = await chooseVisibleOption(candidate);
