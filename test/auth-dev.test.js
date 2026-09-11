@@ -19,9 +19,13 @@ test('authorization service supports filtering, expiration correction, deletion,
       child.once('error', reject);
       child.stdout.on('data', (chunk) => { const match = String(chunk).match(/http:\/\/127\.0\.0\.1:\d+/); if (match) { clearTimeout(timer); resolve(match[0]); } });
     });
+    const codes = new Map();
     const api = async (route, body, method = 'POST', credential = token) => {
+      if (route === '/api/client/login') body = { activationCode: codes.get(body.username), ...body };
       const response = await fetch(url + route, { method, headers: { 'content-type': 'application/json', authorization: `Bearer ${credential}` }, ...(body ? { body: JSON.stringify(body) } : {}) });
-      return { status: response.status, data: await response.json() };
+      const data = await response.json();
+      if (data.activationCode) codes.set(data.alibaba_account, data.activationCode);
+      return { status: response.status, data };
     };
     token = (await api('/api/admin/login', { username: 'test', password: 'local-test-password' })).data.token;
     assert.ok(token);

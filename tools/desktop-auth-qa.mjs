@@ -10,8 +10,16 @@ import { _electron } from 'playwright-core';
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-auth-qa-'));
 let authorized = true;
 let heartbeats = 0;
-const authServer = http.createServer((request, response) => {
+let codeLogins = 0;
+const testCode = 'CDK-' + 'q'.repeat(43);
+const authServer = http.createServer(async (request, response) => {
   response.setHeader('content-type', 'application/json');
+  if (request.url.includes('/login')) {
+    const chunks = []; for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    if (body.activationCode !== testCode) { response.writeHead(403); response.end('{"error":"QA activation code missing"}'); return; }
+    codeLogins++;
+  }
   if (!authorized) { response.writeHead(403); response.end('{"error":"QA authorization revoked"}'); return; }
   if (request.url.includes('heartbeat')) heartbeats++;
   response.end(JSON.stringify({ authorized: true, token: 'qa-session', serverTime: new Date().toISOString(), expiresAt: new Date(Date.now() + 3600000).toISOString() }));
@@ -34,6 +42,7 @@ try {
   });
   await login.locator('#username').fill('qa-account');
   await login.locator('#password').fill('not-a-real-password');
+  await login.locator('#activationCode').fill(testCode);
   await login.locator('#login').click();
   await login.getByRole('button', { name: '进入系统', exact: true }).waitFor({ timeout: 20000 });
   assert.ok(heartbeats > 0);
@@ -48,12 +57,14 @@ try {
   assert.equal((await fetch(`http://127.0.0.1:${port}/api/state`)).status, 401);
   const userData = await app.evaluate(({ app }) => app.getPath('userData'));
   assert.equal(fs.readFileSync(path.join(userData, 'alibaba-cookies.json')).includes('qa-account'), false);
+  assert.equal(fs.readFileSync(path.join(userData, 'activation-credentials.bin')).includes(testCode), false);
   authorized = false;
   const closed = main.waitForEvent('close');
   await main.evaluate(() => window.kuaYipu.heartbeat()).catch(() => {});
   await closed;
   assert.equal((await fetch(`http://127.0.0.1:${port}/api/state`)).status, 401);
-  console.log(JSON.stringify({ ok: true, verified: ['signed-in-identity', 'heartbeat-before-entry', 'renderer-api-gate', 'encrypted-session-export', 'revocation-closes-workbench'] }));
+  assert.equal(codeLogins, 1);
+  console.log(JSON.stringify({ ok: true, verified: ['signed-in-identity', 'heartbeat-before-entry', 'renderer-api-gate', 'encrypted-session-export', 'encrypted-activation-code', 'revocation-closes-workbench'] }));
 } finally {
   if (app) { try { execFileSync('taskkill', ['/PID', String(app.process().pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }); } catch {} }
   authServer.closeAllConnections();

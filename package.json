@@ -1,6 +1,6 @@
 {
   "name": "alibaba-international-product-workbench",
-  "version": "1.4.5",
+  "version": "1.4.6",
   "main": "electron/main.js",
   "description": "抄得快 Alibaba.com 国际站商品采集与发布工作台",
   "author": "抄得快",
@@ -49,8 +49,20 @@
     },
     "files": [
       "dist/**/*",
-      { "from": ".packaged/server", "to": "server", "filter": ["**/*"] },
-      { "from": ".packaged/electron", "to": "electron", "filter": ["**/*"] },
+      {
+        "from": ".packaged/server",
+        "to": "server",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": ".packaged/electron",
+        "to": "electron",
+        "filter": [
+          "**/*"
+        ]
+      },
       "node_modules/**/*",
       "package.json"
     ],
@@ -94,7 +106,7 @@
           ]
         }
       ],
-      "verifyUpdateCodeSignature": false
+      "verifyUpdateCodeSignature": true
     },
     "nsis": {
       "oneClick": false,

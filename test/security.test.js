@@ -12,6 +12,29 @@ import { fixedWindowLimiter } from '../auth-server/http-security.js';
 import { chromium } from 'playwright-core';
 import { findChromium } from '../server/browser-runtime.js';
 import { fillChoice } from '../server/publisher.js';
+import { authorizationEndpoint } from '../server/auth-endpoint.js';
+import { tokenCodec, clientSessionAllowed } from '../auth-server/security.js';
+
+test('authorization transport rejects HTTP and credential-bearing or redirected endpoints', () => {
+  assert.equal(authorizationEndpoint(), 'https://106.55.45.126:80');
+  for (const url of ['http://106.55.45.126', 'https://user:secret@106.55.45.126', 'https://106.55.45.126/path', 'https://106.55.45.126?url=http://other', 'file:///local']) assert.throws(() => authorizationEndpoint(url));
+  assert.throws(() => authorizationEndpoint('http://127.0.0.1:8790'));
+  assert.equal(authorizationEndpoint('http://127.0.0.1:8790', { development: true }), 'http://127.0.0.1:8790');
+});
+
+test('signed tokens reject tampering, expired timestamps, type confusion and revoked credential versions', () => {
+  const codec = tokenCodec('test-only-signing-secret-at-least-32-characters');
+  const valid = { aud: 'client', deviceId: 'device', credentialVersion: 1, credentialVerified: true, exp: Date.now() + 10000 };
+  const token = codec.sign(valid);
+  assert.deepEqual(codec.verify(token), valid);
+  assert.equal(codec.verify(token + '.extra'), null);
+  assert.equal(codec.verify(token.slice(0, -1) + (token.endsWith('a') ? 'b' : 'a')), null);
+  assert.equal(codec.verify(codec.sign({ exp: '999999999999999' })), null);
+  assert.equal(codec.verify(codec.sign({ exp: 0 })), null);
+  const license = { credential_required: true, credential_version: 1 };
+  assert.equal(clientSessionAllowed(license, valid), true);
+  for (const auth of [{ ...valid, credentialVersion: 0 }, { ...valid, aud: 'admin' }, { ...valid, admin: true }, { ...valid, credentialVerified: false }]) assert.equal(clientSessionAllowed(license, auth), false);
+});
 
 test('login requires a signed-in Alibaba session for the licensed account on the real domain', () => {
   const cookies = [{ domain: '.alibaba.com', name: 'xman_us_t', value: 'sign=y&x_lid=licensed-user' }];

@@ -12,7 +12,29 @@ node auth-server/bootstrap-admin.js
 node auth-server/index.js
 ```
 
-管理员接口使用 `Authorization: Bearer <token>`。客户端接口为 `/api/client/login` 和 `/api/client/heartbeat`。账号授权只匹配 Alibaba 登录账号；密码只在客户端本机通过 Windows DPAPI 加密保存，授权服务器不会接收或保存 Alibaba 密码。
+管理员接口使用 `Authorization: Bearer <token>`。客户端接口为 `/api/client/login` 和 `/api/client/heartbeat`。从 1.4.6 起，新账号还必须提交独立的软件授权码；Alibaba 密码只在客户端本机通过 Windows DPAPI 加密保存，授权服务器不会接收或保存 Alibaba 密码。
+
+## 1.4.6 安全升级
+
+当前生产入口为 `https://106.55.45.126:80/`。由于云端 443 尚未放通，Nginx 在已开放的 80 端口提供 HTTPS；证书正常校验，不允许忽略证书错误。浏览器访问旧 HTTP 管理地址会跳转到此入口。已有客户端的 HTTP 登录、心跳和公开公告接口暂时保留兼容，但启用了授权码的账号必须使用 HTTPS。当前配置是 `deploy/nginx-compatible-https.conf`，不要同时启用旧的站点配置。
+
+新建账号会返回一次 `activationCode`，格式为 `CDK-` 加 43 位随机字符，数据库只保存哈希。`POST /api/client/login` 的请求包含 `username`、`deviceId`、`activationCode` 及可选设备描述。客户端第一次输入后加密保存，再次登录复用。令牌由服务器签名，绑定授权记录、设备及授权码版本，最长有效期 10 分钟，心跳重新检查实际授权状态。
+
+旧账号为避免客户被突然退出，迁移后显示“授权安全待升级”。先让客户安装 1.4.6，再点击该账号的“启用授权码”，把仅显示一次的授权码交给该客户。尚未启用的旧账号仍保留账号名授权的风险；所有旧账号完成迁移后，才应删除 HTTP 客户端兼容入口。重置授权码会使旧授权码和旧会话失效，客户必须重新输入。续期不重置授权码；停用、注销和删除仍终止授权。
+
+管理员令牌还必须对应数据库中的有效会话；退出登录会撤销该会话，修改管理员密码会使旧会话失效。管理接口只允许 HTTPS（本机直连例外用于测试和运维），登录限速、输入校验和参数化 SQL 持续生效。
+
+生产服务使用独立的 Node.js 22.23.2 运行时。部署顺序如下，均以 root 执行；脚本适用于本项目现有 Ubuntu 服务布局，不应直接用于其他服务器：
+
+1. `bash auth-server/deploy/prepare-runtime.sh`：校验官方 SHA256 后安装运行时。
+2. 将源码及测试文件放到独立的 `/var/tmp/kua-yipu-security-qa-*` 目录，再在该目录运行 `PATH=/opt/kua-yipu-runtime/node-v22.23.2-linux-x64/bin:$PATH bash auth-server/deploy/security-qa.sh`：新建隔离 PostgreSQL 测试库，验证后自动删除，不对生产库运行攻击测试。每次使用新的暂存目录。
+3. `bash auth-server/deploy/enable-runtime.sh isolated-tests-passed`：隔离测试通过后，备份并切换服务运行时。
+4. `bash auth-server/deploy/update-service.sh`：备份代码和完整数据库、执行增量迁移、部署并检查健康状态；失败回滚代码，保留兼容的新增字段。
+5. `bash auth-server/deploy/enable-compatible-https.sh`：备份并更新当前 Nginx 配置，验证新旧连接，失败回滚。
+
+迁移新增 `licenses.credential_*` 和 `admin_sessions`。不要仅复制 `index.js`：`security.js`、`http-security.js`、`policy.js` 与管理界面也需要同步。环境文件和服务器私钥必须留在服务器，不能放进部署包或 Git。
+
+SSH 已改为密钥登录，禁止 root 和密码登录。后续运维必须使用已授权私钥；添加其他管理员时先验证新密钥能登录，再调整访问配置。系统启用了安全源自动更新，但不自动重启。内核及部分系统组件更新后需要安排维护重启。具体检查结果、备份目录及安装包见 `../docs/security-1.4.6.md`。
 
 ## 1.4 升级
 

@@ -63,7 +63,7 @@ async function processingPatch(product) {
   try { apiKey = secureSettings.key(); } catch {}
   return prepareMarketplaceProduct(product, store.read().settings.marketplaceProcessing || DEFAULT_PROCESSING, { apiKey });
 }
-const inbox = new AnnouncementInbox(path.join(dataDir, 'announcement-reads.json'), process.env.KUA_YIPU_AUTH_URL || 'http://106.55.45.126', process.env.KUA_YIPU_ACCOUNT || 'local');
+const inbox = new AnnouncementInbox(path.join(dataDir, 'announcement-reads.json'), process.env.KUA_YIPU_AUTH_URL || 'https://106.55.45.126:80', process.env.KUA_YIPU_ACCOUNT || 'local');
 const publisher = new SellerPublisher(dataDir);
 const collector = new ShopCollector(dataDir, (products, onProgress, options) => publisher.enrichSourceProducts(products, onProgress, options));
 store.update((state) => {
@@ -224,8 +224,13 @@ store.update((state) => {
 });
 const app = express();
 app.disable('x-powered-by');
+app.use((_request, response, next) => {
+  response.set('X-Content-Type-Options', 'nosniff');
+  response.set('Referrer-Policy', 'no-referrer');
+  response.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: http: data: blob:; media-src 'self' https: http: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
+  next();
+});
 app.get('/health', (_request, response) => response.json({ ok: true }));
-app.use(express.json({ limit: '12mb' }));
 if (process.env.KUA_YIPU_DESKTOP === '1') {
   app.use('/api', (request, response, next) => {
     if (!process.env.KUA_YIPU_LOCAL_GATE || request.headers['x-kua-yipu-gate'] !== process.env.KUA_YIPU_LOCAL_GATE) {
@@ -242,6 +247,7 @@ let collectionQueue = Promise.resolve();
 function queueCollection(jobId) {
   collectionQueue = collectionQueue.catch(() => {}).then(() => startCollectJob(jobId));
 }
+app.use(express.json({ limit: '12mb' }));
 
 function publicState() {
   const state = store.read();

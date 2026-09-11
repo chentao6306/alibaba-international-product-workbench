@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { AuthorizationLease } from './auth-lease.js';
 import { matchesAlibabaSession } from './alibaba-identity.js';
 import { readPrivateSession, writePrivateSession } from '../server/private-session-storage.js';
+import { authorizationEndpoint } from '../server/auth-endpoint.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -20,8 +21,8 @@ app.on('web-contents-created', (_event, contents) => {
   contents.on('will-attach-webview', (event) => event.preventDefault());
 });
 const localPort = Number(process.env.KUA_YIPU_PORT || 8787);
-// The IP fallback keeps the server-only rollout usable; replace it with the HTTPS domain before public sales.
-const authBaseUrl = String(process.env.KUA_YIPU_AUTH_URL || 'http://106.55.45.126').replace(/\/$/, '');
+const authBaseUrl = authorizationEndpoint(app.isPackaged ? undefined : process.env.KUA_YIPU_AUTH_URL, { development: !app.isPackaged });
+process.env.KUA_YIPU_AUTH_URL = authBaseUrl;
 let serverModulePromise;
 let localServerPromise;
 let loginWindow;
@@ -32,6 +33,7 @@ const registeredAlibabaWindows = new WeakSet();
 let currentSession = null;
 let enterSystemPromise = null;
 let shutdownStarted = false;
+let shutdownComplete = false;
 let skipQuitPrompt = false;
 let quitPromptOpen = false;
 const localGate = crypto.randomBytes(32).toString('hex');
@@ -94,12 +96,28 @@ function clearCredentials() {
   fs.rmSync(credentialFile(), { force: true });
 }
 
+function activationCredentials(username, activationCode) {
+  const file = path.join(app.getPath('userData'), 'activation-credentials.bin');
+  let values = {};
+  try { values = JSON.parse(safeStorage.decryptString(fs.readFileSync(file))); } catch {}
+  const key = crypto.createHash('sha256').update(username).digest('hex');
+  if (activationCode) {
+    if (!safeStorage.isEncryptionAvailable()) throw new Error('当前 Windows 环境不支持安全凭据存储');
+    values[key] = activationCode;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const temporary = `${file}.tmp`;
+    fs.writeFileSync(temporary, safeStorage.encryptString(JSON.stringify(values)));
+    fs.renameSync(temporary, file);
+  }
+  return values[key] || '';
+}
+
 async function authRequest(endpoint, body, token = '') {
   if (!authBaseUrl) throw new Error('登录失败');
   let response;
   try {
     response = await fetch(`${authBaseUrl}${endpoint}`, {
-      method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body), signal: AbortSignal.timeout(20000)
+      method: 'POST', redirect: 'error', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body), signal: AbortSignal.timeout(20000)
     });
   } catch {
     throw new Error('暂时无法连接授权服务器，请检查网络后重试');
@@ -180,7 +198,7 @@ function registerAlibabaWindow(window) {
 }
 
 function createLoginWindow() {
-  loginWindow = new BrowserWindow({ width: 520, height: 620, resizable: false, show: false, title: '抄得快登录', autoHideMenuBar: true, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false } });
+  loginWindow = new BrowserWindow({ width: 520, height: 720, resizable: false, show: false, title: '抄得快登录', autoHideMenuBar: true, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false } });
   loginWindow.once('ready-to-show', () => loginWindow?.show());
   const loginFile = path.join(__dirname, 'login.html');
   const loginUrl = pathToFileURL(loginFile).href;
@@ -603,16 +621,21 @@ function handleLocalIpc(channel, handler) {
 
 handleLocalIpc('credentials:load', () => loadCredentials());
 handleLocalIpc('credentials:clear', () => { clearCredentials(); return true; });
+handleLocalIpc('activation:status', (_event, username) => Boolean(activationCredentials(String(username || '').trim())));
 handleLocalIpc('auth:login', async (_event, payload) => {
   const username = String(payload?.username || '').trim();
   const password = String(payload?.password || '');
   if (!username || !password) throw new Error('请输入 Alibaba 国际站账号和密码');
+  const suppliedCode = String(payload?.activationCode || '').trim();
+  if (suppliedCode && !/^CDK-[A-Za-z0-9_-]{43}$/.test(suppliedCode)) throw new Error('软件授权码格式不正确，请填写管理员提供的完整授权码');
+  const activationCode = suppliedCode || activationCredentials(username);
   const deviceFile = path.join(app.getPath('userData'), 'device-id');
   let installationId = fs.existsSync(deviceFile) ? fs.readFileSync(deviceFile, 'utf8').trim() : '';
   if (!/^[a-f0-9-]{36}$/i.test(installationId)) { installationId = crypto.randomUUID(); fs.writeFileSync(deviceFile, installationId); }
   const deviceId = crypto.createHash('sha256').update(`${installationId}|${os.hostname()}|${username}`).digest('hex');
-  const authorization = await authRequest('/api/client/login', { username, deviceId, appVersion: app.getVersion(), deviceName: `${os.hostname()} (${process.platform}-${process.arch})` });
+  const authorization = await authRequest('/api/client/login', { username, deviceId, activationCode, appVersion: app.getVersion(), deviceName: `${os.hostname()} (${process.platform}-${process.arch})` });
   if (!authorization.authorized || !authorization.token) throw new Error('登录失败');
+  if (suppliedCode) activationCredentials(username, suppliedCode);
   currentSession = { ...authorization, username, deviceId, checkedAt: Date.now() };
   try {
     await startAlibabaLogin(username, password);
@@ -945,9 +968,10 @@ handleLocalIpc('alibaba:open-source', async (_event, url) => {
   return openAlibabaSourceWindow(url);
 });
 app.on('before-quit', (event) => {
+  if (shutdownComplete) return;
+  event.preventDefault();
   if (shutdownStarted) return;
   shutdownStarted = true;
-  event.preventDefault();
   currentSession = null;
   if (isWindowAlive(loginWindow)) loginWindow.destroy();
   if (isWindowAlive(mainWindow)) mainWindow.destroy();
@@ -958,6 +982,7 @@ app.on('before-quit', (event) => {
       await serverModule?.shutdownServer?.();
     } catch {}
   };
-  Promise.race([shutdown(), wait(4000)]).finally(() => app.exit(0));
+  // A normal quit lets Chromium persist its encryption key and profile state.
+  Promise.race([shutdown(), wait(4000)]).finally(() => { shutdownComplete = true; app.quit(); });
 });
-app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('window-all-closed', () => { if (process.platform !== 'darwin' && !shutdownStarted) app.quit(); });

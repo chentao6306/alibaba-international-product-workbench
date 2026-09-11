@@ -30,7 +30,7 @@ try {
     if (i % 6 === 1) await api(`/api/admin/licenses/${item.id}`, { action: 'pause' }, 'PATCH');
     if (i % 6 === 2) await api(`/api/admin/licenses/${item.id}`, { action: 'reduce', days: 31 }, 'PATCH');
     if (i % 6 === 3) await api(`/api/admin/licenses/${item.id}`, null, 'DELETE');
-    if (i % 6 === 4) await api('/api/client/login', { username: item.alibaba_account, deviceId: 'QA' });
+    if (i % 6 === 4) await api('/api/client/login', { username: item.alibaba_account, deviceId: 'QA', activationCode: item.activationCode });
   }
   browser = await chromium.launch({ executablePath: path.resolve('vendor/chromium/chrome.exe'), headless: true });
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
@@ -55,6 +55,14 @@ try {
   await page.waitForFunction(() => document.querySelector('#licensePages').textContent.includes('2 / 2'));
   await filtered(() => page.locator('[data-filter="active"]').click());
   const row = page.locator('#licenses tbody tr').first();
+  await row.locator('[data-action="credential"]').click();
+  await page.locator('#confirmAction').click();
+  await page.locator('#credentialDialog').waitFor();
+  assert.match(await page.locator('#credentialValue').inputValue(), /^CDK-/);
+  await page.screenshot({ path: path.join(root, 'activation-code-dialog.png') });
+  await page.locator('#credentialDialog .close-dialog').click();
+  await page.waitForFunction(() => document.querySelector('#credentialValue').value === '');
+  assert.equal(await page.locator('#credentialValue').inputValue(), '');
   await row.locator('[data-action="reduce"]').click();
   await page.locator('#extendDays').fill('40');
   assert.match(await page.locator('#expiryPreview').textContent(), /立即到期/);

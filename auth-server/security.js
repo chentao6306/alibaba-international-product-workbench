@@ -1,0 +1,54 @@
+import crypto from 'node:crypto';
+
+export function createActivationCredential() {
+  const activationCode = `CDK-${crypto.randomBytes(32).toString('base64url')}`;
+  return { activationCode, credentialHash: crypto.createHash('sha256').update(activationCode).digest('hex') };
+}
+
+export function validActivation(license, value) {
+  if (!license?.credential_required) return true;
+  if (typeof value !== 'string' || !/^CDK-[A-Za-z0-9_-]{43}$/.test(value.trim())) return false;
+  if (!/^[a-f0-9]{64}$/.test(license.credential_hash || '')) return false;
+  return crypto.timingSafeEqual(crypto.createHash('sha256').update(value.trim()).digest(), Buffer.from(license.credential_hash, 'hex'));
+}
+
+export function publicLicense(license) {
+  const { credential_hash, ...visible } = license;
+  return visible;
+}
+
+export function requireCredentialTransport(request, license) {
+  if (!license.credential_required) return;
+  const directLocal = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(request.socket.remoteAddress) && !request.headers['x-forwarded-proto'];
+  if (!request.secure && !directLocal) throw Object.assign(new Error('软件授权码必须通过 HTTPS 安全连接验证，请更新客户端'), { status: 426 });
+}
+
+export function clientSessionAllowed(license, auth) {
+  return Boolean(auth && !auth.admin && (!auth.aud || auth.aud === 'client') && typeof auth.deviceId === 'string' && auth.deviceId
+    && Number(auth.credentialVersion || 0) === Number(license.credential_version || 0)
+    && (!license.credential_required || auth.aud === 'client' && auth.credentialVerified === true));
+}
+
+export function clientClaims(license, deviceId) {
+  return { aud: 'client', account: license.alibaba_account, licenseId: license.id, deviceId,
+    credentialVersion: Number(license.credential_version || 0), credentialVerified: Boolean(license.credential_required),
+    exp: Math.min(new Date(license.expires_at).getTime(), Date.now() + 10 * 60 * 1000) };
+}
+
+export function tokenCodec(secret) {
+  const sign = (payload) => {
+    const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    return `${body}.${crypto.createHmac('sha256', secret).update(body).digest('base64url')}`;
+  };
+  const verify = (token) => {
+    if (typeof token !== 'string' || token.length > 4096 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(token)) return null;
+    const [body, mac] = token.split('.');
+    const expected = crypto.createHmac('sha256', secret).update(body).digest('base64url');
+    if (!crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(expected))) return null;
+    try {
+      const payload = JSON.parse(Buffer.from(body, 'base64url'));
+      return payload && Number.isFinite(payload.exp) && payload.exp > Date.now() ? payload : null;
+    } catch { return null; }
+  };
+  return { sign, verify };
+}

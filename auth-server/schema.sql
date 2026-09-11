@@ -37,6 +37,18 @@ CREATE TABLE IF NOT EXISTS client_logins (
 ALTER TABLE licenses ADD COLUMN IF NOT EXISTS allow_multi_device BOOLEAN NOT NULL DEFAULT true;
 ALTER TABLE licenses ADD COLUMN IF NOT EXISTS active_device_id TEXT;
 ALTER TABLE licenses ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+-- Existing installations migrate per account; newly created accounts require a code.
+ALTER TABLE licenses ADD COLUMN IF NOT EXISTS credential_required BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE licenses ADD COLUMN IF NOT EXISTS credential_hash TEXT;
+ALTER TABLE licenses ADD COLUMN IF NOT EXISTS credential_version INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS admin_sessions (
+  id UUID PRIMARY KEY,
+  admin_id UUID NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+  password_fingerprint TEXT NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS admin_sessions_expiry ON admin_sessions(expires_at);
 ALTER TABLE licenses DROP CONSTRAINT IF EXISTS licenses_alibaba_account_key;
 CREATE UNIQUE INDEX IF NOT EXISTS licenses_current_account ON licenses(alibaba_account) WHERE deleted_at IS NULL;
 CREATE TABLE IF NOT EXISTS announcements (

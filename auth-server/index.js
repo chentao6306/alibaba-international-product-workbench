@@ -5,6 +5,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { clientAllowed, licenseState, pagination, announcementInput, licenseFilters } from './policy.js';
 import { configureHttpSecurity } from './http-security.js';
+import { createActivationCredential, validActivation, publicLicense, clientSessionAllowed, clientClaims, tokenCodec, requireCredentialTransport } from './security.js';
+import { promisify } from 'node:util';
 
 const app = express();
 configureHttpSecurity(app);
@@ -17,30 +19,24 @@ const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 10, 
 const id = () => crypto.randomUUID();
 const normalize = (value) => String(value || '').trim();
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
+app.use('/api/admin', (request, _response, next) => { requireCredentialTransport(request, { credential_required: true }); next(); });
 const daysValue = (value) => {
   const days = Number(value);
   if (!Number.isFinite(days) || days <= 0 || days > 36500) throw fail('授权天数必须大于 0 且不超过 36500');
   return days;
 };
-const sign = (payload) => {
-  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  return `${body}.${crypto.createHmac('sha256', signingSecret).update(body).digest('base64url')}`;
-};
-const verify = (token) => {
-  if (typeof token !== 'string' || token.length > 4096 || token.split('.').length !== 2) return null;
-  const [body, mac] = String(token || '').split('.');
-  if (!body || !mac) return null;
-  const expected = crypto.createHmac('sha256', signingSecret).update(body).digest('base64url');
-  if (Buffer.byteLength(mac) !== Buffer.byteLength(expected) || !crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(expected))) return null;
-  try { const payload = JSON.parse(Buffer.from(body, 'base64url')); return payload.exp > Date.now() ? payload : null; } catch { return null; }
-};
+const { sign, verify } = tokenCodec(signingSecret);
+const scrypt = promisify(crypto.scrypt);
+const passwordFingerprint = (hash) => crypto.createHmac('sha256', signingSecret).update(hash).digest('hex');
 const bearer = (request) => verify(request.headers.authorization?.replace(/^Bearer\s+/i, ''));
-const requireAdmin = (request, response, next) => {
+const requireAdmin = async (request, response, next) => {
   const auth = bearer(request);
-  if (!auth?.admin) return response.status(401).json({ error: '管理员登录已失效' });
+  if (!auth?.admin || auth.aud !== 'admin' || typeof auth.sid !== 'string' || !/^[a-f0-9-]{36}$/.test(auth.sid)) return response.status(401).json({ error: '管理员登录已失效' });
+  const stored = (await pool.query('SELECT s.password_fingerprint,u.password_hash FROM admin_sessions s JOIN admin_users u ON u.id=s.admin_id WHERE s.id=$1 AND s.expires_at>now() AND u.username=$2', [auth.sid, auth.username])).rows[0];
+  if (!stored || stored.password_fingerprint !== passwordFingerprint(stored.password_hash)) return response.status(401).json({ error: '管理员登录已失效' });
   request.admin = auth; next();
 };
-const session = (license, deviceId) => ({ authorized: true, serverTime: new Date().toISOString(), expiresAt: license.expires_at, token: sign({ account: license.alibaba_account, licenseId: license.id, deviceId, exp: Math.min(new Date(license.expires_at).getTime(), Date.now() + 10 * 60 * 1000) }) });
+const session = (license, deviceId) => ({ authorized: true, serverTime: new Date().toISOString(), expiresAt: license.expires_at, token: sign(clientClaims(license, deviceId)) });
 async function transaction(work) {
   const client = await pool.connect();
   try { await client.query('BEGIN'); const result = await work(client); await client.query('COMMIT'); return result; }
@@ -49,7 +45,7 @@ async function transaction(work) {
 }
 const event = (client, licenseId, action, actor, metadata = {}) => client.query('INSERT INTO license_events (id,license_id,action,actor,metadata) VALUES ($1,$2,$3,$4,$5)', [id(), licenseId, action, actor, JSON.stringify(metadata)]);
 
-app.get('/health', (_request, response) => response.json({ ok: true, service: 'kua-yipu-auth', version: '1.4.4' }));
+app.get('/health', (_request, response) => response.json({ ok: true, service: 'kua-yipu-auth', version: '1.4.6' }));
 app.get('/', (_request, response) => response.sendFile(path.join(__dirname, 'admin.html')));
 for (const file of ['admin.js', 'admin.css']) app.get(`/${file}`, (_request, response) => response.sendFile(path.join(__dirname, file)));
 app.post('/api/admin/login', async (request, response) => {
@@ -57,9 +53,19 @@ app.post('/api/admin/login', async (request, response) => {
   if (username.length > 200 || typeof request.body?.password !== 'string' || request.body.password.length > 1024) throw fail('管理员账号或密码格式不正确');
   const result = await pool.query('SELECT * FROM admin_users WHERE username=$1', [username]);
   const [, salt, expected] = String(result.rows[0]?.password_hash || '').split('$');
-  const valid = salt && /^[a-f0-9]{128}$/i.test(expected || '') && crypto.timingSafeEqual(crypto.scryptSync(String(request.body?.password || ''), salt, 64), Buffer.from(expected, 'hex'));
+  const computed = await scrypt(request.body.password, salt || 'invalid-admin-account', 64);
+  const valid = salt && /^[a-f0-9]{128}$/i.test(expected || '') && crypto.timingSafeEqual(computed, Buffer.from(expected, 'hex'));
   if (!valid) throw fail('管理员账号或密码错误', 401);
-  response.json({ token: sign({ admin: true, username, exp: Date.now() + 8 * 60 * 60 * 1000 }), username });
+  const sid = id(); const exp = Date.now() + 8 * 60 * 60 * 1000;
+  await transaction(async (client) => {
+    await client.query('DELETE FROM admin_sessions WHERE expires_at<=now()');
+    await client.query('INSERT INTO admin_sessions (id,admin_id,password_fingerprint,expires_at) VALUES ($1,$2,$3,$4)', [sid, result.rows[0].id, passwordFingerprint(result.rows[0].password_hash), new Date(exp)]);
+  });
+  response.json({ token: sign({ aud: 'admin', admin: true, username, sid, exp }), username });
+});
+app.post('/api/admin/logout', requireAdmin, async (request, response) => {
+  await pool.query('DELETE FROM admin_sessions WHERE id=$1', [request.admin.sid]);
+  response.json({ ok: true });
 });
 
 app.post('/api/client/login', async (request, response) => {
@@ -68,6 +74,8 @@ app.post('/api/client/login', async (request, response) => {
   const result = await transaction(async (client) => {
     const license = (await client.query('SELECT * FROM licenses WHERE alibaba_account=$1 AND deleted_at IS NULL FOR UPDATE', [account])).rows[0];
     if (!license || licenseState(license) !== 'active') throw fail('该 Alibaba 账号没有有效的软件授权', 403);
+    requireCredentialTransport(request, license);
+    if (!validActivation(license, request.body?.activationCode)) throw fail('软件授权码无效，请使用新版客户端并填写管理员提供的授权码', 403);
     if (!license.allow_multi_device) await client.query('UPDATE licenses SET active_device_id=$2 WHERE id=$1', [license.id, deviceId]);
     await client.query(`INSERT INTO client_logins (id,alibaba_account,device_id,device_name,app_version,ip_address,last_seen_at) VALUES ($1,$2,$3,$4,$5,$6,now()) ON CONFLICT (alibaba_account,device_id) DO UPDATE SET device_name=EXCLUDED.device_name,app_version=EXCLUDED.app_version,ip_address=EXCLUDED.ip_address,last_seen_at=now()`, [id(), account, deviceId, normalize(request.body?.deviceName).slice(0, 200), normalize(request.body?.appVersion).slice(0, 50), request.ip]);
     await event(client, license.id, 'client-login', account, { deviceId });
@@ -82,6 +90,8 @@ app.post('/api/client/heartbeat', async (request, response) => {
   const result = await transaction(async (client) => {
     const license = (await client.query('SELECT * FROM licenses WHERE id=$1 AND alibaba_account=$2 FOR UPDATE', [auth.licenseId, auth.account])).rows[0];
     if (!license || licenseState(license) !== 'active') throw fail('软件授权已停用或过期', 403);
+    requireCredentialTransport(request, license);
+    if (!clientSessionAllowed(license, auth)) throw fail('软件授权凭证已更新，请重新登录', 403);
     if (!clientAllowed(license, auth.deviceId)) throw fail('此账号已设为单设备登录，当前会话已被另一台设备替换', 403);
     if (!license.allow_multi_device && !license.active_device_id) await client.query('UPDATE licenses SET active_device_id=$2 WHERE id=$1', [license.id, auth.deviceId]);
     await client.query('UPDATE client_logins SET last_seen_at=now() WHERE alibaba_account=$1 AND device_id=$2', [auth.account, auth.deviceId]);
@@ -102,7 +112,7 @@ app.get('/api/admin/licenses', requireAdmin, async (request, response) => {
   const values = [filters.statuses, filters.search, filters.devices, filters.activity];
   const total = (await pool.query(`SELECT COUNT(*)::int count ${from} ${where}`, values)).rows[0].count;
   const result = await pool.query(`SELECT l.*, ${stateSql} AS display_status, COALESCE(c.device_count,0)::int AS device_count, c.last_seen_at ${from} ${where} ORDER BY l.created_at DESC,l.id LIMIT $5 OFFSET $6`, [...values, pageSize, offset]);
-  response.json({ items: result.rows, total, page, pageSize });
+  response.json({ items: result.rows.map(publicLicense), total, page, pageSize });
 });
 app.get('/api/admin/licenses/:id/history', requireAdmin, async (request, response) => {
   const { pageSize, offset } = pagination(request.query);
@@ -116,20 +126,25 @@ app.post('/api/admin/licenses', requireAdmin, async (request, response) => {
     const existing = (await client.query('SELECT * FROM licenses WHERE alibaba_account=$1 AND deleted_at IS NULL FOR UPDATE', [account])).rows[0];
     const base = existing && licenseState(existing) === 'active' ? new Date(existing.expires_at).getTime() : Date.now();
     const expires = new Date(base + days * 86400000);
-    const result = await client.query(`INSERT INTO licenses (id,alibaba_account,status,starts_at,expires_at,note) VALUES ($1,$2,'active',now(),$3,$4) ON CONFLICT (alibaba_account) WHERE deleted_at IS NULL DO UPDATE SET status='active',expires_at=EXCLUDED.expires_at,note=EXCLUDED.note,updated_at=now() RETURNING *`, [existing?.id || id(), account, expires, normalize(request.body?.note).slice(0, 2000)]);
+    const credential = existing ? null : createActivationCredential();
+    const result = await client.query(`INSERT INTO licenses (id,alibaba_account,status,starts_at,expires_at,note,credential_required,credential_hash) VALUES ($1,$2,'active',now(),$3,$4,$5,$6) ON CONFLICT (alibaba_account) WHERE deleted_at IS NULL DO UPDATE SET status='active',expires_at=EXCLUDED.expires_at,note=EXCLUDED.note,updated_at=now() RETURNING *`, [existing?.id || id(), account, expires, normalize(request.body?.note).slice(0, 2000), !existing, credential?.credentialHash || null]);
     await event(client, result.rows[0].id, existing ? 'extend' : 'activate', request.admin.username, { days });
-    return result.rows[0];
+    return { ...publicLicense(result.rows[0]), ...(credential ? { activationCode: credential.activationCode } : {}) };
   }));
 });
 app.patch('/api/admin/licenses/:id', requireAdmin, async (request, response) => {
   const action = normalize(request.body?.action);
-  if (!['pause', 'resume', 'revoke', 'extend', 'reduce', 'devices'].includes(action)) throw fail('不支持的授权操作');
+  if (!['pause', 'resume', 'revoke', 'extend', 'reduce', 'devices', 'credential'].includes(action)) throw fail('不支持的授权操作');
   response.json(await transaction(async (client) => {
     const existing = (await client.query('SELECT * FROM licenses WHERE id=$1 FOR UPDATE', [request.params.id])).rows[0];
     if (!existing) throw fail('授权账号不存在', 404);
     if (existing.deleted_at) throw fail('账号已删除，不能修改原授权', 409);
-    const values = [existing.id]; let query;
-    if (action === 'devices') {
+    const values = [existing.id]; let query; let credential;
+    if (action === 'credential') {
+      credential = createActivationCredential();
+      values.push(credential.credentialHash);
+      query = 'UPDATE licenses SET credential_required=true,credential_hash=$2,credential_version=credential_version+1,updated_at=now() WHERE id=$1 RETURNING *';
+    } else if (action === 'devices') {
       if (typeof request.body.allowMultiDevice !== 'boolean') throw fail('多端登录开关无效');
       query = `UPDATE licenses SET allow_multi_device=$2,active_device_id=CASE WHEN $2 THEN NULL ELSE (SELECT device_id FROM client_logins WHERE alibaba_account=licenses.alibaba_account ORDER BY last_seen_at DESC,id LIMIT 1) END,updated_at=now() WHERE id=$1 RETURNING *`;
       values.push(request.body.allowMultiDevice);
@@ -141,12 +156,12 @@ app.patch('/api/admin/licenses/:id', requireAdmin, async (request, response) => 
       query = `UPDATE licenses SET expires_at=expires_at-($2*interval '1 day'),updated_at=now() WHERE id=$1 RETURNING *`;
     } else {
       if (action === 'resume' && new Date(existing.expires_at).getTime() <= Date.now()) throw fail('授权已到期，请先延长有效期', 409);
-      query = 'UPDATE licenses SET status=$2,updated_at=now() WHERE id=$1 RETURNING *';
+      query = "UPDATE licenses SET status=$2,credential_version=credential_version+CASE WHEN $2 IN ('paused','revoked') THEN 1 ELSE 0 END,updated_at=now() WHERE id=$1 RETURNING *";
       values.push({ pause: 'paused', resume: 'active', revoke: 'revoked' }[action]);
     }
     const updated = (await client.query(query, values)).rows[0];
     await event(client, existing.id, action, request.admin.username, { days: request.body.days || null, allowMultiDevice: updated.allow_multi_device, previousExpiresAt: existing.expires_at, expiresAt: updated.expires_at });
-    return updated;
+    return { ...publicLicense(updated), ...(credential ? { activationCode: credential.activationCode } : {}) };
   }));
 });
 app.delete('/api/admin/licenses/:id', requireAdmin, async (request, response) => {
