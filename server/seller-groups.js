@@ -1,6 +1,15 @@
 const selector = '#struct-productGroup .product-group-select';
 const popupSelector = '.posting-field-group:visible';
 
+async function closeTree(page) {
+  const control = page.locator(selector);
+  const input = control.locator('input');
+  await (await input.count() ? input : control).focus();
+  await page.keyboard.press('Escape');
+  if (await control.getAttribute('aria-expanded') === 'true') await control.click();
+  await page.locator(popupSelector).waitFor({ state: 'hidden', timeout: 5000 });
+}
+
 export function normalizeSellerGroup(value) {
   if (!value || !value.id) return null;
   const id = String(value.id);
@@ -11,7 +20,10 @@ export function normalizeSellerGroup(value) {
 async function openTree(page) {
   const control = page.locator(selector);
   await control.waitFor({ state: 'visible', timeout: 30000 });
-  if (await control.getAttribute('aria-expanded') !== 'true') await control.click();
+  if (await control.getAttribute('aria-expanded') !== 'true') {
+    await page.locator(popupSelector).waitFor({ state: 'hidden', timeout: 5000 });
+    await control.click();
+  }
   const popup = page.locator(popupSelector);
   await popup.waitFor({ state: 'visible', timeout: 15000 });
   await popup.locator('[role="tree"]').waitFor({ state: 'visible', timeout: 15000 });
@@ -38,7 +50,7 @@ export async function readSellerGroups(page) {
       }
       return { id: node.getAttribute('value'), name: path.at(-1), path: path.join(' > '), disabled: node.querySelector(':scope > [role="treeitem"]')?.getAttribute('aria-disabled') === 'true' };
     }).filter((item) => item.id && item.name && !item.disabled));
-  } finally { await page.keyboard.press('Escape'); }
+  } finally { await closeTree(page); }
 }
 
 export async function applySellerGroup(page, value) {
@@ -47,15 +59,19 @@ export async function applySellerGroup(page, value) {
   const popup = await openTree(page);
   const item = popup.locator(`li.next-tree-node[value="${group.id}"] > [role="treeitem"]`);
   if (await item.count() !== 1 || await item.getAttribute('aria-disabled') === 'true') {
-    await page.keyboard.press('Escape');
+    await closeTree(page);
     throw Object.assign(new Error(`国际站商品分组不存在或不可选：${group.path || group.id}，请重新读取分组`), { code: 'SELLER_GROUP_UNAVAILABLE' });
   }
   const name = await item.getAttribute('aria-label');
-  await item.locator('.next-tree-node-label').click();
-  await openTree(page);
-  const selected = page.locator(popupSelector).locator(`li.next-tree-node[value="${group.id}"] > [role="treeitem"]`);
-  const accepted = await selected.getAttribute('aria-selected') === 'true';
-  await page.keyboard.press('Escape');
+  // Publishing checks the group twice. Clicking an already selected tree item can toggle it off.
+  if (await item.getAttribute('aria-selected') !== 'true') {
+    await item.locator('.next-tree-node-label').click();
+    await popup.waitFor({ state: 'hidden', timeout: 2000 }).catch(() => {});
+    await openTree(page);
+  }
+  const selected = page.locator(popupSelector).locator(`li.next-tree-node[value="${group.id}"] > [role="treeitem"][aria-selected="true"]`);
+  const accepted = await selected.waitFor({ state: 'attached', timeout: 8000 }).then(() => true, () => false);
+  await closeTree(page);
   if (!accepted) throw Object.assign(new Error(`国际站未接受商品分组：${group.path || group.id}`), { code: 'SELLER_GROUP_UNAVAILABLE' });
   return { ...group, name: name || group.name };
 }

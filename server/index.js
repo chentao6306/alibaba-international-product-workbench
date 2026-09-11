@@ -962,7 +962,7 @@ async function runPublishJob(jobId) {
           store.patchJob(jobId, { status: 'paused', progress: index, total, message: `已立即暂停，当前商品未继续操作，已完成 ${index}/${total} 件` });
           return;
         }
-        if (requiresHuman || ['PUBLISH_ACCOUNT_LIMIT', 'SELLER_GROUP_UNAVAILABLE'].includes(error.code)) {
+        if (requiresHuman || error.code === 'PUBLISH_ACCOUNT_LIMIT') {
           store.patchJob(jobId, {
             status: 'paused', progress: index, total,
             message: `已暂停：${product.title} - ${message}。处理后可继续`

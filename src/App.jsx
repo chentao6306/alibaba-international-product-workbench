@@ -10,6 +10,8 @@ import StorageCleanup from './StorageCleanup.jsx';
 import MarketplaceProcessing, { ProcessSelectedProducts } from './MarketplaceProcessing.jsx';
 import { useAnnouncements, AnnouncementPopup, AnnouncementsView } from './Announcements.jsx';
 import CollectionFolders from './CollectionFolders.jsx';
+import CollectionTasks from './CollectionTasks.jsx';
+import OriginCountrySelect from './OriginCountrySelect.jsx';
 
 const EMPTY = { shops: [], groups: [], collectionFolders: [], products: [], jobs: [], settings: {}, browser: {}, collectorBrowser: {} };
 
@@ -259,7 +261,7 @@ function SourceView({ state, refresh, notify, onMenu, folderId }) {
     try {
       await api(`/api/jobs/${job.id}/${action}`, { method: 'POST' });
       await refresh();
-      notify(action === 'cancel' ? '采集任务已取消，已经保存的商品会保留' : '采集任务已继续');
+      notify(action === 'cancel' ? '采集任务已取消，已经保存的商品会保留' : action === 'pause' ? '已请求暂停采集' : '采集任务已继续');
     } catch (error) { notify(error.message, 'error'); }
   }
 
@@ -286,7 +288,7 @@ function SourceView({ state, refresh, notify, onMenu, folderId }) {
         <label><span>排序</span><select value={collectConfig.sort} onChange={(event) => setCollectConfig((v) => ({ ...v, sort: event.target.value }))}><option value="default">默认排序</option><option value="priceAsc">价格从低到高</option><option value="priceDesc">价格从高到低</option><option value="newest">最新商品</option></select></label>
       </div>
     </section>
-    {collectJobs.map((job) => <div className="job-banner" key={job.id}><LoaderCircle className={job.status === 'paused' ? '' : 'spin'} size={18} /><div><strong>{job.metadata?.groupName ? `${job.metadata.groupName}：` : ''}{job.message}</strong><div className="progress"><i style={{ width: job.total ? `${job.progress / job.total * 100}%` : '32%' }} /></div></div><div className="job-banner-actions">{['queued', 'running'].includes(job.status) && <button className="icon-button" onClick={() => api(`/api/jobs/${job.id}/pause`, { method: 'POST' }).then(refresh).catch((error) => notify(error.message, 'error'))} title="暂停采集"><Pause size={16} /></button>}{job.status === 'pause_requested' && <button className="icon-button" disabled title="正在暂停"><LoaderCircle className="spin" size={16} /></button>}{job.status === 'paused' && <><button className="icon-button" onClick={() => controlCollect(job, 'resume')} title="继续采集"><Play size={16} /></button><button className="icon-button danger" onClick={() => controlCollect(job, 'cancel')} title="取消任务并保留已采集商品"><X size={16} /></button></>}</div></div>)}
+    <CollectionTasks key={folderId} jobs={collectJobs} onControl={controlCollect} />
     <section className="panel shop-list">
       <div className="section-title"><div><h2>店铺与分组</h2><p>{state.groups.length ? '展开店铺后选择分组采集商品' : '读取店铺后，分组将显示在这里'}</p></div><div className="section-actions">{selectedGroups.length > 0 && <><button className="secondary-button" onClick={() => collectMany(state.groups.filter((group) => selectedGroups.includes(group.id)))}><RefreshCw size={15} />采集已选分组 {selectedGroups.length}</button><button className="secondary-button danger-button" onClick={deleteSelectedGroups}><Trash2 size={15} />删除分组 {selectedGroups.length}</button></>}{state.groups.length > 0 && <button className="secondary-button" onClick={() => collectMany(state.groups)}><RefreshCw size={15} />采集全部分组</button>}{selectedShops.length > 0 && <button className="secondary-button danger-button" onClick={deleteSelectedShops}><Trash2 size={15} />删除店铺 {selectedShops.length}</button>}</div></div>
       {!state.shops.length ? <EmptyState icon={Store} title="还没有同行店铺" text="输入店铺链接开始读取分组" /> : visibleShops.map((shop) => {
@@ -612,7 +614,7 @@ function BatchEditor({ products, references, onClose, onSaved, notify }) {
     <div className="batch-tabs">{tabs.map(([value]) => <button key={value} className={tab === value ? 'active' : ''} onClick={() => setTab(value)}>{tabLabels[value]?.[locale === 'en' ? 1 : 0] || value}</button>)}</div>
     <div className="batch-body">
       {tab === 'trade' && products.some((product) => product.currencySymbol !== '$') && <label className="batch-field"><span>换算汇率（1 原币 = 多少美元）</span><input type="number" min="0.000001" step="any" value={usdRate} onChange={(event) => setUsdRate(event.target.value)} />{usdRate && <small>仅换算尚未转为美元的商品</small>}</label>}
-      {tab === 'basic' && <>{field('标题前缀', 'titlePrefix')}{field('标题后缀', 'titleSuffix')}{field('统一副标题', 'subtitle')}{field('关键词（逗号或换行分隔）', 'keywords', 'text', true)}{field('产地', 'origin')}{field('品牌', 'brand')}{field('产品类型', 'productType')}</>}
+      {tab === 'basic' && <>{field('标题前缀', 'titlePrefix')}{field('标题后缀', 'titleSuffix')}{field('统一副标题', 'subtitle')}{field('关键词（逗号或换行分隔）', 'keywords', 'text', true)}<label className="batch-field"><span>产地（国家）</span><OriginCountrySelect value={form.origin} emptyLabel="保持原产地" onChange={(origin) => setForm((current) => ({ ...current, origin }))} /></label>{field('品牌', 'brand')}{field('产品类型', 'productType')}</>}
       {tab === 'category' && <><label className="batch-field"><span>选择新产品类目</span><CategorySelect path={form.category} includeId onChange={(option) => setForm((v) => ({ ...v, category: option.path, categoryId: option.id || '' }))} /></label><label className="batch-field"><span>类目 ID（由选择或发布页绑定生成）</span><input value={form.categoryId} readOnly placeholder="选择类目后自动填充" /></label><div className="batch-actions"><button type="button" className="secondary-button" disabled={!references.length} onClick={() => setReferenceOpen(true)}><ClipboardList size={16} />引用成功商品资料</button><small className="batch-help">选择成功商品，补全缺失的产地、包装和属性。</small></div></>}
       {tab === 'trade' && <><label className="batch-field"><span>定价模式</span><select value={form.priceMode || ''} onChange={update('priceMode')}><option value="">保持原模式</option><option value="fob-range">FOB区间价格</option><option value="fob-tier">FOB阶梯价格</option><option value="quantity-tier">数量阶梯价格</option><option value="sku">SKU定价</option></select></label>{field('价格调整比例（%）', 'pricePercent', 'number')}{field('统一加减金额', 'priceFixed', 'number')}{field('统一库存', 'stock', 'number')}{field('统一起订量', 'moq', 'number')}{field('统一交期（天）', 'deliveryDays', 'number')}<div className="form-grid">{field('FOB最低价', 'fobMinPrice', 'number')}{field('FOB最高价', 'fobMaxPrice', 'number')}</div>{field('SKU统一价格', 'skuPrice', 'number')}{field('SKU统一库存', 'skuStock', 'number')}<div className="batch-actions"><button type="button" className="secondary-button" onClick={exportSku}>导出 SKU Excel</button><label className="file-button secondary-button">导入 SKU Excel<input type="file" accept=".xlsx,.xls,.csv,.txt" onChange={importSku} /></label></div></>}
       {tab === 'logistics' && <>{field('毛重（kg）', 'weight', 'number')}{field('包装长（cm）', 'length', 'number')}{field('包装宽（cm）', 'width', 'number')}{field('包装高（cm）', 'height', 'number')}</>}
@@ -766,7 +768,7 @@ function ProductEditor({ product, onClose, onSaved, notify }) {
       </div>
       <div className={`editor-tab-pane ${tab === 'logistics' ? '' : 'hidden'}`} data-editor-tab="logistics">
       <h3 className="edit-section-title">产品与包装</h3>
-      <div className="form-grid"><label><span>产品类型</span><input value={form.productType} onChange={update('productType')} /></label><label><span>品牌</span><input value={form.brand} onChange={update('brand')} /></label><label><span>型号</span><input value={form.model} onChange={update('model')} /></label><label><span>产地</span><input value={form.origin} onChange={update('origin')} /></label></div>
+      <div className="form-grid"><label><span>产品类型</span><input value={form.productType} onChange={update('productType')} /></label><label><span>品牌</span><input value={form.brand} onChange={update('brand')} /></label><label><span>型号</span><input value={form.model} onChange={update('model')} /></label><label><span>产地（国家）</span><OriginCountrySelect value={form.origin} onChange={(origin) => setForm((current) => ({ ...current, origin }))} /></label></div>
       <div className="form-grid packaging-grid">{[['length', '包装长 (cm)'], ['width', '包装宽 (cm)'], ['height', '包装高 (cm)'], ['weight', '包装重量 (kg)']].map(([key, label]) => <label key={key}><span>{label}</span><input type="number" min="0" step="any" value={form.packaging[key] || ''} onChange={(event) => setForm((value) => ({ ...value, packaging: { ...value.packaging, [key]: event.target.value } }))} /></label>)}</div>
       <label><span>运费模板</span><input value={form.freightTemplate || ''} onChange={update('freightTemplate')} /></label>
       </div>

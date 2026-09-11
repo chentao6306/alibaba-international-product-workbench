@@ -12,6 +12,7 @@ import { sourcePlatform, crossPlatformPublishErrors } from './source-platform.js
 import { submitWithRepairs } from './publish-recovery.js';
 import { readSellerGroups, applySellerGroup } from './seller-groups.js';
 import { ImageDownloadQueue } from './image-download-queue.js';
+import { originCountry, isOriginRegionAttribute } from './origin-country.js';
 
 const WORKBENCH_URL = 'https://i.alibaba.com/';
 const SOURCE_DESCRIPTION_SELECTOR = '[data-module-name="module_description"], [data-testid="module-description"], [data-module-name="module_structure_description"], [data-testid="module-details-structure-description"]';
@@ -916,6 +917,8 @@ function attributeValue(product, ...names) {
 export function inferRequiredAttributeValue(product = {}, ...names) {
   const normalize = (value) => String(value || '').toLowerCase().replace(/[\s_\-/]+/g, ' ').trim();
   const wanted = new Set(names.map(normalize));
+  if (names.some(isOriginRegionAttribute)) return '';
+  if (wanted.has('产地') || wanted.has('origin') || wanted.has('place of origin')) return originCountry(product.origin || attributeValue(product, ...names));
   const value = attributeValue(product, ...names);
   if (value) return value;
   const text = [product.title, product.subtitle, product.description, product.descriptionHtml]
@@ -941,7 +944,6 @@ export function inferRequiredAttributeValue(product = {}, ...names) {
     return product.productType || product.type || product.categoryPath?.at(-1) || product.sourceCategoryPath?.at(-1) || '';
   }
   if (wanted.has('品牌名称') || wanted.has('brand') || wanted.has('brand name')) return product.brand || product.brandName || '';
-  if (wanted.has('产地') || wanted.has('origin') || wanted.has('place of origin')) return product.origin || 'China';
   return '';
 }
 
@@ -1584,6 +1586,42 @@ export function attributeOptionMatchScore(source, option) {
   }
   if (/^others?$/.test(wanted) && /^(?:others?|其他)$/.test(offered)) return 90;
   return offered.includes(wanted) || wanted.includes(offered) ? 50 : 0;
+}
+
+export async function fillOriginCountry(page, value) {
+  const country = originCountry(value);
+  if (!country) return false;
+  const field = await fieldByAnyLabel(page, ['产地', 'Place of Origin']);
+  if (!field) return false;
+  if (await field.evaluate((node) => node.tagName === 'SELECT')) {
+    const options = await field.locator('option').evaluateAll((nodes) => nodes.map((node) => ({ value: node.value, label: node.textContent })));
+    const match = options.find((option) => originCountry(option.label) === country);
+    return match ? field.selectOption(match.value).then(() => true) : false;
+  }
+  await field.click({ timeout: 4000 });
+  const menu = page.locator('.sell-o-select-options:visible').last();
+  if (!await menu.waitFor({ state: 'visible', timeout: 4000 }).then(() => true, () => false)) {
+    await page.keyboard.press('Escape');
+    return false;
+  }
+  try {
+    const options = menu.locator('.options-item');
+    const search = menu.locator('.options-search input');
+    if (await search.isVisible()) await search.fill(country);
+    const deadline = Date.now() + 5000;
+    do {
+      const labels = await options.allTextContents();
+      const index = labels.findIndex((label) => originCountry(label) === country);
+      if (index >= 0) {
+        await options.nth(index).click({ timeout: 4000 });
+        // The autocomplete input can contain uncommitted text; also wait for its menu to close.
+        await menu.waitFor({ state: 'hidden', timeout: 4000 });
+        return originCountry(await field.inputValue()) === country;
+      }
+      await page.waitForTimeout(100);
+    } while (Date.now() < deadline);
+    return false;
+  } finally { await page.keyboard.press('Escape'); }
 }
 
 export async function fillChoice(page, locator, value) {
@@ -2652,6 +2690,7 @@ export async function recoverRequiredAttributes(page, product, labels, onProgres
   const recovered = [];
   for (const rawLabel of labels) {
     const aliases = requiredLabelAliases(rawLabel);
+    if (aliases.some(isOriginRegionAttribute)) continue;
     if (!aliases.length) continue;
     const field = await fieldByAnyLabel(page, aliases);
     if (!field) continue;
@@ -2659,6 +2698,10 @@ export async function recoverRequiredAttributes(page, product, labels, onProgres
     const wanted = new Set(aliases.map(normalized));
     let value = items.find((item) => wanted.has(normalized(item.name)))?.value || '';
     if (!value) value = inferRequiredAttributeValue(product, ...aliases);
+    if (aliases.some((label) => /^(产地|origin|place of origin)$/i.test(label))) {
+      if (await fillOriginCountry(page, product.origin || value)) recovered.push(aliases[0]);
+      continue;
+    }
 
     let filled = false;
     for (const candidate of [value].filter(Boolean)) {
@@ -4291,9 +4334,8 @@ export class SellerPublisher {
     }
     markSourceAttributes(['产品类型', 'product type'], productTypeFilled);
 
-    const sourceOrigin = product.origin || attributeValue(product, '产地', 'Place of Origin') || 'China';
-    const originValue = /(?:^|,\s*)china$/i.test(String(sourceOrigin).trim()) ? 'China' : sourceOrigin;
-    const originFilled = await fillChoice(page, await fieldByAnyLabel(page, ['产地', 'Place of Origin']), originValue);
+    const sourceOrigin = product.origin || attributeValue(product, '产地', 'Place of Origin');
+    const originFilled = await fillOriginCountry(page, sourceOrigin);
     markSourceAttributes(['产地', 'place of origin'], originFilled);
 
     onProgress('填写型号和品牌');
@@ -4331,7 +4373,7 @@ export class SellerPublisher {
 
     const reserved = /^(?:型号|model(?: number)?|品牌名称|brand(?: name)?|功能\/特性|功能|特性|features?|function|端口|接口|port|材料|材质|material|颜色|colou?r|产地|place of origin|产品类型|product type|销售单位|selling units?|单个包装尺寸|single package size|单个产品毛重|single gross weight)$/i;
     for (const [index, item] of attributeItems.entries()) {
-      if (reserved.test(String(item.name).trim())) continue;
+      if (reserved.test(String(item.name).trim()) || isOriginRegionAttribute(item.name)) continue;
       onProgress(`填写类目属性 ${index + 1}/${attributeItems.length}：${String(item.name).trim()}`);
       const aliases = SOURCE_ATTRIBUTE_LABEL_ALIASES.get(normalizedName(item.name)) || [];
       const labels = [String(item.name).trim(), englishAttributeName(item.name, index), ...aliases, ...requiredLabelAliases(item.name)];
