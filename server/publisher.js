@@ -652,7 +652,7 @@ async function waitForActionResult(page, action, mode, originalUrl) {
   };
   page.on('response', onResponse);
   try {
-    await dismissPostingOverlays(page);
+    await requireClearPostingOverlays(page);
     const requiredAttributes = await captureCategoryAttributes(page);
     await action.click();
     const deadline = Date.now() + 15000;
@@ -892,13 +892,19 @@ function attributeValue(product, ...names) {
       battery: 'battery capacity', 'battery capacity': 'battery capacity', 电池: 'battery capacity', 电池容量: 'battery capacity',
       cellular: 'cellular network', 'cellular network': 'cellular network', 蜂窝网络: 'cellular network',
       'processor brand': 'processor brand', 处理器品牌: 'processor brand',
-      'compatible model': 'compatible model', 适用型号: 'compatible model'
+      'compatible model': 'compatible model', 适用型号: 'compatible model',
+      type: 'type', 'product type': 'type', 类型: 'type', 产品类型: 'type'
     })[value] || value;
   };
   const wanted = new Set(names.map(canonical));
   const direct = [...(product.attributes || []), ...(product.customAttributes || [])]
     .find((item) => wanted.has(canonical(item.name)) && item.value != null && String(item.value).trim());
   if (direct) return direct.value;
+  const group = (product.variantGroups || []).find((item) => wanted.has(canonical(item.name))
+    && Array.isArray(item.options) && item.options.length);
+  // Older collectors set productType to the category leaf. A concrete sale
+  // specification must take precedence over that generic classification.
+  if (wanted.has('type') && group?.options?.length) return group.options[0];
   const topLevel = [
     ['screen size', product.screenSize || product.screen],
     ['battery capacity', product.batteryCapacity || product.battery],
@@ -906,8 +912,6 @@ function attributeValue(product, ...names) {
     ['compatible model', product.compatibleModel], ['type', product.type || product.productType]
   ].find(([name, value]) => wanted.has(canonical(name)) && value != null && String(value).trim());
   if (topLevel) return topLevel[1];
-  const group = (product.variantGroups || []).find((item) => wanted.has(canonical(item.name))
-    && Array.isArray(item.options) && item.options.length);
   return group?.options?.[0] || '';
 }
 
@@ -1119,16 +1123,22 @@ async function fieldByLabel(page, label) {
       .toLowerCase();
     const wanted = clean(labelText);
     const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
+    const requiredSpecRow = (node) => {
+      const row = node.closest('#struct-specification [id^="p-"]');
+      return row && [...row.querySelectorAll('label.required, .label.required')].some((heading) => clean(heading.textContent) === wanted) ? row : null;
+    };
+    const allowed = (node) => !node.closest('#saleAttributesItems, [class*="customizedServices"]')
+      && (!node.closest('#struct-specification') || requiredSpecRow(node));
     const labels = [...document.querySelectorAll('label,div,span,h3,h4')]
-      .filter((node) => clean(node.textContent) === wanted
-        && !node.closest('#struct-specification, #saleAttributesItems, [class*="customizedServices"]'));
+      .filter((node) => visible(node) && clean(node.textContent) === wanted && allowed(node));
     for (const labelNode of labels) {
       let container = labelNode;
+      const boundary = labelNode.closest('.sell-catProp-item, .next-form-item, [id^="p-"], [id^="struct-"]');
       for (let level = 0; container && level < 7; level += 1, container = container.parentElement) {
         const input = [...container.querySelectorAll('input:not([type="hidden"]),textarea,select,[contenteditable="true"]')]
-          .find((node) => visible(node) && !node.closest('#struct-specification, #saleAttributesItems, [class*="customizedServices"]'));
-        if (!input) continue;
-        const stableRow = input.closest('.sell-catProp-item[id]');
+          .find((node) => visible(node) && allowed(node));
+        if (!input) { if (container === boundary) break; continue; }
+        const stableRow = requiredSpecRow(input) || input.closest('.sell-catProp-item[id]');
         if (stableRow) {
           const controls = [...stableRow.querySelectorAll('input:not([type="hidden"]),textarea,select,[contenteditable="true"]')];
           return { rowId: stableRow.id, index: controls.indexOf(input) };
@@ -1632,12 +1642,35 @@ export async function fillChoice(page, locator, value) {
   if (!kind) return false;
   if (kind.tag === 'SELECT') return locator.selectOption({ label: expected }, { timeout: 4000 }).then(() => true).catch(() => false);
   if (['checkbox', 'radio'].includes(kind.type)) {
-    const row = locator.locator('xpath=ancestor::*[starts-with(@id,"p-")][1]');
-    const label = row.locator('label').filter({ hasText: new RegExp(`^${expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }).first();
+    const row = locator.locator('xpath=ancestor::*[starts-with(@id,"p-") or contains(concat(" ", normalize-space(@class), " "), " sell-catProp-item ")][1]');
+    const labels = row.locator('label').filter({ has: page.locator('input[type="checkbox"], input[type="radio"]') });
+    const findOption = async () => {
+      const texts = await labels.allTextContents();
+      const index = texts.findIndex((text) => attributeOptionMatchScore(expected, text) >= 90);
+      return index < 0 ? null : labels.nth(index);
+    };
+    let label = await findOption();
+    if (!label) {
+      // Required sale attributes such as Type expose a real Add control.
+      // Commit a source value there, never invent a different product type.
+      const add = row.locator('.sell-sequential-combocheckbox button.add-button:visible').last();
+      if (!await add.isVisible().catch(() => false) || await add.isDisabled()) return false;
+      await add.click({ timeout: 4000 });
+      const custom = row.locator('.sell-sequential-combobox-custom-wrap input:visible').last();
+      if (!await custom.waitFor({ state: 'visible', timeout: 2000 }).then(() => true, () => false)) return false;
+      await custom.fill(expected);
+      await custom.press('Tab');
+      const deadline = Date.now() + 2000;
+      do { label = await findOption(); if (label) break; await page.waitForTimeout(100); } while (Date.now() < deadline);
+    }
+    if (!label || !await label.isVisible().catch(() => false)) return false;
     const input = label.locator('input').first();
-    if (!await label.isVisible().catch(() => false)) return false;
-    if (!await input.isChecked().catch(() => false)) await label.click({ timeout: 4000 }).catch(() => {});
-    return input.isChecked().catch(() => false);
+    if (!await input.isChecked().catch(() => false)) await label.click({ timeout: 4000 });
+    return input.waitFor({ state: 'attached', timeout: 2000 }).then(async () => {
+      const deadline = Date.now() + 2000;
+      do { if (await input.isChecked().catch(() => false)) return true; await page.waitForTimeout(100); } while (Date.now() < deadline);
+      return false;
+    }, () => false);
   }
   const chooseVisibleOption = async (candidate) => {
     const menu = page.locator('.sell-o-select-options:visible').last();
@@ -2673,7 +2706,7 @@ function requiredLabelAliases(label) {
 
 export function requiredLabelsFromError(message) {
   const labels = [];
-  for (const match of String(message || '').matchAll(/(?:^|[；;，,\s])\s*([^；;，,：:\s]{1,48}?)(?:必填项)?不能为空/gi)) {
+  for (const match of String(message || '').matchAll(/(?:^|[；;，,：:\s])\s*([^；;，,：:\s]{1,48}?)(?:必填项)?不能为空/gi)) {
     const label = cleanRequiredLabel(match[1]);
     if (label && !/^(?:属性值|商品图片项?|图片|image)$/i.test(label)) labels.push(label);
   }
@@ -2745,6 +2778,19 @@ export async function setImageUploadFiles(input, files, options = {}) {
       }
     }
   }
+}
+
+export async function emptyRequiredSpecificationLabels(page) {
+  return page.locator('#struct-specification [id^="p-"]').evaluateAll((rows) => rows.flatMap((row) => {
+    if (!row.getClientRects().length) return [];
+    const heading = row.querySelector('label.required, .label.required');
+    if (!heading) return [];
+    const controls = [...row.querySelectorAll('input:not([type="hidden"]):not([type="file"]), select, textarea')];
+    const hasValue = controls.some((input) => ['checkbox', 'radio'].includes(input.type)
+      ? input.checked : Boolean(input.value?.trim()))
+      || [...row.querySelectorAll('.next-select-values em, .next-tag-body')].some((node) => node.textContent?.trim());
+    return hasValue ? [] : [String(heading.textContent || '').replace(/^[*＊]\s*/, '').trim()];
+  })).catch(() => []);
 }
 
 async function specControlIsChecked(control) {
@@ -2861,13 +2907,17 @@ async function specValueUploadContainer(row, value) {
   return null;
 }
 
-async function specImageIsUploaded(item) {
+export async function specImageIsUploaded(item) {
   return item.locator([
     '.value-preview.uploaded img[src]',
     '.value-preview.uploaded [style*="background-image"]',
     '.custom-upload-image.uploaded img[src]',
     '.custom-upload-image [data-role="preview"] img[src]'
-  ].join(', ')).count().then((count) => count > 0).catch(() => false);
+  ].join(', ')).evaluateAll((nodes) => nodes.some((node) => {
+    if (node.closest('.value-preview.uploading, .value-preview.loading, .value-preview.error, .custom-upload-image.uploading, .custom-upload-image.loading, .custom-upload-image.error')) return false;
+    const source = node.getAttribute('src') || String(node.style.backgroundImage || '').match(/url\(["']?(.+?)["']?\)/i)?.[1] || '';
+    return /^(?:https?:)?\/\//i.test(source) && !/loading|placeholder/i.test(source);
+  })).catch(() => false);
 }
 
 async function uploadSpecFile(page, item, file) {
@@ -2935,13 +2985,15 @@ export async function enableImageBackedVariantSpecs(page, product, groups, downl
     for (const [index, rawValue] of sourceOptions.entries()) {
       onProgress(`复核${group.name || '商品'}规格图片 ${index + 1}/${sourceOptions.length}`);
       const value = englishSpecText(rawValue);
-      const imageUrl = group.optionImages?.[rawValue] || group.optionImages?.[value];
-      if (!value || !imageUrl) continue;
-      const files = await downloadImages([imageUrl], `spec-${group.id}-${index}`, 1);
-      if (!files.length) return false;
+      if (!value) return false;
       row = await visibleSaleSpecRow(page, group.id) || row;
       const item = await specValueUploadContainer(row, value);
       if (!item) return false;
+      if (await specImageIsUploaded(item)) continue;
+      const imageUrl = group.optionImages?.[rawValue] || group.optionImages?.[value];
+      if (!imageUrl) return false;
+      const files = await downloadImages([imageUrl], `spec-${group.id}-${index}`, 1);
+      if (!files.length) return false;
       // Portal menus and filechooser events belong to the page, not the SKU.
       // Finish one upload before another option can change the active target.
       if (!await uploadSpecFile(page, item, files[0])) return false;
@@ -2951,7 +3003,9 @@ export async function enableImageBackedVariantSpecs(page, product, groups, downl
   return true;
 }
 
-async function dismissPostingOverlays(page) {
+const POSTING_BLOCKERS = '.next-overlay-backdrop:visible, .next-dialog:visible, [role="dialog"]:visible, .mce-window:visible, #mce-modal-block:visible';
+
+export async function dismissPostingOverlays(page) {
   const harmlessActions = [
     /^(?:我知道了|知道了|关闭|取消|稍后再说|暂不|以后再说|Got it|Close|Cancel)$/i,
     /^(?:继续返回旧版|确认返回旧版)$/i
@@ -2965,33 +3019,39 @@ async function dismissPostingOverlays(page) {
       for (const pattern of harmlessActions) {
         const action = overlay.getByRole('button', { name: pattern }).last();
         if (!await action.isVisible().catch(() => false)) continue;
-        await action.click({ force: true }).catch(() => action.evaluate((node) => node.click()).catch(() => {}));
-        acted = true;
-        break;
+        acted = await action.click({ timeout: 1500 }).then(() => true).catch(() => false);
+        if (acted) break;
       }
       if (acted) break;
       const close = overlay.locator('.next-dialog-close, .next-overlay-close, .mce-close, [aria-label="关闭"], [aria-label="close" i]').last();
       if (await close.isVisible().catch(() => false)) {
-        await close.click({ force: true }).catch(() => close.evaluate((node) => node.click()).catch(() => {}));
-        acted = true;
-        break;
+        acted = await close.click({ timeout: 1500 }).then(() => true).catch(() => false);
+        if (acted) break;
       }
     }
     if (!acted) {
       await page.keyboard.press('Escape').catch(() => {});
       await page.waitForTimeout(200);
-      const blockingBackdrop = page.locator('.next-overlay-wrapper.opened .next-overlay-backdrop:visible');
-      if (!await blockingBackdrop.count().catch(() => 0)) return true;
+      const blockingBackdrop = page.locator('.next-overlay-backdrop:visible');
+      if (!await page.locator(POSTING_BLOCKERS).count().catch(() => 0)) return true;
       // Some versions render a warning as a backdrop-only overlay. A normal
       // Escape is ignored in that state, but clicking the backdrop is the
       // same user action as dismissing the warning and releases the form.
-      await blockingBackdrop.last().click({ position: { x: 4, y: 4 }, force: true }).catch(() =>
-        blockingBackdrop.last().evaluate((node) => node.click()).catch(() => {}));
+      if (await blockingBackdrop.count().catch(() => 0)) {
+        await blockingBackdrop.last().click({ position: { x: 4, y: 4 }, timeout: 1500 }).catch(() => {});
+      }
       await page.waitForTimeout(300);
     }
     await page.waitForTimeout(300);
   }
-  return !await page.locator('.next-overlay-wrapper.opened .next-overlay-backdrop:visible').count().catch(() => 0);
+  return !await page.locator(POSTING_BLOCKERS).count().catch(() => 0);
+}
+
+async function requireClearPostingOverlays(page) {
+  if (await dismissPostingOverlays(page)) return;
+  const error = new Error('国际站页面仍有弹窗遮罩，请关闭提示后重试');
+  error.code = 'PUBLISH_OVERLAY_BLOCKED';
+  throw error;
 }
 
 async function enterPostingForm(page, publishPageUrl, expectedCategoryId = '') {
@@ -3053,7 +3113,7 @@ async function enterPostingForm(page, publishPageUrl, expectedCategoryId = '') {
 }
 
 async function switchToLegacyDetails(page) {
-  await dismissPostingOverlays(page);
+  await requireClearPostingOverlays(page);
   const oldMode = page.getByRole('button', { name: '返回老版', exact: true }).first();
   if (await oldMode.isVisible().catch(() => false)) {
     await oldMode.click({ force: true, timeout: 5000 })
@@ -3064,7 +3124,7 @@ async function switchToLegacyDetails(page) {
       await confirm.click({ force: true, timeout: 5000 })
         .catch(() => confirm.evaluate((node) => node.click()));
     }
-    await dismissPostingOverlays(page);
+    await requireClearPostingOverlays(page);
   }
   const normalEditor = page.getByText('普通编辑', { exact: true }).last();
   if (await normalEditor.isVisible().catch(() => false)) {
@@ -4104,15 +4164,8 @@ export class SellerPublisher {
       if (!assignedDirectly) {
         await trigger.hover().catch(() => {});
         await page.waitForTimeout(250);
-        // Current Alibaba forms create one hidden, page-level multiple input
-        // only after the main-image slot is hovered. It lives in a portal and
-        // therefore is not a descendant of the slot. Prefer that real batch
-        // input before trying to click a localized popover label.
-        const portalImageInputs = page.locator('input[type="file"][accept*="image" i][multiple]');
-        if (index === 0 && await portalImageInputs.count().catch(() => 0)) {
-          await assignFiles(portalImageInputs.last(), images);
-          return finishBatchUpload();
-        }
+        // A page-wide file input may belong to SKU images or the editor.
+        // Bind portal uploads to the chooser opened by this main-image slot.
         let localUpload = await findLocalUpload(trigger, 900);
         if (!localUpload) {
           await trigger.click({ force: true }).catch(() => {});
@@ -4135,15 +4188,11 @@ export class SellerPublisher {
           }
           await chooser.setFiles([image], { timeout: 30000 });
         } else {
-          const uploadHost = localUpload.locator('xpath=ancestor-or-self::*[.//input[@type="file"]][1]');
+          const uploadHost = localUpload.locator('xpath=ancestor-or-self::*[@role="menu" or contains(@class,"popup") or contains(@class,"overlay")][1]');
           let scopedInput = uploadHost.locator('input[type="file"][accept*="image" i], input[type="file"]').last();
           if (!await scopedInput.count().catch(() => 0)) {
             slotInput = slot.locator('input[type="file"][accept*="image" i], input[type="file"]');
             if (await slotInput.count().catch(() => 0)) scopedInput = slotInput.last();
-          }
-          if (!await scopedInput.count().catch(() => 0)) {
-            const activePopupInputs = page.locator('[role="menu"] input[type="file"], [class*="popup"] input[type="file"], [class*="overlay"] input[type="file"]');
-            if (await activePopupInputs.count().catch(() => 0)) scopedInput = activePopupInputs.last();
           }
           if (!await scopedInput.count().catch(() => 0)) {
             throw new Error(`国际站主图第 ${index + 1} 个槽位未打开文件选择窗口${clicked ? '' : '（本地上传按钮点击失败）'}`);
@@ -4332,7 +4381,7 @@ export class SellerPublisher {
         break;
       }
     }
-    markSourceAttributes(['产品类型', 'product type'], productTypeFilled);
+    markSourceAttributes(['产品类型', 'product type', '类型', 'type'], productTypeFilled);
 
     const sourceOrigin = product.origin || attributeValue(product, '产地', 'Place of Origin');
     const originFilled = await fillOriginCountry(page, sourceOrigin);
@@ -4373,7 +4422,7 @@ export class SellerPublisher {
 
     const reserved = /^(?:型号|model(?: number)?|品牌名称|brand(?: name)?|功能\/特性|功能|特性|features?|function|端口|接口|port|材料|材质|material|颜色|colou?r|产地|place of origin|产品类型|product type|销售单位|selling units?|单个包装尺寸|single package size|单个产品毛重|single gross weight)$/i;
     for (const [index, item] of attributeItems.entries()) {
-      if (reserved.test(String(item.name).trim()) || isOriginRegionAttribute(item.name)) continue;
+      if (reserved.test(String(item.name).trim()) || /^(类型|type)$/i.test(String(item.name).trim()) || isOriginRegionAttribute(item.name)) continue;
       onProgress(`填写类目属性 ${index + 1}/${attributeItems.length}：${String(item.name).trim()}`);
       const aliases = SOURCE_ATTRIBUTE_LABEL_ALIASES.get(normalizedName(item.name)) || [];
       const labels = [String(item.name).trim(), englishAttributeName(item.name, index), ...aliases, ...requiredLabelAliases(item.name)];
@@ -5368,6 +5417,16 @@ export class SellerPublisher {
     // attribute without any value. Alibaba reports only "属性值不能为空" for
     // that state, so remove those empty optional selections before submit.
     await clearEmptySaleAttributeSelections(page);
+    const emptyRequiredSpecs = await emptyRequiredSpecificationLabels(page);
+    if (emptyRequiredSpecs.length) {
+      await recoverRequiredAttributes(page, product, emptyRequiredSpecs, reportStage);
+      const remaining = await emptyRequiredSpecificationLabels(page);
+      if (remaining.length && mode === 'submit') {
+        const error = new Error(`国际站必填规格未填写：${remaining.join('、')}`);
+        error.requiredFields = remaining;
+        throw error;
+      }
+    }
     if (mode === 'submit') {
       const earlyFeedback = (await visibleFeedback(page)).join(' ');
       if (isRequiredAttributeError(earlyFeedback)) {
@@ -5429,13 +5488,13 @@ export class SellerPublisher {
         mainImages: '重新上传并确认商品主图',
       }[field]}`),
       repairs: {
-        overlay: async () => true,
+        overlay: () => dismissPostingOverlays(page),
         specifications: async () => {
           const result = await fillVariantSpecs(page, product);
           const blocked = result.blockingUnmapped?.[0] || findBlockingUnmappedVariant(product, result.unmapped);
           if (blocked) throw new Error(`国际站规格修复失败：来源规格“${blocked}”未保留`);
           const download = (urls, prefix, limit) => this.downloadImageSet(product, urls, prefix, limit);
-          await enableImageBackedVariantSpecs(page, product, result.groups, download, reportStage);
+          const specImagesRepaired = await enableImageBackedVariantSpecs(page, product, result.groups, download, reportStage);
           const colorGroup = (product.variantGroups || []).find((group) => /颜色|colou?r/i.test(group.name));
           const colorId = await colorSaleAttributeId(page);
           let colorRepaired = false;
@@ -5445,7 +5504,7 @@ export class SellerPublisher {
               colorRepaired = await enableSpecImageUpload(page, product, colorGroup, download, reportStage);
             }
           }
-          return result.groups.length > 0 || colorRepaired;
+          return specImagesRepaired && (result.groups.length > 0 || colorRepaired);
         },
         attributes: async (error) => {
           const emptyLabels = [...new Set([

@@ -16,7 +16,7 @@ import {
 } from './publisher.js';
 import { applyPublishedProductReference, copyMissingProductData, createPublishSnapshot, findAndReplaceProduct, recordProductMutation, syncProductModel } from './product-model.js';
 import { buildAlibabaPublishUrl, createPublishPlan, normalizeCategoryId, productCategory, publishBindings, rememberPublishBinding, resolvePublishRoute } from './category-routing.js';
-import { findPublishedReferenceRepair } from './publish-reference.js';
+import { createPublishedReferenceTemplate, findPublishedReferenceRepair } from './publish-reference.js';
 import { userFacingError } from './browser-error.js';
 import { runWithProgressTimeout } from './progress-timeout.js';
 import { collectionUrls, convertProductPrices, crossPlatformPublishErrors, parseCollectionUrl, sourcePlatform } from './source-platform.js';
@@ -1148,7 +1148,7 @@ app.post('/api/products/reference', (request, response, next) => {
         ['published', 'submitted', 'success'].includes(String(entry.result?.status || entry.status || '').toLowerCase())
         && entry.data && typeof entry.data === 'object'
       );
-      const referenceTemplate = successfulSnapshot ? { ...reference, ...successfulSnapshot.data } : reference;
+      const referenceTemplate = createPublishedReferenceTemplate(reference, successfulSnapshot);
       const active = findWorkspaceJobs(state, { productIds: [...ids] }, ['queued', 'running', 'pause_requested']);
       if (active.length) throw Object.assign(new Error('所选商品正在处理，请暂停任务后再引用资料'), { status: 409 });
       const changed = [];

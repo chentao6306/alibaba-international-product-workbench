@@ -49,12 +49,16 @@ test('does not reuse the target itself, empty values, or unknown categories', ()
 
 test('extracts concrete missing fields and rejects quota failures as success', () => {
   assert.deepEqual(requiredLabelsFromError('屏幕尺寸必填项不能为空；电池容量必填项不能为空'), ['屏幕尺寸', '电池容量']);
+  assert.deepEqual(requiredLabelsFromError('提交后未检测到国际站成功反馈：类型必填项不能为空;商品图片项必填项不能为空'), ['类型']);
   assert.deepEqual(requiredLabelsFromError('Battery capacity cannot be empty; Screen size is required'), ['Battery capacity', 'Screen size']);
   assert.equal(classifyAlibabaActionResult({ mode: 'submit', feedback: ['审核中'], bodyText: '您发布的产品总量已超出限制。' }).succeeded, false);
 });
 
 test('does not infer a propeller diameter as a screen size from supplier boilerplate', () => {
   assert.equal(inferRequiredAttributeValue({ title: '17 Inch Drone Propeller', description: 'We also sell smartphones' }, '屏幕'), '');
+  assert.equal(inferRequiredAttributeValue({ productType: 'Drones Accessories', variantGroups: [
+    { name: 'type', options: ['Propeller Blades'] },
+  ] }, '类型', 'product type'), 'Propeller Blades');
 });
 
 test('extracts only the invalid field from a section containing other valid fields', { skip: !findChromium() }, async () => {

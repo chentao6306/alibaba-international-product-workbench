@@ -79,17 +79,23 @@ export function createRequiredFieldRepair(target, reference, fields = []) {
   return { patch, fields: repaired };
 }
 
+export function createPublishedReferenceTemplate(candidate, snapshot) {
+  const reference = snapshot ? { ...candidate, ...snapshot.data,
+    ...(snapshot.categoryId ? { categoryId: snapshot.categoryId, targetCategoryId: snapshot.categoryId } : {}) } : { ...candidate };
+  const requiredAttributes = (snapshot?.result || candidate.publishResult)?.requiredAttributes || [];
+  const repair = createRequiredFieldRepair(reference, { requiredAttributes }, requiredAttributes.map((item) => item.name));
+  return { ...reference, ...repair?.patch, requiredAttributes };
+}
+
 export function findPublishedReferenceRepair(target, products, fields, attemptedIds = []) {
   const targetCategory = productCategory(target);
   if (!targetCategory.id && !targetCategory.pathKey) return null;
   for (const candidate of products) {
     if (candidate.id === target.id || attemptedIds.includes(candidate.id)) continue;
     const snapshots = (candidate.publishHistory || []).filter((entry) => successful(entry.result) && entry.data)
-      .map((entry) => ({ ...candidate, ...entry.data,
-        ...(entry.categoryId ? { categoryId: entry.categoryId, targetCategoryId: entry.categoryId } : {}),
-        requiredAttributes: entry.result.requiredAttributes || [] }));
+      .map((entry) => createPublishedReferenceTemplate(candidate, entry));
     if (successful(candidate.publishResult) || candidate.status === 'published') {
-      if (!snapshots.length) snapshots.push({ ...candidate, requiredAttributes: candidate.publishResult?.requiredAttributes || [] });
+      if (!snapshots.length) snapshots.push(createPublishedReferenceTemplate(candidate));
     }
     for (const reference of snapshots) {
       const category = productCategory(reference);
