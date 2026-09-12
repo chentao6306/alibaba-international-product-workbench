@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { chromium } from 'playwright-core';
 import { findChromium } from '../server/browser-runtime.js';
-import { SellerPublisher, dismissPostingOverlays, emptyRequiredSpecificationLabels, enableImageBackedVariantSpecs, recoverRequiredAttributes, specImageIsUploaded, visibleFeedback, fillModelNumber, fillColorSpec, alibabaKeywordText } from '../server/publisher.js';
+import { SellerPublisher, dismissPostingOverlays, emptyRequiredSpecificationLabels, enableImageBackedVariantSpecs, recoverRequiredAttributes, specImageIsUploaded, visibleFeedback, fillModelNumber, fillColorSpec, ensureColorSpecificationReady, alibabaKeywordText } from '../server/publisher.js';
 import { createPublishedReferenceTemplate } from '../server/publish-reference.js';
 import { applyPublishedProductReference } from '../server/product-model.js';
 
@@ -28,6 +28,24 @@ test('rechecking committed colors does not dispatch keys or rewrite their values
       <script>window.events = 0; for (const type of ['keydown', 'input', 'change']) document.addEventListener(type, () => window.events++);</script>`);
     assert.equal(await fillColorSpec(page, ['Black', 'Blue']), true);
     assert.equal(await page.evaluate(() => window.events), 0);
+  } finally { await browser.close(); }
+});
+
+test('waits for a delayed color editor and never puts color values into the model editor', { skip: !findChromium() }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    page.setDefaultTimeout(1000);
+    await page.setContent(`<div id="saleAttributesItems"><label>颜色<input type="checkbox" value="191288010"></label></div>
+      <div id="struct-specification"><div id="p-3"><label>型号</label><div class="posting-feild-color-item"><input role="colorCombobox" value="UBEC"></div></div>
+      <div id="p-191288010" style="display:none"><label>颜色</label><div class="posting-feild-color-item"><input role="colorCombobox"></div></div></div>
+      <script>document.querySelector('input[type=checkbox]').onchange = () => setTimeout(() => document.getElementById('p-191288010').style.display = '', 1200);</script>`);
+    assert.ok(await ensureColorSpecificationReady(page, 3000));
+    assert.equal(await fillColorSpec(page, ['Yellow']), true);
+    assert.equal(await page.locator('#p-191288010 input').inputValue(), 'Yellow');
+    assert.equal(await page.locator('#p-3 input').inputValue(), 'UBEC');
+    await page.locator('#p-191288010').evaluate((node) => { node.style.display = 'none'; });
+    assert.equal(await ensureColorSpecificationReady(page, 300), null);
   } finally { await browser.close(); }
 });
 
@@ -190,6 +208,7 @@ test('main-image portal chooser never assigns files to an unrelated multiple upl
   const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
   try {
     const page = await browser.newPage();
+    await page.route('https://example.test/**', (route) => route.abort());
     page.setDefaultTimeout(1000);
     await page.setContent(`
       <div class="image-uploader">${Array.from({ length: 6 }, () => '<div class="image-upload-list-item"><span id="image-placeholder-span">添加主图</span></div>').join('')}</div>
@@ -212,6 +231,22 @@ test('main-image portal chooser never assigns files to an unrelated multiple upl
     assert.equal(await publisher.uploadMainImages(page, { mainImages: files }), 4);
     assert.equal(await page.evaluate(() => window.wrongUploads), 0);
     assert.equal(await page.locator('.image-uploader img').count(), 4);
+    // The real main-image portal can expose the file input before its label.
+    // An unrelated SKU uploader must still remain untouched.
+    await page.setContent(`
+      <div class="image-uploader">${Array.from({ length: 6 }, () => '<div class="image-upload-list-item"><span id="image-placeholder-span">上传图片</span></div>').join('')}</div>
+      <div class="sc-images-upload-dropdown" hidden><input id="main" type="file" accept="image/*" multiple hidden><span>从图片银行选取</span></div>
+      <input id="unrelated" type="file" accept="image/*" multiple hidden>
+      <script>
+        window.wrongUploads = 0;
+        document.querySelector('#unrelated').onchange = () => window.wrongUploads++;
+        document.querySelectorAll('#image-placeholder-span').forEach(node => node.onmouseenter = () => { document.querySelector('.sc-images-upload-dropdown').hidden = false; });
+        document.querySelector('#main').onchange = function () {
+          [...this.files].forEach((file, i) => { document.querySelector('.image-upload-list-item:has(#image-placeholder-span)').innerHTML = '<img width="80" height="80" src="https://example.test/' + i + '.png">'; });
+        };
+      </script>`);
+    assert.equal(await publisher.uploadMainImages(page, { mainImages: files }), 4);
+    assert.equal(await page.evaluate(() => window.wrongUploads), 0);
   } finally {
     await browser.close();
     fs.rmSync(directory, { recursive: true, force: true });

@@ -1818,6 +1818,8 @@ export async function fillModelNumber(page, value) {
 export async function fillColorSpec(page, values) {
   const colors = [...new Set((values || []).map((value) => englishSpecText(value)).filter(Boolean))];
   if (!colors.length) return false;
+  const colorRow = await visibleColorSpecRow(page);
+  if (!colorRow) return false;
   // Do not fall back to generic "please enter or select" inputs here. The
   // publish form contains hidden autocomplete templates and unrelated
   // attribute inputs with the same placeholder; treating those as color
@@ -1883,13 +1885,13 @@ export async function fillColorSpec(page, values) {
     }
     return false;
   };
-  const colorInput = await firstVisible(page, [colorInputSelector]);
-  if (!colorInput) return false;
+  const colorInput = colorRow.locator(colorInputSelector).filter({ visible: true }).first();
+  if (!await colorInput.count()) return false;
   const existingColors = await selectedColors();
-  const editing = await page.locator(colorInputSelector).evaluateAll((nodes) => nodes.some((node) => node === document.activeElement));
+  const editing = await colorRow.locator(colorInputSelector).evaluateAll((nodes) => nodes.some((node) => node === document.activeElement));
   if (!editing && colors.every((color) => existingColors.some((item) => item.toLowerCase() === color.toLowerCase()))) return true;
   for (const color of colors) {
-    const inputs = page.locator(colorInputSelector);
+    const inputs = colorRow.locator(colorInputSelector);
     let input = null;
     let emptyInput = null;
     for (let inputIndex = 0; inputIndex < await inputs.count().catch(() => 0); inputIndex += 1) {
@@ -1901,7 +1903,7 @@ export async function fillColorSpec(page, values) {
     }
     input ||= emptyInput;
     if (!input && await clickAddColor()) {
-      const refreshedInputs = page.locator(colorInputSelector);
+      const refreshedInputs = colorRow.locator(colorInputSelector);
       for (let inputIndex = 0; inputIndex < await refreshedInputs.count().catch(() => 0); inputIndex += 1) {
         const candidate = refreshedInputs.nth(inputIndex);
         if (!await candidate.isVisible().catch(() => false)) continue;
@@ -2424,6 +2426,7 @@ async function visibleColorSpecRow(page) {
     for (const input of inputs) {
       let node = input;
       for (let depth = 0; node && depth < 7; depth += 1, node = node.parentElement) {
+        if (/^p-/.test(node.id) && node.id !== 'p-191288010') break;
         const text = String(node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
         if (!/颜色|colou?r/i.test(text) || /customizedServices|CustomizedServices/i.test(String(node.className || ''))) continue;
         node.setAttribute('data-codex-color-row', value);
@@ -2433,6 +2436,20 @@ async function visibleColorSpecRow(page) {
     return false;
   }, marker).catch(() => false);
   if (found) return page.locator(`[data-codex-color-row="${marker}"]`).first();
+  return null;
+}
+
+export async function ensureColorSpecificationReady(page, timeout = 10000) {
+  const colorId = await colorSaleAttributeId(page);
+  if (!await ensureSaleAttributeSelected(page, colorId)) return null;
+  // Updating selected IDs precedes rendering the dependent editor. A slow
+  // customer machine must not fail between these two React updates.
+  const deadline = Date.now() + timeout;
+  do {
+    const row = await visibleColorSpecRow(page);
+    if (row && await saleAttributeIsSelected(page, colorId)) return row;
+    await page.waitForTimeout(150);
+  } while (Date.now() < deadline);
   return null;
 }
 
@@ -2875,7 +2892,7 @@ export async function enableSpecImageUpload(page, product, colorGroup, downloadI
     imageUrl: colorGroup.optionImages?.[rawValue] || colorGroup.optionImages?.[englishSpecText(rawValue)],
   })).filter((option) => option.value);
   if (!options.some((option) => option.imageUrl)) return false;
-  if (!await ensureSaleAttributeSelected(page, colorId)) return false;
+  if (!await ensureColorSpecificationReady(page)) return false;
   if (!await fillColorSpec(page, options.map((option) => option.value))) return false;
 
   const deadline = Date.now() + 10000;
@@ -4049,7 +4066,12 @@ export class SellerPublisher {
           .find((candidate) => {
             try { return fs.statSync(candidate).size > 1024; } catch { return false; }
           });
-        if (cached) return cached;
+        if (cached) {
+          try {
+            const metadata = await sharp(cached, { limitInputPixels: 40000000 }).metadata();
+            if (['jpeg', 'png'].includes(metadata.format) && fs.statSync(cached).size <= 5 * 1024 * 1024) return cached;
+          } catch { /* Re-download incomplete files left by an interrupted run. */ }
+        }
         let contentType = '';
         let buffer;
         if (/^data:image\//i.test(url)) {
@@ -4088,15 +4110,19 @@ export class SellerPublisher {
           }
           if (!buffer) throw lastError || new Error('图片下载失败');
         }
-        if (!/^image\//i.test(contentType)) return '';
-        let extension = /png/i.test(contentType) ? 'png' : 'jpg';
-        if (!buffer.length || buffer.length > 5 * 1024 * 1024) return '';
-        if (!/^image\/(?:jpeg|jpg|png)/i.test(contentType)) {
-          buffer = await sharp(buffer, { animated: false }).jpeg({ quality: 92 }).toBuffer();
+        if (!buffer.length || buffer.length > 25 * 1024 * 1024) throw new Error('图片为空或超过 25 MB 下载限制');
+        // CDN responses can be octet-stream; inspect the actual image instead
+        // of silently discarding valid bytes based only on a response header.
+        const metadata = await sharp(buffer, { animated: false, limitInputPixels: 40000000 }).metadata();
+        let extension = metadata.format === 'png' ? 'png' : 'jpg';
+        if (!['jpeg', 'png'].includes(metadata.format) || buffer.length > 5 * 1024 * 1024) {
+          let pipeline = sharp(buffer, { animated: false, limitInputPixels: 40000000 }).rotate();
+          if (buffer.length > 5 * 1024 * 1024) pipeline = pipeline.resize({ width: 2560, height: 2560, fit: 'inside', withoutEnlargement: true });
+          buffer = await pipeline.jpeg({ quality: 90 }).toBuffer();
           extension = 'jpg';
         }
+        if (buffer.length > 5 * 1024 * 1024) throw new Error('图片转换后仍超过 5 MB 上传限制');
         if (prefix === 'detail') {
-          const metadata = await sharp(buffer).metadata();
           if ((metadata.width || 0) > 960 || (metadata.height || 0) > 960 || buffer.length > 3 * 1024 * 1024) {
             buffer = await sharp(buffer)
               .resize({ width: 960, height: 960, fit: 'inside', withoutEnlargement: true })
@@ -4125,6 +4151,9 @@ export class SellerPublisher {
     }));
     if (String(prefix).startsWith('spec-') && selectedUrls.length && paths.some((file) => !file)) {
       throw Object.assign(new Error(`来源规格图片下载失败：${failures[0] || '图片为空、格式不支持或超过大小限制'}。当前商品未提交，可稍后重试`), { code: 'SPEC_IMAGE_DOWNLOAD_FAILED' });
+    }
+    if (prefix === 'main' && selectedUrls.length >= 4 && paths.filter(Boolean).length < 4) {
+      throw Object.assign(new Error(`主图下载失败：${selectedUrls.length} 张来源主图仅下载成功 ${paths.filter(Boolean).length} 张；${failures[0] || '来源图片无法读取'}。当前商品未提交，可稍后重试`), { code: 'MAIN_IMAGE_DOWNLOAD_FAILED' });
     }
     return paths.filter(Boolean);
   }
@@ -4172,10 +4201,23 @@ export class SellerPublisher {
     // image bank and the active slot menu) in the same document. Resolve the
     // menu item closest to the slot that was just opened instead of using a
     // page-wide text locator, which could click an unrelated overlay.
-    const findLocalUpload = async (trigger, timeout = 5000) => {
+    const findUploadTarget = async (trigger, timeout = 5000) => {
       const deadline = Date.now() + timeout;
       while (Date.now() < deadline) {
         const triggerBox = await trigger.boundingBox().catch(() => null);
+        // The dedicated image portal can mount its file input before its
+        // button label. Keep it scoped to the portal beside the active slot.
+        const portals = page.locator('.sc-images-upload-dropdown:visible');
+        const inputs = [];
+        for (let index = 0; triggerBox && index < await portals.count(); index++) {
+          const portal = portals.nth(index);
+          const box = await portal.boundingBox().catch(() => null);
+          if (!box || Math.abs(box.x - triggerBox.x) > 600 || Math.abs(box.y - triggerBox.y) > 600) continue;
+          const input = portal.locator('input[type="file"][accept*="image" i]').first();
+          if (await input.count()) inputs.push({ input, distance: Math.hypot(box.x - triggerBox.x, box.y - triggerBox.y) });
+        }
+        inputs.sort((left, right) => left.distance - right.distance);
+        if (inputs.length) return { input: inputs[0].input };
         const candidates = page.getByText('本地上传', { exact: true });
         const scored = [];
         for (let candidateIndex = 0; candidateIndex < await candidates.count().catch(() => 0); candidateIndex += 1) {
@@ -4197,7 +4239,7 @@ export class SellerPublisher {
           scored.push({ candidate, score: distance + popupBias });
         }
         scored.sort((left, right) => left.score - right.score);
-        if (scored[0]) return scored[0].candidate;
+        if (scored[0]) return { button: scored[0].candidate };
         await page.waitForTimeout(250);
       }
       return null;
@@ -4216,46 +4258,55 @@ export class SellerPublisher {
         assignedDirectly = true;
       }
       if (!assignedDirectly) {
-        await trigger.hover().catch(() => {});
+        await trigger.hover({ timeout: 3000 }).catch(() => {});
         await page.waitForTimeout(250);
         // A page-wide file input may belong to SKU images or the editor.
         // Bind portal uploads to the chooser opened by this main-image slot.
-        let localUpload = await findLocalUpload(trigger, 900);
-        if (!localUpload) {
-          await trigger.click({ force: true }).catch(() => {});
-          localUpload = await findLocalUpload(trigger, 5000);
+        let target = await findUploadTarget(trigger, 900);
+        if (!target) {
+          await trigger.click({ timeout: 3000 }).catch(() => {});
+          target = await findUploadTarget(trigger, 5000);
         }
-        if (!localUpload) {
+        if (!target) {
           const menuText = compactText((await page.locator('[class*="menu"], [class*="popup"], [class*="overlay"]').evaluateAll((nodes) => nodes
             .filter((node) => Boolean(node.offsetWidth || node.offsetHeight || node.getClientRects().length))
             .map((node) => String(node.innerText || '').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(-4).join(' ')).catch(() => '')), 500);
           throw new Error(`国际站主图第 ${index + 1} 个槽位未出现“本地上传”${menuText ? `，当前弹层：${menuText}` : ''}`);
         }
 
-        const chooserPromise = page.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null);
-        const clicked = await localUpload.click({ force: true }).then(() => true).catch(() => false);
-        const chooser = await chooserPromise;
-        if (chooser) {
-          if (index === 0 && chooser.isMultiple()) {
-            await chooser.setFiles(images, { timeout: 30000 });
+        if (target.input) {
+          if (index === 0 && await target.input.getAttribute('multiple') !== null) {
+            await assignFiles(target.input, images);
             return finishBatchUpload();
           }
-          await chooser.setFiles([image], { timeout: 30000 });
+          await assignFiles(target.input, [image]);
         } else {
-          const uploadHost = localUpload.locator('xpath=ancestor-or-self::*[@role="menu" or contains(@class,"popup") or contains(@class,"overlay")][1]');
-          let scopedInput = uploadHost.locator('input[type="file"][accept*="image" i], input[type="file"]').last();
-          if (!await scopedInput.count().catch(() => 0)) {
-            slotInput = slot.locator('input[type="file"][accept*="image" i], input[type="file"]');
-            if (await slotInput.count().catch(() => 0)) scopedInput = slotInput.last();
+          const localUpload = target.button;
+          const chooserPromise = page.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null);
+          const clicked = await localUpload.click({ force: true }).then(() => true).catch(() => false);
+          const chooser = await chooserPromise;
+          if (chooser) {
+            if (index === 0 && chooser.isMultiple()) {
+              await chooser.setFiles(images, { timeout: 30000 });
+              return finishBatchUpload();
+            }
+            await chooser.setFiles([image], { timeout: 30000 });
+          } else {
+            const uploadHost = localUpload.locator('xpath=ancestor-or-self::*[@role="menu" or contains(@class,"popup") or contains(@class,"overlay")][1]');
+            let scopedInput = uploadHost.locator('input[type="file"][accept*="image" i], input[type="file"]').last();
+            if (!await scopedInput.count().catch(() => 0)) {
+              slotInput = slot.locator('input[type="file"][accept*="image" i], input[type="file"]');
+              if (await slotInput.count().catch(() => 0)) scopedInput = slotInput.last();
+            }
+            if (!await scopedInput.count().catch(() => 0)) {
+              throw new Error(`国际站主图第 ${index + 1} 个槽位未打开文件选择窗口${clicked ? '' : '（本地上传按钮点击失败）'}`);
+            }
+            if (index === 0 && await scopedInput.getAttribute('multiple') !== null) {
+              await assignFiles(scopedInput, images);
+              return finishBatchUpload();
+            }
+            await assignFiles(scopedInput, [image]);
           }
-          if (!await scopedInput.count().catch(() => 0)) {
-            throw new Error(`国际站主图第 ${index + 1} 个槽位未打开文件选择窗口${clicked ? '' : '（本地上传按钮点击失败）'}`);
-          }
-          if (index === 0 && await scopedInput.getAttribute('multiple') !== null) {
-            await assignFiles(scopedInput, images);
-            return finishBatchUpload();
-          }
-          await assignFiles(scopedInput, [image]);
         }
       }
 
@@ -4521,10 +4572,7 @@ export class SellerPublisher {
       colorGroup?.options?.some((value) => colorGroup.optionImages?.[value])
     );
     const colorIsRequired = colorValues.length > 0;
-    if (useColorSaleSpec && !await ensureSaleAttributeSelected(page, colorId)) {
-      if (colorIsRequired) throw new Error('国际站商品规格区的颜色规格未能启用');
-    }
-    const colorSpecRow = useColorSaleSpec ? await visibleColorSpecRow(page) : null;
+    const colorSpecRow = useColorSaleSpec ? await ensureColorSpecificationReady(page) : null;
     if (useColorSaleSpec && !colorSpecRow && colorIsRequired) {
       throw new Error('国际站商品规格区的颜色规格未能启用');
     }
@@ -4554,7 +4602,7 @@ export class SellerPublisher {
       '.posting-feild-color-item input[placeholder*="请输入"]',
       '.posting-feild-color-item-container input[placeholder*="请输入"]'
     ].join(', ');
-    const colorControl = useColorSaleSpec ? await firstVisible(page, [colorControlSelector]) : null;
+    const colorControl = colorSpecRow?.locator(colorControlSelector).filter({ visible: true }).first();
     // Color is optional at the source level and not every Alibaba category
     // exposes it as a target specification. Only require a successful value
     // when the selected target category actually renders a visible control.
@@ -5391,7 +5439,7 @@ export class SellerPublisher {
     ));
     const finalColorRequired = finalColorValues.length > 0;
     if (finalUsesColorSaleSpec && finalHasColorImage && finalColorRequired) {
-      if (!await ensureSaleAttributeSelected(page, finalColorId)) {
+      if (!await ensureColorSpecificationReady(page)) {
         throw new Error('国际站颜色规格提交前复核失败：颜色规格未能启用');
       }
       const colorFilled = await fillColorSpec(page, finalColorValues);

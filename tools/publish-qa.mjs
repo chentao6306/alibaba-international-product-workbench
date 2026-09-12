@@ -16,6 +16,21 @@ fs.mkdirSync(outputDir, { recursive: true });
 const state = JSON.parse(fs.readFileSync(path.join(workspaceDir, 'workspace.json'), 'utf8'));
 const publisher = new SellerPublisher(outputDir);
 const report = { action, query, outputDir, stages: [] };
+const cpuSlowdown = Number(process.env.QA_CPU_SLOWDOWN || 1);
+if (cpuSlowdown > 1) {
+  const currentSellerPage = publisher.currentSellerPage.bind(publisher);
+  const configured = new WeakSet();
+  publisher.currentSellerPage = async (...args) => {
+    const page = await currentSellerPage(...args);
+    if (!configured.has(page)) {
+      const session = await page.context().newCDPSession(page);
+      await session.send('Emulation.setCPUThrottlingRate', { rate: Math.min(cpuSlowdown, 8) });
+      configured.add(page);
+    }
+    return page;
+  };
+  report.cpuSlowdown = Math.min(cpuSlowdown, 8);
+}
 const progress = (stage) => {
   report.stages.push({ stage, at: new Date().toISOString(), url: publisher.page?.url() });
   console.log(stage);
