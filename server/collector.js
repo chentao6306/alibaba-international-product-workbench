@@ -404,7 +404,6 @@ export class ShopCollector {
         [product] = await this.enrichProducts([base], options);
         if (!product) throw new Error('来源商品详情为空');
         if (options.prepareProduct) product = await options.prepareProduct(product);
-        if (options.shouldStop?.()) throw Object.assign(new Error('已暂停采集'), { code: 'COLLECT_PAUSED' });
         products.push(product);
       } catch (failure) {
         if (failure.code === 'COLLECT_PAUSED' || options.shouldStop?.()) throw failure;
@@ -413,6 +412,7 @@ export class ShopCollector {
       if (onProgress({ stage: 'detail', current: index + 1, total: links.length, product, error, key, url: link.url }) === false) {
         throw Object.assign(new Error('已暂停采集'), { code: 'COLLECT_PAUSED' });
       }
+      if (options.shouldStop?.()) throw Object.assign(new Error('已暂停采集'), { code: 'COLLECT_PAUSED' });
       if (index + 1 < links.length && Number(options.delaySeconds) > 0) await new Promise((resolve) => setTimeout(resolve, Number(options.delaySeconds) * 1000));
     }
     return products;

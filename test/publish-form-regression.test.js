@@ -5,9 +5,82 @@ import path from 'node:path';
 import test from 'node:test';
 import { chromium } from 'playwright-core';
 import { findChromium } from '../server/browser-runtime.js';
-import { SellerPublisher, dismissPostingOverlays, emptyRequiredSpecificationLabels, enableImageBackedVariantSpecs, recoverRequiredAttributes, specImageIsUploaded } from '../server/publisher.js';
+import { SellerPublisher, dismissPostingOverlays, emptyRequiredSpecificationLabels, enableImageBackedVariantSpecs, recoverRequiredAttributes, specImageIsUploaded, visibleFeedback, fillModelNumber, fillColorSpec, alibabaKeywordText } from '../server/publisher.js';
 import { createPublishedReferenceTemplate } from '../server/publish-reference.js';
 import { applyPublishedProductReference } from '../server/product-model.js';
+
+test('formats forbidden keyword colons without changing source titles or attribute values', () => {
+  const product = { title: 'Cross-Border 1:1 Android Phone', keywords: ['1:1 Phone', 'Color: Black'], attributes: [{ name: 'Band', value: '3G: WCDMA850/2100MHz' }] };
+  const original = structuredClone(product);
+  assert.equal(alibabaKeywordText(product), '1 to 1 Phone\nColor Black');
+  assert.equal(alibabaKeywordText({ ...product, keywords: [] }), 'Cross-Border 1 to 1 Android Phone');
+  assert.ok(alibabaKeywordText({ keywords: ['Android Smartphone '.repeat(40)] }).length <= 384);
+  assert.deepEqual(product, original);
+});
+
+test('rechecking committed colors does not dispatch keys or rewrite their values', { skip: !findChromium() }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<div id="struct-specification"><div id="p-191288010"><label>颜色</label>
+      <div class="posting-feild-color-item"><input role="colorCombobox" value="Black"></div>
+      <div class="posting-feild-color-item"><input role="colorCombobox" value="Blue"></div></div></div>
+      <script>window.events = 0; for (const type of ['keydown', 'input', 'change']) document.addEventListener(type, () => window.events++);</script>`);
+    assert.equal(await fillColorSpec(page, ['Black', 'Blue']), true);
+    assert.equal(await page.evaluate(() => window.events), 0);
+  } finally { await browser.close(); }
+});
+
+test('adds the missing model input after the specification control removes its empty row', { skip: !findChromium() }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<input id="unrelated" value="Keep"><div id="struct-p-3"><div class="label">型号</div>
+      <div class="posting-field-multi-text"><button class="add-button" onclick="this.before(document.createElement('input'))">添加</button></div></div>
+      <script>document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && event.target.closest('#struct-p-3 input')) event.target.remove(); });</script>`);
+    assert.equal(await fillModelNumber(page, 'S25 Ultra'), true);
+    assert.equal(await page.locator('#struct-p-3 input').inputValue(), 'S25 Ultra');
+    assert.equal(await fillModelNumber(page, 'S25 Ultra'), true);
+    assert.equal(await page.locator('#struct-p-3 input').count(), 1);
+    assert.equal(await page.locator('#unrelated').inputValue(), 'Keep');
+    await page.locator('#struct-p-3 input').evaluate((node) => { node.value = ''; node.onfocus = () => node.remove(); });
+    await page.locator('#unrelated').focus();
+    assert.equal(await fillModelNumber(page, 'S25 Ultra'), true);
+    assert.equal(await page.locator('#struct-p-3 input').inputValue(), 'S25 Ultra');
+  } finally { await browser.close(); }
+});
+
+test('refills attributes once after Alibaba reloads an automatically saved draft without submitting twice', async () => {
+  const publisher = new SellerPublisher(os.tmpdir());
+  let url = 'https://post.alibaba.com/product/publish.htm?catId=123';
+  let fills = 0;
+  const page = { url: () => url, isClosed: () => false, waitForLoadState: async () => {}, locator: () => ({ first: () => ({ waitFor: async () => {} }) }) };
+  publisher.fillStableProductFields = async () => {
+    fills++;
+    if (fills === 1) { url = 'https://post.alibaba.com/product/publish.htm?itemId=1&pubAction=draft'; throw new Error('Execution context was destroyed'); }
+    return { mappedAttributes: ['Type'] };
+  };
+  assert.deepEqual(await publisher.fillProductFields(page, {}), { mappedAttributes: ['Type'] });
+  assert.equal(fills, 2);
+  publisher.fillStableProductFields = async () => { throw new Error('Invalid type'); };
+  await assert.rejects(publisher.fillProductFields(page, {}), /Invalid type/);
+});
+
+test('checks empty required category fields after rerender and reads visible feedback without duplicate messages', { skip: !findChromium() }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<div class="sell-catProp-item"><div class="label required">Battery</div><input value=""></div>
+      <div class="sell-catProp-item"><div class="label required">Screen</div><input value=""><em class="next-tag-body">6 inches</em></div>
+      <div class="sell-catProp-item"><div class="label">Optional</div><input value=""></div>
+      <div role="alert" class="next-message error">Type is required</div><div class="error" style="display:none">Hidden</div>`);
+    assert.deepEqual(await emptyRequiredSpecificationLabels(page, true), ['Battery']);
+    assert.deepEqual(await emptyRequiredSpecificationLabels(page), []);
+    assert.deepEqual(await visibleFeedback(page), ['Type is required']);
+    await page.locator('.sell-catProp-item input').first().fill('6000 mAh');
+    assert.deepEqual(await emptyRequiredSpecificationLabels(page, true), []);
+  } finally { await browser.close(); }
+});
 
 test('references accepted category values while retaining target values and product media', () => {
   const source = { categoryId: '201346401', attributes: [{ name: 'Type', value: 'Old type' }], mainImages: ['reference.jpg'] };

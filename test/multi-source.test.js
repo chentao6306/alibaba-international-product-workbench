@@ -156,6 +156,23 @@ test('creates a titled international product when collection starts without a st
   await assert.rejects(collector.enrichProducts([{ sourceUrl: product.sourceUrl }]), /Login required/);
 });
 
+test('checkpoints the completed link before honoring a pause during detail collection', async () => {
+  const collector = new ShopCollector(os.tmpdir());
+  let stopped = false;
+  const visited = [];
+  collector.enrichProducts = async ([product]) => {
+    visited.push(product.sourceId);
+    stopped = true;
+    return [{ ...product, title: 'Completed product' }];
+  };
+  const links = ['1', '2'].map((sourceId) => ({ sourceId, platform: '1688', url: `https://detail.1688.com/offer/${sourceId}.html` }));
+  const saved = [];
+  await assert.rejects(collector.collectLinks(links, (event) => saved.push(event), { shouldStop: () => stopped }), { code: 'COLLECT_PAUSED' });
+  assert.deepEqual(visited, ['1']);
+  assert.equal(saved[0].product.title, 'Completed product');
+  assert.equal(saved[0].key, '1688:1');
+});
+
 test('POST publish planning accepts 606 product IDs and returns only compact product identities', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-plan-test-'));
   const original = { PORT: process.env.PORT, DATA_DIR: process.env.DATA_DIR };

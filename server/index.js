@@ -396,9 +396,13 @@ async function startCollectJob(jobId) {
   }
   const options = { ...(job.metadata?.options || {}), shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status)) };
   store.patchJob(jobId, { status: 'running', message: `开始采集“${group.name}”，已保存的商品会保留` });
+  const savedProducts = new Set();
   try {
     const products = await collector.collectGroup(group.url, (progress) => {
-      if (progress.product) saveCollectedProduct(group.id, progress.product, options);
+      if (progress.product) {
+        saveCollectedProduct(group.id, progress.product, options);
+        savedProducts.add(progress.product.sourceId || progress.product.sourceUrl);
+      }
       const currentStatus = store.read((state) => state.jobs.find((item) => item.id === jobId)?.status);
       const preservedStatus = ['pause_requested', 'paused', 'cancelled'].includes(currentStatus) ? currentStatus : 'running';
       store.patchJob(jobId, {
@@ -412,7 +416,9 @@ async function startCollectJob(jobId) {
       });
       return !options.shouldStop();
     }, options);
-    for (const raw of products) saveCollectedProduct(group.id, raw, options);
+    for (const raw of products) {
+      if (!savedProducts.has(raw.sourceId || raw.sourceUrl)) saveCollectedProduct(group.id, raw, options);
+    }
     if (store.read().jobs.find((item) => item.id === jobId)?.status === 'cancelled') return;
     const count = store.read().products.filter(inJobFolder).length;
     const warningCount = products.filter((item) => item?.collectWarning).length;

@@ -458,7 +458,7 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--orange); }
   .connection-panel, .launch-panel { padding: 16px; }.connection-top { align-items: flex-start; flex-wrap: wrap; }.connection-dot { margin-left: 56px; }.connection-actions { flex-direction: column; }.connection-actions button { width: 100%; }
   .bound-url { grid-template-columns: 50px minmax(0, 1fr) 20px; }
   .mode-picker { flex-direction: column; }
-  .history-row { grid-template-columns: 30px minmax(0, 1fr) 45px 32px; padding: 10px 16px; }.history-row > span { grid-column: 2 / 5; }.history-row > b { grid-column: 3; grid-row: 1; }.history-action { grid-column: 4; grid-row: 1; }
+  .history-row { grid-template-columns: 30px minmax(0, 1fr) 45px 32px; padding: 10px 16px; }.history-row > span, .history-progress { grid-column: 2 / 5; }.history-row > b { grid-column: 3; grid-row: 1; }.history-action { grid-column: 4; grid-row: 1; }
   .settings-form { grid-template-columns: 1fr; padding: 17px; }.security-panel { align-items: flex-start; }
   .notice { right: 16px; top: 14px; }
 }

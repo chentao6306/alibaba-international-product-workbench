@@ -66,11 +66,43 @@ try {
   await page.getByRole('button', { name: '应用到 1 件商品', exact: true }).click();
   await page.getByText('批量修改已应用', { exact: true }).waitFor();
   assert.equal(store.read().products[0].origin, 'United States');
+  await page.getByRole('button', { name: '批量修改 1', exact: true }).click();
+  await page.locator('.batch-tabs').getByRole('button', { name: '国家/地区定价', exact: true }).click();
+  await page.getByLabel('定价国家/地区').selectOption('Japan');
+  await page.getByLabel('该地区价格').fill('120');
+  await page.getByRole('button', { name: '应用到 1 件商品', exact: true }).click();
+  await page.getByText('批量修改已应用', { exact: true }).waitFor();
+  assert.deepEqual(store.read().products[0].regionalPricing, { country: 'Japan', price: 120 });
   await page.getByTitle('编辑完整资料').click();
   await page.locator('.editor-tabs').getByRole('button', { name: '物流信息', exact: true }).click();
   await page.getByLabel('产地国家').scrollIntoViewIfNeeded();
   assert.ok(await page.locator('.drawer').evaluate((node) => node.scrollWidth <= node.clientWidth));
   await page.screenshot({ path: path.join(root, 'origin-desktop.png') });
+  await page.getByRole('button', { name: '取消', exact: true }).click();
+  store.update((state) => {
+    state.jobs = [{ id: 'publish-live', type: 'publish', status: 'running', progress: 1, total: 3,
+      currentProductId: 'qa-product', createdAt: new Date().toISOString(), message: '正在上传商品图片',
+      metadata: { collectionFolderId: 'qa', productIds: ['done', 'qa-product', 'third'], mode: 'submit' },
+      results: { done: { status: 'published' } } }];
+    state.products[0].status = 'publish_failed';
+    state.products[0].publishResult = { message: 'Previous failure' };
+  });
+  await page.locator('.sidebar nav button').filter({ hasText: '上架任务' }).click();
+  await page.getByText('正在上架', { exact: true }).waitFor();
+  await page.waitForFunction(() => document.querySelector('.launch-panel .publish-counts')?.textContent.includes('成功 1'));
+  assert.equal(await page.locator('.queue-list').getByText('Previous failure').count(), 0);
+  store.update((state) => {
+    const job = state.jobs[0]; job.progress = 2; job.currentProductId = 'third';
+    job.results['qa-product'] = { status: 'failed' };
+  });
+  await page.waitForFunction(() => document.querySelector('.launch-panel .publish-counts')?.textContent.includes('失败 1'));
+  for (const width of [1440, 430]) {
+    await page.setViewportSize({ width, height: 932 });
+    if (width < 700) await page.waitForFunction(() => document.querySelector('.sidebar').getBoundingClientRect().right <= 1);
+    await page.locator('.launch-panel .publish-counts').scrollIntoViewIfNeeded();
+    await page.screenshot({ path: path.join(root, `publish-counts-${width}.png`) });
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  }
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ ok: true, screenshots: root }));
 } catch (error) {

@@ -19,6 +19,7 @@ const report = { action, query, outputDir, stages: [] };
 const progress = (stage) => {
   report.stages.push({ stage, at: new Date().toISOString(), url: publisher.page?.url() });
   console.log(stage);
+  if (process.env.QA_STOP_STAGE === stage) throw new Error(`QA stopped at ${stage}`);
 };
 const waitForForm = async (page) => {
   await page.locator('input#productTitle').waitFor({ state: 'visible', timeout: 60000 });

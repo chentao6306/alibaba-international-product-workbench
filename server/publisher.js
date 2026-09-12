@@ -280,31 +280,46 @@ function compactText(value, limit = 220) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit);
 }
 
-async function visibleFeedback(page) {
+export async function visibleFeedback(page) {
   const selectors = [
     '.sell-error-message .msg-text', '.error-sell-info + .sell-error-message',
     '[role="alert"]', '.next-message', '.next-notice', '.next-feedback',
     '.next-balloon', '.next-dialog', '[class*="toast"]', '[class*="message"]',
     '[class*="error"]', '[class*="invalid"]', '[class*="feedback"]'
   ];
-  const messages = [];
-  for (const selector of selectors) {
-    const nodes = page.locator(selector);
-    const count = Math.min(await nodes.count().catch(() => 0), 20);
-    for (let index = 0; index < count; index += 1) {
-      const node = nodes.nth(index);
-      if (!await node.isVisible().catch(() => false)) continue;
-      const text = compactText(await node.innerText().catch(() => ''));
-      if (text && !messages.includes(text)) messages.push(text);
+  return page.evaluate((patterns) => {
+    const messages = new Set();
+    for (const pattern of patterns) {
+      for (const node of [...document.querySelectorAll(pattern)].slice(0, 20)) {
+        const style = getComputedStyle(node);
+        if (!node.getClientRects().length || style.visibility === 'hidden' || style.display === 'none') continue;
+        const text = String(node.innerText || '').replace(/\s+/g, ' ').trim();
+        if (text) messages.add(text.slice(0, 2000));
+      }
     }
-  }
-  return messages;
+    return [...messages];
+  }, selectors).catch((error) => {
+    // Navigation after a successful save can invalidate a read. The result
+    // polling loop will read the new document; never repeat the submission.
+    if (/Execution context was destroyed|Cannot find context|navigation/i.test(error.message)) return [];
+    throw error;
+  });
 }
 
 const SUBMIT_SUCCESS_TEXT = /(?:发布成功|提交成功|已提交发布|审核中|产品信息已经成功提交|产品已经进入审核流程|您的产品信息已经成功提交|您的产品已经进入审核流程|successfully\s+(?:submitted|published)|submitted successfully)/i;
 const DRAFT_SUCCESS_TEXT = /(?:保存成功|草稿.*成功|已保存|successfully\s+saved|saved successfully)/i;
 const ACCOUNT_LIMIT_TEXT = /(?:产品|商品)(?:总量|数量).{0,20}(?:超出|超过|上限)|product.{0,30}(?:quota|limit).{0,20}(?:exceed|reach)/i;
 const BLOCKING_FEEDBACK_TEXT = /(?:报错反馈|错误项|必填项.*不能为空|无效起订量|物流属性.*(?:请填写完整|不能为空)|重量、体积.*(?:请填写完整|不能为空)|请上传相关产品图片|请不要输入如下非英文字符|required|invalid)/i;
+
+export function alibabaKeywordText(product) {
+  const keywords = (product.keywords || []).length
+    ? product.keywords.slice(0, 10).join('\n')
+    : String(product.title || '').split(/\s+/).filter((word) => word.length > 2).slice(0, 8).join(' ');
+  // The keyword validator rejects colons although titles and radio-band
+  // attributes accept them. Keep ratios meaningful and scope this to keywords.
+  const normalized = keywords.replace(/(\d)\s*:\s*(?=\d)/g, '$1 to ').replace(/:/g, ' ').replace(/[ \t]+/g, ' ').trim();
+  return normalized.length <= 384 ? normalized : normalized.slice(0, 384).replace(/\s+\S*$/, '').trim();
+}
 
 export function classifyAlibabaActionResult({ mode = 'draft', url = '', originalUrl = '', feedback = [], bodyText = '' } = {}) {
   const messages = Array.isArray(feedback) ? feedback.filter(Boolean) : [];
@@ -1743,17 +1758,26 @@ export async function fillChoice(page, locator, value) {
     // A stale or category-specific control must fail quickly. The outer
     // publish stage has a long timeout for network work, but a single missing
     // field should never consume that entire timeout.
-    await locator.click({ force: true, timeout: 4000 }).catch(() => {});
-    await locator.fill(expected, { timeout: 4000 }).catch(() => {});
+    await locator.fill(expected, { timeout: 2000 }).catch(() => {});
+    if (!await locator.count().catch(() => 0)) return false;
     await page.waitForTimeout(350);
+    if (!await locator.count().catch(() => 0)) return false;
     const exactOption = page.locator('[role="option"]:visible, .next-menu-item:visible')
       .filter({ hasText: new RegExp(`^${expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }).last();
     if (await exactOption.isVisible().catch(() => false)) await exactOption.click({ force: true, timeout: 4000 }).catch(() => {});
+    // Editable model rows cancel and remove themselves on Escape while
+    // focused. Blur first to commit the value, then close any suggestion menu.
+    await locator.evaluateAll((nodes) => {
+      const node = nodes[0];
+      if (!node) return;
+      node.blur();
+      node.dispatchEvent(new Event('change', { bubbles: true }));
+    });
     await page.keyboard.press('Escape');
-    await locator.evaluate((node) => node.blur()).catch(() => {});
-    await locator.dispatchEvent('change', { timeout: 4000 }).catch(() => {});
     await page.waitForTimeout(300);
-    const committed = await locator.evaluate((node, expectedValue) => {
+    const committed = await locator.evaluateAll((nodes, expectedValue) => {
+      const node = nodes[0];
+      if (!node) return false;
       const clean = (text) => String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
       const expectedText = clean(expectedValue);
       if (clean(node.value) === expectedText) return true;
@@ -1773,7 +1797,25 @@ export async function fillChoice(page, locator, value) {
   return false;
 }
 
-async function fillColorSpec(page, values) {
+export async function fillModelNumber(page, value) {
+  const row = page.locator('#struct-p-3');
+  if (await row.isVisible().catch(() => false)) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let input = await firstVisible(page, ['#struct-p-3 input:not([type="hidden"])']);
+      if (!input) {
+        const add = row.locator('.posting-field-multi-text button.add-button').last();
+        if (!await add.isVisible().catch(() => false)) return false;
+        await add.click({ timeout: 3000 });
+        input = await waitForFirstVisible(page, ['#struct-p-3 input:not([type="hidden"])'], 3000);
+      }
+      if (await fillChoice(page, input, value)) return true;
+    }
+    return false;
+  }
+  return fillChoice(page, await fieldByAnyLabel(page, ['型号', 'Model Number']), value);
+}
+
+export async function fillColorSpec(page, values) {
   const colors = [...new Set((values || []).map((value) => englishSpecText(value)).filter(Boolean))];
   if (!colors.length) return false;
   // Do not fall back to generic "please enter or select" inputs here. The
@@ -1843,6 +1885,9 @@ async function fillColorSpec(page, values) {
   };
   const colorInput = await firstVisible(page, [colorInputSelector]);
   if (!colorInput) return false;
+  const existingColors = await selectedColors();
+  const editing = await page.locator(colorInputSelector).evaluateAll((nodes) => nodes.some((node) => node === document.activeElement));
+  if (!editing && colors.every((color) => existingColors.some((item) => item.toLowerCase() === color.toLowerCase()))) return true;
   for (const color of colors) {
     const inputs = page.locator(colorInputSelector);
     let input = null;
@@ -2571,7 +2616,7 @@ async function ensureSaleAttributeCleared(page, value) {
 // and image-type defaults make Alibaba reject the form with
 // “商品图片项必填项不能为空”. Clear the controlled list before applying the
 // source specifications so only exact source values remain selected.
-async function clearSaleAttributeSelections(page) {
+export async function clearSaleAttributeSelections(page) {
   const result = await page.evaluate(() => {
     const root = document.querySelector('#saleAttributesItems');
     if (!root) return { ok: false, reason: 'missing-root' };
@@ -2780,8 +2825,8 @@ export async function setImageUploadFiles(input, files, options = {}) {
   }
 }
 
-export async function emptyRequiredSpecificationLabels(page) {
-  return page.locator('#struct-specification [id^="p-"]').evaluateAll((rows) => rows.flatMap((row) => {
+export async function emptyRequiredSpecificationLabels(page, includeCategory = false) {
+  return page.locator(includeCategory ? '.sell-catProp-item, #struct-specification [id^="p-"]' : '#struct-specification [id^="p-"]').evaluateAll((rows) => rows.flatMap((row) => {
     if (!row.getClientRects().length) return [];
     const heading = row.querySelector('label.required, .label.required');
     if (!heading) return [];
@@ -2888,7 +2933,7 @@ async function specValueUploadContainer(row, value) {
   for (let index = 0; index < await labels.count().catch(() => 0); index += 1) {
     let candidate = labels.nth(index);
     const text = String(await candidate.innerText().catch(() => '')).replace(/\s+/g, ' ').trim().toLowerCase();
-    const inputValue = String(await candidate.locator('input').first().inputValue().catch(() => '')).trim().toLowerCase();
+    const inputValue = await candidate.locator('input').evaluateAll((inputs) => String(inputs[0]?.value || '').trim().toLowerCase()).catch(() => '');
     if (text !== expected && inputValue !== expected) continue;
     for (let level = 0; level < 7; level += 1) {
       const hasUpload = await candidate.locator('.custom-upload-image, .value-preview, [class*="upload-image"], [class*="upload-trigger"], input[type="file"]').count().catch(() => 0);
@@ -3995,6 +4040,7 @@ export class SellerPublisher {
   async downloadImageSet(product, urls, prefix, limit = 6) {
     fs.mkdirSync(this.imageDir, { recursive: true });
     const selectedUrls = distinctAlibabaImageUrls(urls).filter(isUsableImageUrl).slice(0, limit);
+    const failures = [];
     const downloadOne = async (url, index) => {
       try {
         const safeId = String(product.sourceId || product.id || 'product').replace(/[^A-Za-z0-9]/g, '').slice(-16);
@@ -4018,7 +4064,7 @@ export class SellerPublisher {
           buffer = fs.readFileSync(localPath);
         } else {
           let lastError;
-          for (let attempt = 0; attempt < 2; attempt += 1) {
+          for (let attempt = 0; attempt < 3; attempt += 1) {
             try {
               const response = await fetch(url, {
                 headers: {
@@ -4028,13 +4074,16 @@ export class SellerPublisher {
                 },
                 signal: AbortSignal.timeout(12000)
               });
-              if (!response.ok) throw new Error(`HTTP ${response.status}`);
+              if (!response.ok) throw Object.assign(new Error(`HTTP ${response.status}`), {
+                retryable: response.status >= 500 || [408, 429].includes(response.status)
+              });
               contentType = response.headers.get('content-type') || '';
               buffer = Buffer.from(await response.arrayBuffer());
               break;
             } catch (error) {
               lastError = error;
-              if (attempt < 1) await new Promise((resolve) => setTimeout(resolve, 500));
+              if (error.retryable === false) break;
+              if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, [500, 1500][attempt]));
             }
           }
           if (!buffer) throw lastError || new Error('图片下载失败');
@@ -4059,7 +4108,7 @@ export class SellerPublisher {
         const filePath = path.join(this.imageDir, `${safeId}${safePrefix}${index}.${extension}`);
         fs.writeFileSync(filePath, buffer);
         return filePath;
-      } catch { return ''; }
+      } catch (error) { failures.push(error.message); return ''; }
     };
     // AliCDN occasionally resets a burst of six parallel TLS connections.
     // Three workers retain good throughput while each file still gets its own
@@ -4074,6 +4123,9 @@ export class SellerPublisher {
         paths[index] = await this.imageDownloads.run(key, () => downloadOne(selectedUrls[index], index));
       }
     }));
+    if (String(prefix).startsWith('spec-') && selectedUrls.length && paths.some((file) => !file)) {
+      throw Object.assign(new Error(`来源规格图片下载失败：${failures[0] || '图片为空、格式不支持或超过大小限制'}。当前商品未提交，可稍后重试`), { code: 'SPEC_IMAGE_DOWNLOAD_FAILED' });
+    }
     return paths.filter(Boolean);
   }
 
@@ -4309,6 +4361,26 @@ export class SellerPublisher {
   }
 
   async fillProductFields(page, product, onProgress = () => {}) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const originalUrl = page.url();
+      let result;
+      try {
+        result = await this.fillStableProductFields(page, product, onProgress);
+        if (page.url() === originalUrl) return result;
+      } catch (error) {
+        if (!/Execution context was destroyed|Cannot find context|navigation/i.test(error.message) || page.isClosed()) throw error;
+      }
+      // Alibaba auto-saves new products and reloads the draft during editing.
+      // Refill once on the loaded form before uploading the final media.
+      if (!/\/product\/publish\.htm(?:\?|$)/i.test(page.url())) throw new Error('国际站发布页已离开，当前商品尚未提交');
+      if (attempt) throw new Error('国际站表单反复刷新，当前商品尚未提交，请重试该商品');
+      onProgress('国际站已刷新草稿，正在恢复商品属性');
+      await page.waitForLoadState('domcontentloaded', { timeout: 15000 });
+      await page.locator('.sell-catProp-item').first().waitFor({ state: 'visible', timeout: 15000 });
+    }
+  }
+
+  async fillStableProductFields(page, product, onProgress = () => {}) {
     // References and manual category edits update the working category while
     // sourceCategory* remains immutable traceability data. Publishing must
     // therefore use the working category first.
@@ -4391,20 +4463,22 @@ export class SellerPublisher {
 
     onProgress('填写型号和品牌');
     const modelValue = product.model || attributeValue(product, '型号', 'Model Number') || 'General';
-    const modelFilled = await fillFirst(page, ['input[name="p-3"]'], modelValue)
-      || await fillChoice(page, await fieldByAnyLabel(page, ['型号', 'Model Number']), modelValue);
+    const modelFilled = await fillModelNumber(page, modelValue);
     markSourceAttributes(['型号', 'model', 'model number'], modelFilled);
 
+    onProgress('填写品牌');
     const brandValue = product.brand || attributeValue(product, '品牌名称', 'Brand Name') || 'Other';
     const brandFilled = await fillFirst(page, ['input[name="p-2"]'], brandValue)
       || await fillChoice(page, await fieldByAnyLabel(page, ['品牌名称', 'Brand Name']), brandValue);
     markSourceAttributes(['品牌名称', 'brand', 'brand name'], brandFilled);
 
+    onProgress('填写功能特性');
     const featureValue = attributeValue(product, '功能/特性', 'Feature', 'Features');
     const featureFilled = featureValue && (await fillFirst(page, ['input[name="p-373265001"]'], featureValue)
       || await fillChoice(page, await fieldByAnyLabel(page, ['功能/特性', '功能', '特性', 'Feature', 'Features']), featureValue));
     markSourceAttributes(['功能/特性', '功能', '特性', 'feature', 'features'], featureFilled);
 
+    onProgress('填写功能和接口');
     const functionValue = attributeValue(product, '功能', 'Function', 'function');
     const functionFilled = functionValue && await fillRequiredChoice(
       ['功能', 'Function', '功能/特性', 'Features'],
@@ -5166,6 +5240,10 @@ export class SellerPublisher {
     const mediaReady = Promise.allSettled([
       this.downloadImageSet(product, product.mainImages?.length ? product.mainImages : [product.mainImage, ...(product.images || [])], 'main', 6),
       this.downloadImageSet(product, product.detailImages || [], 'detail', 8),
+      ...[...new Set((product.variantGroups || []).find((group) => /颜色|colou?r/i.test(group.name))?.options || [])].slice(0, 12).map((value, index) => {
+        const group = product.variantGroups.find((item) => /颜色|colou?r/i.test(item.name));
+        return this.downloadImageSet(product, [group.optionImages?.[value] || group.optionImages?.[englishSpecText(value)]], `spec-color-${index}`, 1);
+      }),
     ]);
     try {
       return await this.publishPreparedProduct(product, publishPageUrl, mode, publishCategory, jobId, reportStage, options);
@@ -5261,13 +5339,10 @@ export class SellerPublisher {
     }
 
     const keywordInput = await firstVisible(page, [
-      'textarea[placeholder*="修饰词+产品中心词"]', 'textarea[role="input"]'
+      '.posting-field-keywords textarea', 'textarea[placeholder*="修饰词+产品中心词"]', 'textarea[role="input"]'
     ]);
     if (keywordInput) {
-      const keywords = (product.keywords || []).length
-        ? product.keywords.slice(0, 10).join('\n')
-        : product.title.split(/\s+/).filter((word) => word.length > 2).slice(0, 8).join(' ');
-      await fillAndVerify(keywordInput, keywords, '商品关键词').catch(() => {});
+      await fillAndVerify(keywordInput, alibabaKeywordText(product), '商品关键词');
     }
 
     await this.fillPriceFields(page, product);
@@ -5422,12 +5497,12 @@ export class SellerPublisher {
     // attribute without any value. Alibaba reports only "属性值不能为空" for
     // that state, so remove those empty optional selections before submit.
     await clearEmptySaleAttributeSelections(page);
-    const emptyRequiredSpecs = await emptyRequiredSpecificationLabels(page);
+    const emptyRequiredSpecs = await emptyRequiredSpecificationLabels(page, true);
     if (emptyRequiredSpecs.length) {
       await recoverRequiredAttributes(page, product, emptyRequiredSpecs, reportStage);
-      const remaining = await emptyRequiredSpecificationLabels(page);
+      const remaining = await emptyRequiredSpecificationLabels(page, true);
       if (remaining.length && mode === 'submit') {
-        const error = new Error(`国际站必填规格未填写：${remaining.join('、')}`);
+        const error = new Error(`国际站必填属性或规格未填写：${remaining.join('、')}`);
         error.requiredFields = remaining;
         throw error;
       }
@@ -5463,7 +5538,7 @@ export class SellerPublisher {
     if (!action) {
       await revealPage(page);
       this.visible = true;
-      return { status: 'needs_review', message: '表单已填充，未识别到保存或发布按钮，请在浏览器中人工确认' };
+      throw new Error('表单已填充，但未识别到保存或发布按钮；本商品尚未提交，请检查国际站页面后重试');
     }
     reportStage(mode === 'submit' ? '提交国际站并等待结果' : '保存国际站草稿');
     const originalUrl = page.url();

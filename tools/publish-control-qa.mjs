@@ -13,7 +13,7 @@ try {
   page.setDefaultTimeout(5000);
   await page.goto(buildAlibabaPublishUrl('201896803'), { waitUntil: 'domcontentloaded', timeout: 45000 });
   await page.locator('#struct-p-3 input').first().waitFor({ timeout: 30000 });
-  for (const [selector, value] of [['#struct-p-3', 'S25Ultra'], ['#struct-p-2', 'Other'], ['#struct-p-191284141', 'Gaming, Beauty Camera, Dual SIM Card, Fingerprint, Face Recognition'], ['#struct-p-406736640', '3G: WCDMA850/2100MHz']]) {
+  for (const [selector, value] of [['#struct-p-3', 'S25 Ultra'], ['#struct-p-2', 'Other'], ['#struct-p-191284141', 'Gaming, Beauty Camera, Dual SIM Card, Fingerprint, Face Recognition'], ['#struct-p-406736640', '3G: WCDMA850/2100MHz']]) {
     const row = page.locator(selector);
     const input = row.locator('input:not([type="hidden"]), textarea').first();
     const before = await row.evaluate((node) => node.outerHTML);
