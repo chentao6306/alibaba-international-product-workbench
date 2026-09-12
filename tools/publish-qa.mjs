@@ -17,7 +17,7 @@ const state = JSON.parse(fs.readFileSync(path.join(workspaceDir, 'workspace.json
 const publisher = new SellerPublisher(outputDir);
 const report = { action, query, outputDir, stages: [] };
 const progress = (stage) => {
-  report.stages.push({ stage, at: new Date().toISOString() });
+  report.stages.push({ stage, at: new Date().toISOString(), url: publisher.page?.url() });
   console.log(stage);
 };
 const waitForForm = async (page) => {

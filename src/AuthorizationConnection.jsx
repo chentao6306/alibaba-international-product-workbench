@@ -15,13 +15,17 @@ export default function AuthorizationConnection() {
   if (!status?.message) return null;
   async function retry() {
     setBusy(true);
-    try { await window.kuaYipu.heartbeat(); setStatus(await window.kuaYipu.connection()); }
+    try {
+      if (status.state === 'revoked') await window.kuaYipu.showLogin();
+      else await window.kuaYipu.heartbeat();
+      setStatus(await window.kuaYipu.connection());
+    }
     catch {}
     finally { setBusy(false); }
   }
   return <div className={`authorization-connection ${status.state}`} role="status">
     <CircleAlert size={18} />
     <span>{status.message}{status.state === 'retrying' && `（剩余 ${status.remainingSeconds} 秒）`}</span>
-    {status.state !== 'connected' && <button className="secondary-button" onClick={retry} disabled={busy}><RefreshCw size={16} className={busy ? 'spin' : ''} />重新连接</button>}
+    {status.state !== 'connected' && <button className="secondary-button" onClick={retry} disabled={busy}><RefreshCw size={16} className={busy ? 'spin' : ''} />{status.state === 'revoked' ? '重新登录' : '重新连接'}</button>}
   </div>;
 }

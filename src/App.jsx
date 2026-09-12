@@ -13,6 +13,7 @@ import CollectionFolders from './CollectionFolders.jsx';
 import CollectionTasks from './CollectionTasks.jsx';
 import OriginCountrySelect from './OriginCountrySelect.jsx';
 import AuthorizationConnection from './AuthorizationConnection.jsx';
+import { publishCounts } from '../server/publish-progress.js';
 
 const EMPTY = { shops: [], groups: [], collectionFolders: [], products: [], jobs: [], settings: {}, browser: {}, collectorBrowser: {} };
 
@@ -623,7 +624,7 @@ function BatchEditor({ products, references, onClose, onSaved, notify }) {
       {(tab === 'attributes' || tab === 'custom') && <><label className="batch-field"><span>修改方式</span><select value={form.attrMode} onChange={update('attrMode')}><option value="upsert">更新同名属性，不存在则新增</option><option value="append">追加属性</option><option value="replace">清空后只保留本属性</option></select></label>{field('属性名称', 'attrName')}{field('属性值', 'attrValue')}</>}
       {tab === 'specs' && <><label className="batch-field"><span>修改方式</span><select value={form.specMode} onChange={update('specMode')}><option value="upsert">更新同名规格，不存在则新增</option><option value="append">追加规格</option><option value="replace">清空后只保留本规格</option></select></label>{field('规格名称', 'specName')}{field('规格选项（逗号分隔）', 'specOption')}</>}
       {tab === 'images' && <><p className="batch-help">会对所有已选商品的主图和详情图执行批量处理，并保留原始来源快照。</p><button className="secondary-button" onClick={() => applyImage('dedupe')}>图片去重并排序</button><button className="secondary-button" onClick={() => applyImage('copy-detail')}>主图复制为详情图</button><button className="secondary-button" onClick={() => applyImage('clean')}>清理空图片</button><button className="secondary-button danger-button" onClick={() => applyImage('clear-main')}>清空全部主图</button><div className="batch-slot-actions"><span>批量删除指定主图：</span>{[1,2,3,4,5,6].map((slot) => <button key={slot} className="secondary-button danger-button" onClick={() => applyImage(`delete-main-${slot}`)}>主图 {slot}</button>)}</div></>}
-      {tab === 'regional' && <>{field('国家/地区', 'country')}{field('该地区价格', 'countryPrice', 'number')}</>}
+      {tab === 'regional' && <><label className="batch-field"><span>国家/地区</span><OriginCountrySelect value={form.country} onChange={(country) => setForm((current) => ({ ...current, country }))} /></label>{field('该地区价格', 'countryPrice', 'number')}</>}
     </div>
     <div className="batch-preview"><div className="batch-preview-title"><strong>修改预览</strong><span>先确认每个商品的当前值和修改后值，再点击保存</span></div><div className="batch-preview-table"><div className="batch-preview-head"><span>商品名称</span><span>旧值-修改前</span><span>新值-修改后</span></div>{products.map((product) => { const row = previewFor(product); return <div className="batch-preview-row" key={product.id}><strong title={product.title}>{product.title || '未命名商品'}</strong><span title={row.current}>{row.current}</span><span className={row.next.includes('等待') || row.next.includes('请选择') ? 'pending' : ''} title={row.next}>{row.next}</span></div>; })}</div></div>
     <div className="drawer-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" onClick={apply}><Save size={17} />应用到 {products.length} 件商品</button></div>
@@ -875,11 +876,17 @@ function PublishView({ state, refresh, notify, onMenu, platform, setPlatform, fo
             ? <><button className="primary-button publish-button" disabled={busy} onClick={() => resume(pausedJob)}><Play size={18} />继续处理剩余 {Math.max(0, pausedJob.total - pausedJob.progress)} 件</button><button className="secondary-button pause-button" disabled={busy} onClick={() => cancel(pausedJob)}><X size={17} />取消任务</button></>
             : <button className="primary-button publish-button" disabled={busy || groupsLoading || !selected.length || Boolean(publishing)} onClick={publish}>{publishing || busy ? <LoaderCircle className="spin" size={18} /> : <CloudUpload size={18} />}{publishing ? '任务执行中' : `开始处理 ${selected.length} 件`}</button>}
           {publishing && <button className="secondary-button pause-button" disabled={busy || publishing.status === 'pause_requested'} onClick={() => pause(publishing)}><Pause size={17} />{publishing.status === 'pause_requested' ? '正在暂停' : '暂停任务'}</button>}
-          {currentJob && <div className="compact-progress"><div><span>{currentJob.message}</span><b>{currentJob.progress}/{currentJob.total}</b></div><div className="progress"><i style={{ width: currentJob.total ? `${currentJob.progress / currentJob.total * 100}%` : '10%' }} /></div></div>}
+          {currentJob && <><PublishCounts job={currentJob} /><div className="compact-progress"><div><span>{currentJob.message}</span><b>{currentJob.progress}/{currentJob.total}</b></div><div className="progress"><i style={{ width: currentJob.total ? `${currentJob.progress / currentJob.total * 100}%` : '10%' }} /></div></div></>}
         </section></aside>
     </div>
     <JobHistory jobs={state.jobs.filter((job) => job.type === 'publish' && (job.metadata?.collectionFolderId === folderId || job.metadata?.productIds?.some((id) => state.products.some((product) => product.id === id && product.collectionFolderId === folderId))) && (platform === 'all' || job.metadata?.sourcePlatforms?.includes(platform)))} refresh={refresh} notify={notify} />
   </>;
+}
+
+function PublishCounts({ job }) {
+  const counts = publishCounts(job);
+  if (job.type !== 'publish') return null;
+  return <div className="publish-counts" aria-live="polite"><span className="success">{job.metadata?.mode === 'draft' ? '草稿成功' : '成功'} <b>{counts.success}</b></span><span className="failure">失败 <b>{counts.failed}</b></span><span>剩余 <b>{counts.remaining}</b></span>{counts.skipped > 0 && <span>跳过 <b>{counts.skipped}</b></span>}</div>;
 }
 
 function JobHistory({ jobs, refresh, notify }) {
@@ -895,7 +902,7 @@ function JobHistory({ jobs, refresh, notify }) {
       <div className="history-row">
         <div className={`history-icon ${job.status}`}>{job.status === 'completed' ? <Check size={16} /> : job.status === 'failed' ? <CircleAlert size={16} /> : ['paused', 'cancelled'].includes(job.status) ? <Pause size={16} /> : <LoaderCircle className="spin" size={16} />}</div>
         <div><strong>{job.type === 'collect' ? `${sourcePlatformLabel({ sourcePlatform: job.metadata?.sourcePlatform })} ${job.metadata?.collectionMethod === 'image-search' ? '以图搜品采集' : '商品采集'}` : job.metadata?.mode === 'submit' ? '批量直接发布' : '批量保存草稿'}</strong><small>{new Date(job.createdAt).toLocaleString('zh-CN')}</small></div>
-        <span>{job.message}</span><b>{job.progress}/{job.total || '-'}</b>
+        <div><span>{job.message}</span><PublishCounts job={job} /></div><b>{job.progress}/{job.total || '-'}</b>
         <div className="history-action">
           {['queued', 'running'].includes(job.status) && <button className="icon-button" onClick={() => control(job, 'pause')} title="暂停任务"><Pause size={16} /></button>}
           {job.status === 'pause_requested' && <button className="icon-button" disabled title="正在暂停"><LoaderCircle className="spin" size={16} /></button>}
@@ -939,14 +946,23 @@ export default function App() {
   const [notice, setNotice] = useState(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const refreshInFlight = useRef(null);
+  const stateRevision = useRef('');
   const mounted = useRef(true);
   async function refresh() {
     // State includes captured product details. Keep only one request active so
     // StrictMode and the polling timer cannot queue repeated multi-megabyte
     // JSON parses and React renders in the Electron renderer.
     if (refreshInFlight.current) return refreshInFlight.current;
-    const request = api('/api/state')
-      .then((nextState) => { if (mounted.current) setState(nextState); return nextState; })
+    const request = api(`/api/state?revision=${encodeURIComponent(stateRevision.current)}`)
+      .then((nextState) => {
+        if (mounted.current) {
+          stateRevision.current = nextState.revision;
+          setState((previous) => nextState.unchanged
+            ? { ...previous, jobs: nextState.jobs, browser: nextState.browser, collectorBrowser: nextState.collectorBrowser }
+            : nextState);
+        }
+        return nextState;
+      })
       .catch((error) => { if (mounted.current) setNotice({ text: error.message, type: 'error' }); throw error; })
       .finally(() => { if (refreshInFlight.current === request) refreshInFlight.current = null; });
     refreshInFlight.current = request;
@@ -955,7 +971,7 @@ export default function App() {
   useEffect(() => {
     mounted.current = true;
     refresh().catch(() => {});
-    const timer = setInterval(() => refresh().catch(() => {}), 5000);
+    const timer = setInterval(() => refresh().catch(() => {}), 1500);
     return () => { mounted.current = false; clearInterval(timer); };
   }, []);
   function notify(text, type = 'success') { setNotice({ text, type }); setTimeout(() => setNotice(null), 4200); }

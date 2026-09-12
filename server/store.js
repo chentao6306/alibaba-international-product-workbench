@@ -26,13 +26,27 @@ export class JsonStore {
     if (!fs.existsSync(filePath)) this.write(structuredClone(EMPTY_STATE));
   }
 
-  read() {
-    return JSON.parse(fs.readFileSync(this.filePath, 'utf8'));
+  revision() {
+    const stat = fs.statSync(this.filePath, { bigint: true });
+    return `${stat.mtimeNs}:${stat.ctimeNs}:${stat.size}`;
+  }
+
+  snapshot() {
+    const revision = this.revision();
+    if (!this.cachedState || this.cachedRevision !== revision) {
+      this.cachedState = JSON.parse(fs.readFileSync(this.filePath, 'utf8'));
+      this.cachedRevision = revision;
+    }
+    return this.cachedState;
+  }
+
+  read(select = (state) => state) {
+    return structuredClone(select(this.snapshot()));
   }
 
   write(state) {
     const temporary = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
-    fs.writeFileSync(temporary, JSON.stringify(state, null, 2), 'utf8');
+    fs.writeFileSync(temporary, JSON.stringify(state), 'utf8');
     let lastError = null;
     for (let attempt = 0; attempt < 20; attempt += 1) {
       try {
@@ -49,6 +63,8 @@ export class JsonStore {
       fs.rmSync(temporary, { force: true });
       throw lastError;
     }
+    this.cachedState = structuredClone(state);
+    this.cachedRevision = this.revision();
     return state;
   }
 
@@ -70,6 +86,14 @@ export class JsonStore {
   }
 
   patchJob(id, patch) {
+    // Stage text is transient. Item results, checkpoints and control changes
+    // still use the atomic durable write below.
+    if (Object.keys(patch).every((key) => key === 'message')) {
+      const job = this.snapshot().jobs.find((item) => item.id === id);
+      if (!job) return null;
+      Object.assign(job, patch, { updatedAt: new Date().toISOString() });
+      return structuredClone(job);
+    }
     return this.update((state) => {
       const job = state.jobs.find((item) => item.id === id);
       if (!job) return null;

@@ -1,8 +1,8 @@
 import crypto from 'node:crypto';
 
-export function offlineGraceMinutes(value = 5) {
-  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 60) {
-    throw Object.assign(new Error('断线宽限时间必须为 1 至 60 分钟的整数'), { status: 400 });
+export function offlineGraceMinutes(value = 1440) {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 21600) {
+    throw Object.assign(new Error('断线宽限时间必须为 1 至 21600 分钟（15 天）的整数'), { status: 400 });
   }
   return value;
 }
@@ -36,10 +36,18 @@ export function clientSessionAllowed(license, auth) {
     && (!license.credential_required || auth.aud === 'client' && auth.credentialVerified === true));
 }
 
-export function clientClaims(license, deviceId) {
+export function clientClaims(license, deviceId, connectionPolicyVersion = 1) {
   return { aud: 'client', account: license.alibaba_account, licenseId: license.id, deviceId,
+    connectionPolicyVersion: connectionPolicyVersion === 2 ? 2 : 1,
     credentialVersion: Number(license.credential_version || 0), credentialVerified: Boolean(license.credential_required),
     exp: Math.min(new Date(license.expires_at).getTime(), Date.now() + Math.max(10, offlineGraceMinutes(license.offline_grace_minutes) + 2) * 60000) };
+}
+
+export function clientSession(license, deviceId, sign, connectionPolicyVersion = 1) {
+  const claims = clientClaims(license, deviceId, connectionPolicyVersion);
+  return { authorized: true, serverTime: new Date().toISOString(), expiresAt: license.expires_at,
+    offlineGraceSeconds: Math.min(offlineGraceMinutes(license.offline_grace_minutes) * 60, claims.connectionPolicyVersion === 2 ? 1296000 : 3600),
+    token: sign(claims) };
 }
 
 export function tokenCodec(secret) {

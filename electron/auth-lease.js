@@ -12,7 +12,7 @@ export class AuthorizationLease {
     const serverTime = Date.parse(response.serverTime);
     const expires = Date.parse(response.expiresAt);
     const configured = response.offlineGraceSeconds;
-    if (configured !== undefined && (!Number.isInteger(configured) || configured < 60 || configured > 3600)) {
+    if (configured !== undefined && (!Number.isInteger(configured) || configured < 60 || configured > 1296000)) {
       this.clear();
       throw new Error('服务器断线策略无效，请联系管理员');
     }

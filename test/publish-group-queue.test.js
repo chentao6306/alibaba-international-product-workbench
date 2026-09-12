@@ -22,10 +22,15 @@ test('a rejected seller group fails one item and continues the remaining batch',
   });
   const original = SellerPublisher.prototype.publishProduct;
   const calls = [];
+  let releaseLast;
+  let lastStarted;
+  const started = new Promise((resolve) => { lastStarted = resolve; });
+  const finish = new Promise((resolve) => { releaseLast = resolve; });
   SellerPublisher.prototype.publishProduct = async (product, _url, _mode, _category, _job, _progress, options) => {
     calls.push(product.id);
     assert.equal(options.sellerGroup.id, '100');
     if (product.id === '1') throw Object.assign(new Error('国际站未接受商品分组：照相机'), { code: 'SELLER_GROUP_UNAVAILABLE' });
+    if (product.id === '3') { lastStarted(); await finish; }
     return { status: 'drafted', message: 'Saved' };
   };
   const server = await import('../server/index.js');
@@ -36,6 +41,18 @@ test('a rejected seller group fails one item and continues the remaining batch',
       body: JSON.stringify({ ids: ['1', '2', '3'], collectionFolderId: 'folder', mode: 'draft', sellerGroup: { id: '100', name: '照相机' } }),
     });
     assert.equal(response.status, 202);
+    await started;
+    const base = `http://127.0.0.1:${listener.address().port}`;
+    const live = await (await fetch(base + '/api/state')).json();
+    assert.equal(live.jobs[0].status, 'running');
+    assert.equal(live.jobs[0].progress, 2);
+    assert.equal(live.jobs[0].results['1'].status, 'failed');
+    assert.equal(live.jobs[0].results['2'].status, 'drafted');
+    const lightweight = await (await fetch(base + '/api/state?revision=' + encodeURIComponent(live.revision))).json();
+    assert.equal(lightweight.unchanged, true);
+    assert.equal(lightweight.products, undefined);
+    assert.deepEqual(lightweight.jobs, live.jobs);
+    releaseLast();
     const deadline = Date.now() + 10000;
     while (store.read().jobs[0]?.status !== 'completed' && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
     const state = store.read();
@@ -46,6 +63,7 @@ test('a rejected seller group fails one item and continues the remaining batch',
     assert.deepEqual(state.products.map((product) => product.status), ['publish_failed', 'drafted', 'drafted']);
     assert.deepEqual(state.products.map((product) => product.selected), [true, false, false]);
   } finally {
+    releaseLast();
     await server.shutdownServer();
     SellerPublisher.prototype.publishProduct = original;
     fs.rmSync(root, { recursive: true, force: true });

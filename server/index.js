@@ -15,6 +15,7 @@ import {
   SellerPublisher
 } from './publisher.js';
 import { applyPublishedProductReference, copyMissingProductData, createPublishSnapshot, findAndReplaceProduct, recordProductMutation, syncProductModel } from './product-model.js';
+import { publishCounts, recordPublishOutcome } from './publish-progress.js';
 import { buildAlibabaPublishUrl, createPublishPlan, normalizeCategoryId, productCategory, publishBindings, rememberPublishBinding, resolvePublishRoute } from './category-routing.js';
 import { createPublishedReferenceTemplate, findPublishedReferenceRepair } from './publish-reference.js';
 import { userFacingError } from './browser-error.js';
@@ -257,7 +258,12 @@ function publicState() {
   return { ...state, browser: publisher.status(), collectorBrowser: collector.status() };
 }
 
-app.get('/api/state', (_request, response) => response.json(publicState()));
+app.get('/api/state', (request, response) => {
+  const revision = store.revision();
+  response.json(request.query.revision === revision
+    ? { unchanged: true, revision, jobs: store.read((state) => state.jobs), browser: publisher.status(), collectorBrowser: collector.status() }
+    : { ...publicState(), revision });
+});
 
 function deleteEntities(selection) {
   const snapshot = structuredClone(store.read());
@@ -388,12 +394,12 @@ async function startCollectJob(jobId) {
     });
     return;
   }
-  const options = { ...(job.metadata?.options || {}), shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read().jobs.find((item) => item.id === jobId)?.status) };
+  const options = { ...(job.metadata?.options || {}), shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status)) };
   store.patchJob(jobId, { status: 'running', message: `开始采集“${group.name}”，已保存的商品会保留` });
   try {
     const products = await collector.collectGroup(group.url, (progress) => {
       if (progress.product) saveCollectedProduct(group.id, progress.product, options);
-      const currentStatus = store.read().jobs.find((item) => item.id === jobId)?.status;
+      const currentStatus = store.read((state) => state.jobs.find((item) => item.id === jobId)?.status);
       const preservedStatus = ['pause_requested', 'paused', 'cancelled'].includes(currentStatus) ? currentStatus : 'running';
       store.patchJob(jobId, {
         // Do not overwrite a pause request while the current detail finishes.
@@ -478,7 +484,7 @@ async function startLinkCollectJob(jobId) {
   const options = { ...metadata.options, collectionMethod: metadata.collectionMethod,
     prepareProduct: async (product) => ({ ...product, ...await processingPatch(product), _collectedSnapshot: product }),
     completedKeys: [...completedKeys],
-    shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read().jobs.find((item) => item.id === jobId)?.status),
+    shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status)),
   };
   try {
     store.patchJob(jobId, { status: 'running', message: '正在读取来源商品' });
@@ -777,7 +783,8 @@ app.post('/api/products/process', async (request, response, next) => {
     const updated = store.update((draft) => {
       const current = draft.products.find((item) => item.id === id);
       if (!current || JSON.stringify(current) !== revision) throw Object.assign(new Error('商品资料已变更，请重新加工'), { status: 409 });
-      if (process.env.KUA_YIPU_DESKTOP === '1' && !globalThis.__KUA_YIPU_AUTHORIZATION?.valid()) throw Object.assign(new Error('授权校验中断，加工结果未保存'), { status: 401 });
+      // The request was authorized before processing. Preserve its completed
+      // result even when authorization expires while the provider responds.
       recordProductMutation(current, patch, { actor: 'user', action: 'marketplace-processing' });
       return { id, warnings: current.processingWarnings || [] };
     });
@@ -856,6 +863,7 @@ async function runPublishJob(jobId) {
 
       let product = state.products.find((item) => item.id === productIds[index]);
       if (!product) {
+        store.update((draft) => recordPublishOutcome(draft, jobId, productIds[index], { status: 'skipped' }, index + 1));
         store.patchJob(jobId, { progress: index + 1, total, message: `已跳过不存在的商品 ${index + 1}/${total}` });
         continue;
       }
@@ -864,7 +872,7 @@ async function runPublishJob(jobId) {
         const target = draft.products.find((item) => item.id === product.id);
         if (target) Object.assign(target, product, { updatedAt: new Date().toISOString() });
       });
-      store.patchJob(jobId, { status: 'running', progress: index, total, message: `正在处理 ${index + 1}/${total}：${product.title}` });
+      store.patchJob(jobId, { status: 'running', progress: index, total, currentProductId: product.id, message: `正在处理 ${index + 1}/${total}：${product.title}` });
       try {
         if (sourcePlatform(product) === 'alibaba.com' && (!hasCompleteSourceData(product) || !resolvePublishRoute(product, state.settings).url)) {
           store.patchJob(jobId, { message: `正在补全商品资料 ${index + 1}/${total}：${product.title}` });
@@ -875,8 +883,8 @@ async function runPublishJob(jobId) {
           });
           product = { ...product, ...enriched };
         }
-        const settings = store.read().settings;
-        if (['pause_requested', 'paused'].includes(store.read().jobs.find((item) => item.id === jobId)?.status)) {
+        const settings = store.read((state) => state.settings);
+        if (['pause_requested', 'paused'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status))) {
           throw Object.assign(new Error('任务已暂停，已完成数据已保存'), { code: 'PUBLISH_PAUSED' });
         }
         const sourceErrors = crossPlatformPublishErrors(product);
@@ -916,13 +924,14 @@ async function runPublishJob(jobId) {
             syncProductModel(target);
           }
           rememberPublishBinding(draft.settings, { ...route, verifiedAt: new Date().toISOString(), source: 'verified' });
+          recordPublishOutcome(draft, jobId, product.id, result, index + 1);
         });
         publisher.clearPublishStop(jobId);
         store.patchJob(jobId, { progress: index + 1, total, message: `已处理 ${index + 1}/${total}：${product.title}` });
       } catch (error) {
         const message = userFacingError(error);
         const requiresHuman = /captcha|verify|人机验证|安全验证|滑块|登录(?:状态)?(?:已)?失效|人工验证/i.test(message);
-        const currentJobStatus = store.read().jobs.find((item) => item.id === jobId)?.status;
+        const currentJobStatus = store.read((state) => state.jobs.find((item) => item.id === jobId)?.status);
         const pauseRequested = ['pause_requested', 'paused'].includes(currentJobStatus) || error.code === 'PUBLISH_PAUSED';
         // Preserve the visible publishing page on both success and failure so
         // the user can inspect Alibaba's exact validation state. It can be
@@ -944,7 +953,7 @@ async function runPublishJob(jobId) {
         // product from the same category once, keeping the target's identity,
         // price, inventory and media untouched, then let the normal loop retry
         // the exact item with the repaired publish template.
-        const jobState = store.read().jobs.find((item) => item.id === jobId);
+        const jobState = store.read((state) => state.jobs.find((item) => item.id === jobId));
         const retries = jobState?.metadata?.autoReferenceRetries && typeof jobState.metadata.autoReferenceRetries === 'object'
           ? jobState.metadata.autoReferenceRetries : {};
         const requiredFields = [...new Set([...(error.requiredFields || []), ...requiredLabelsFromError(message)])];
@@ -984,6 +993,7 @@ async function runPublishJob(jobId) {
         // A product-level validation or upload error must not discard the
         // remaining batch. Keep the failed item visible and continue with the
         // next product; the final job status summarizes the failures.
+        store.update((draft) => recordPublishOutcome(draft, jobId, product.id, { status: 'failed', message }, index + 1));
         store.patchJob(jobId, {
           status: 'running', progress: index + 1, total,
           message: `第 ${index + 1}/${total} 件失败，继续处理下一件：${product.title}`
@@ -991,11 +1001,10 @@ async function runPublishJob(jobId) {
         continue;
       }
     }
-    const finalState = store.read();
-    const failedCount = productIds.filter((id) => finalState.products.find((item) => item.id === id)?.status === 'publish_failed').length;
+    const counts = publishCounts(store.read((state) => state.jobs.find((item) => item.id === jobId)));
     store.patchJob(jobId, {
-      status: 'completed', progress: total, total,
-      message: failedCount ? `上架任务完成，成功 ${total - failedCount} 件，失败 ${failedCount} 件（可查看每件商品的具体原因）` : `上架任务完成，共处理 ${total} 件`
+      status: 'completed', progress: total, total, currentProductId: null,
+      message: `上架任务完成，成功 ${counts.success} 件，失败 ${counts.failed} 件${counts.skipped ? `，跳过 ${counts.skipped} 件` : ''}`
     });
   } catch (error) {
     store.patchJob(jobId, { status: 'failed', message: userFacingError(error) });

@@ -93,12 +93,14 @@ try {
   assert.equal((await main.evaluate(() => window.kuaYipu.connection())).state, 'connected');
   assert.equal(await main.evaluate(async () => (await fetch('/api/collection-folders', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"name":"restored"}' })).status), 201);
   authorized = false;
-  const closed = main.waitForEvent('close');
   await main.evaluate(() => window.kuaYipu.heartbeat()).catch(() => {});
-  await closed;
+  assert.equal(main.isClosed(), false);
+  assert.equal((await main.evaluate(() => window.kuaYipu.connection())).state, 'revoked');
+  assert.equal(await main.evaluate(async () => (await fetch('/api/state')).status), 200);
+  assert.equal(await main.evaluate(async () => (await fetch('/api/collection-folders', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"name":"revoked"}' })).status), 401);
   assert.equal((await fetch(`http://127.0.0.1:${port}/api/state`)).status, 401);
   assert.equal(codeLogins, 1);
-  console.log(JSON.stringify({ ok: true, screenshots: root, verified: ['signed-in-identity', 'heartbeat-before-entry', 'renderer-api-gate', 'encrypted-session-export', 'encrypted-activation-code', 'temporary-outage-keeps-workbench', 'grace-expiry-preserves-workbench-and-blocks-writes', 'reconnection-without-login', 'revocation-closes-workbench'] }));
+  console.log(JSON.stringify({ ok: true, screenshots: root, verified: ['signed-in-identity', 'heartbeat-before-entry', 'renderer-api-gate', 'encrypted-session-export', 'encrypted-activation-code', 'temporary-outage-keeps-workbench', 'grace-expiry-preserves-workbench-and-blocks-writes', 'reconnection-without-login', 'revocation-preserves-workbench-and-blocks-writes'] }));
 } finally {
   if (app) { try { execFileSync('taskkill', ['/PID', String(app.process().pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }); } catch {} }
   authServer.closeAllConnections();

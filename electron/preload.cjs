@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('kuaYipu', {
   enter: () => ipcRenderer.invoke('auth:enter'),
   session: () => ipcRenderer.invoke('auth:session'),
   heartbeat: () => ipcRenderer.invoke('auth:heartbeat'),
+  showLogin: () => ipcRenderer.invoke('auth:show-login'),
   connection: () => ipcRenderer.invoke('auth:connection'),
   openSource: (url) => ipcRenderer.invoke('alibaba:open-source', url)
 });

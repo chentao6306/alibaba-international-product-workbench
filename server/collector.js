@@ -351,7 +351,6 @@ export class ShopCollector {
             sourcePrice: price, price, currencySymbol: item.currencySymbol || '¥', moq: item.moq || '',
             stock: 100, description: '', attributes: [], skus: []
           });
-          if (delaySeconds) await page.waitForTimeout(delaySeconds * 1000);
         }
         onProgress({ stage: 'listing', page: pageNumber, found: items.size, startPage, endPage, destinationCountry: options.destinationCountry || '' });
         let next = '';
@@ -369,6 +368,7 @@ export class ShopCollector {
         }
         if (!next || next === nextUrl) break;
         nextUrl = next;
+        if (pageNumber < endPage && delaySeconds) await page.waitForTimeout(delaySeconds * 1000);
       }
 
       const products = [...items.values()];
@@ -384,7 +384,7 @@ export class ShopCollector {
         products[index] = await this.readProductDetail(page, products[index]);
         const keepGoing = onProgress({ stage: 'detail', current: index + 1, total: products.length, found: products.length, product: products[index] });
         if (keepGoing === false) { const error = new Error('COLLECT_PAUSED'); error.code = 'COLLECT_PAUSED'; throw error; }
-        if (delaySeconds) await page.waitForTimeout(delaySeconds * 1000);
+        if (index + 1 < products.length && delaySeconds) await page.waitForTimeout(delaySeconds * 1000);
       }
       return products;
     });
@@ -413,7 +413,7 @@ export class ShopCollector {
       if (onProgress({ stage: 'detail', current: index + 1, total: links.length, product, error, key, url: link.url }) === false) {
         throw Object.assign(new Error('已暂停采集'), { code: 'COLLECT_PAUSED' });
       }
-      if (Number(options.delaySeconds) > 0) await new Promise((resolve) => setTimeout(resolve, Number(options.delaySeconds) * 1000));
+      if (index + 1 < links.length && Number(options.delaySeconds) > 0) await new Promise((resolve) => setTimeout(resolve, Number(options.delaySeconds) * 1000));
     }
     return products;
   }

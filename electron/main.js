@@ -31,6 +31,7 @@ let alibabaWindow;
 const alibabaWindows = new Set();
 const registeredAlibabaWindows = new WeakSet();
 let currentSession = null;
+let readableAccount = '';
 let enterSystemPromise = null;
 let shutdownStarted = false;
 let shutdownComplete = false;
@@ -560,7 +561,9 @@ async function enterSystem() {
     mainWindow.show();
     mainWindow.focus();
     const startupTimeout = new Promise((_, reject) => setTimeout(() => reject(new Error('本地工作台服务启动超时，请重试')), 15000));
-    Promise.race([ensureLocalServer(), startupTimeout]).then(() => loadWorkbench(mainWindow)).catch((error) => showWorkbenchError(mainWindow, error));
+    Promise.race([ensureLocalServer(), startupTimeout]).then(() => {
+      if (mainWindow.webContents.getURL() !== mainWindowUrl()) return loadWorkbench(mainWindow);
+    }).catch((error) => showWorkbenchError(mainWindow, error));
   } else {
     createMainWindow().catch((error) => showWorkbenchError(mainWindow, error));
   }
@@ -640,7 +643,7 @@ handleLocalIpc('auth:login', async (_event, payload) => {
   let installationId = fs.existsSync(deviceFile) ? fs.readFileSync(deviceFile, 'utf8').trim() : '';
   if (!/^[a-f0-9-]{36}$/i.test(installationId)) { installationId = crypto.randomUUID(); fs.writeFileSync(deviceFile, installationId); }
   const deviceId = crypto.createHash('sha256').update(`${installationId}|${os.hostname()}|${username}`).digest('hex');
-  const authorization = await authRequest('/api/client/login', { username, deviceId, activationCode, appVersion: app.getVersion(), deviceName: `${os.hostname()} (${process.platform}-${process.arch})` });
+  const authorization = await authRequest('/api/client/login', { username, deviceId, activationCode, connectionPolicyVersion: 2, appVersion: app.getVersion(), deviceName: `${os.hostname()} (${process.platform}-${process.arch})` });
   if (!authorization.authorized || !authorization.token) throw new Error('登录失败');
   if (suppliedCode) activationCredentials(username, suppliedCode);
   currentSession = { ...authorization, username, deviceId, checkedAt: Date.now() };
@@ -660,13 +663,13 @@ handleLocalIpc('auth:login', async (_event, payload) => {
 handleLocalIpc('auth:session', () => currentSession?.verified && authorizationLease.valid() ? { username: currentSession.username, expiresAt: currentSession.expiresAt } : null);
 
 function revokeLocalSession() {
+  if (currentSession?.verified) readableAccount = currentSession.username;
   authorizationLease.clear();
   currentSession = null;
-  authorizationConnection = { state: 'revoked', message: '软件授权已失效，请重新登录' };
-  serverModulePromise?.then((module) => module.suspendAuthorizedWork?.()).catch(() => {});
+  authorizationConnection = { state: 'revoked', message: '软件授权已失效，任务和工作台已保留，请重新登录' };
+  serverModulePromise?.then((module) => module.suspendAuthorizedWork?.({ graceful: true })).catch(() => {});
   if (isWindowAlive(mainWindow)) {
     if (!isWindowAlive(loginWindow)) createLoginWindow();
-    mainWindow.destroy();
   }
 }
 
@@ -678,6 +681,7 @@ function pauseDisconnectedWork() {
 }
 
 handleLocalIpc('auth:connection', () => ({ ...authorizationConnection, remainingSeconds: authorizationLease.remainingSeconds() }));
+handleLocalIpc('auth:show-login', () => { if (!isWindowAlive(loginWindow)) createLoginWindow(); else loginWindow.show(); });
 
 async function checkAuthorization() {
   if (heartbeatPromise) return heartbeatPromise;
@@ -690,7 +694,14 @@ async function refreshAuthorization() {
   const checkedSession = currentSession;
   const started = performance.now();
   try {
-    const result = await authRequest('/api/client/heartbeat', {}, checkedSession.token);
+    let result;
+    try { result = await authRequest('/api/client/heartbeat', {}, checkedSession.token); }
+    catch (error) {
+      const activationCode = activationCredentials(checkedSession.username);
+      if (error.status !== 401 || !checkedSession.verified || !activationCode || currentSession !== checkedSession) throw error;
+      result = await authRequest('/api/client/login', { username: checkedSession.username, deviceId: checkedSession.deviceId,
+        activationCode, connectionPolicyVersion: 2, appVersion: app.getVersion(), deviceName: `${os.hostname()} (${process.platform}-${process.arch})` });
+    }
     if (currentSession !== checkedSession) return { authorized: Boolean(currentSession) };
     authorizationLease.renew(result, started);
     currentSession = { ...currentSession, token: result.token || currentSession.token, expiresAt: result.expiresAt };
@@ -982,7 +993,7 @@ globalThis.__KUA_YIPU_SELLER_BRIDGE = {
   }
 };
 
-globalThis.__KUA_YIPU_AUTHORIZATION = { valid: () => Boolean(currentSession?.verified && authorizationLease.valid()), canRead: () => Boolean(currentSession?.verified) };
+globalThis.__KUA_YIPU_AUTHORIZATION = { valid: () => Boolean(currentSession?.verified && authorizationLease.valid()), canRead: () => Boolean(currentSession?.verified || readableAccount) };
 globalThis.__KUA_YIPU_SECURE_STORAGE = {
   encrypt: (value) => {
     if (!safeStorage.isEncryptionAvailable()) throw new Error('系统无法加密 API 密钥');

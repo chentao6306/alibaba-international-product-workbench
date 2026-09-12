@@ -502,3 +502,7 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--orange); }
   .collection-task-row { grid-template-columns: minmax(0, 1fr) 58px 64px; gap: 8px; padding: 12px; }
   .collection-task-status { font-size: 12px; }
 }
+.publish-counts { display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 10px 0; font-size: 14px; font-variant-numeric: tabular-nums; }
+.publish-counts span { white-space: nowrap; }
+.publish-counts .success { color: #12776d; }
+.publish-counts .failure { color: #bf302e; }

@@ -66,7 +66,8 @@ async function loadAccounts() {
     const index = button.dataset.index;
     const control = document.createElement('button');
     control.className = 'secondary'; control.dataset.action = 'connection'; control.dataset.index = index;
-    control.textContent = `断线宽限 ${licenses[index].offline_grace_minutes ?? 5} 分钟`;
+    const minutes = licenses[index].offline_grace_minutes ?? 1440;
+    control.textContent = `断线保持 ${minutes % 1440 === 0 ? `${minutes / 1440} 天` : `${minutes} 分钟`}`;
     button.after(control);
   });
   $('licenses').querySelectorAll('[data-action]').forEach((button) => { button.onclick = () => openAction(licenses[button.dataset.index], button.dataset.action); });
@@ -79,10 +80,16 @@ function openAction(item, type, allowMultiDevice) {
   $('actionText').textContent = type === 'deleteNotice' ? `确认删除公告“${item.title}”？用户端同步后将移除这条公告。此操作无法撤销。` : type === 'delete' ? `确认删除用户“${item.alibaba_account}”？授权将失效，设备记录将清除，账号移入“已删除”。` : type === 'devices' ? `${item.alibaba_account}：${allowMultiDevice ? '允许多台电脑同时登录。' : '仅允许最后登录的设备继续使用，其他设备将在下次授权检查时退出。'}` : `${item.alibaba_account}${['pause', 'revoke'].includes(type) ? ' 的现有客户端将失去使用授权。' : ''}`;
   const adjusting = ['extend', 'reduce'].includes(type);
   $('connectionField').hidden = type !== 'connection'; $('offlineGraceMinutes').disabled = type !== 'connection';
-  $('offlineGraceMinutes').value = item.offline_grace_minutes ?? 5;
+  const minutes = item.offline_grace_minutes ?? 1440;
+  $('offlineGraceMinutes').querySelectorAll('[data-custom]').forEach((option) => option.remove());
+  if (![60, 1440, 4320, 21600].includes(minutes)) {
+    const option = new Option(`${minutes} 分钟（当前设置）`, String(minutes));
+    option.dataset.custom = 'true'; $('offlineGraceMinutes').append(option);
+  }
+  $('offlineGraceMinutes').value = minutes;
   if (type === 'connection') {
     $('actionHeading').textContent = '授权连接中断策略';
-    $('actionText').textContent = `${item.alibaba_account}：从最后一次成功校验开始计时，超过宽限后保留界面和进度并暂停后续任务。授权到期或停用仍失效。下次成功心跳生效，需要客户端 1.4.7 或更新版本。`;
+    $('actionText').textContent = `${item.alibaba_account}：在线时自动续期校验，断线后从最后一次成功校验开始计时。超过保持时间则保留界面和进度，暂停后续任务。授权到期仍失效，在线停用立即生效。天数设置需要客户端 1.4.9 或更新版本，旧版最多保持 1 小时。`;
   }
   if (type === 'credential') $('actionText').textContent = `${item.alibaba_account}：现有会话会失效。请先确认客户已安装 1.4.6 或更新版本，并将生成的新授权码交给客户。启用后不再允许旧版无授权码登录。`;
   $('extendField').hidden = !adjusting; $('extendDays').disabled = !adjusting;

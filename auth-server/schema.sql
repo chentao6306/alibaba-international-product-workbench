@@ -41,7 +41,18 @@ ALTER TABLE licenses ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
 ALTER TABLE licenses ADD COLUMN IF NOT EXISTS credential_required BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE licenses ADD COLUMN IF NOT EXISTS credential_hash TEXT;
 ALTER TABLE licenses ADD COLUMN IF NOT EXISTS credential_version INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE licenses ADD COLUMN IF NOT EXISTS offline_grace_minutes INTEGER NOT NULL DEFAULT 5 CHECK (offline_grace_minutes BETWEEN 1 AND 60);
+ALTER TABLE licenses ADD COLUMN IF NOT EXISTS offline_grace_minutes INTEGER NOT NULL DEFAULT 1440;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname='licenses_offline_grace_minutes_check' AND conrelid='licenses'::regclass) THEN
+    ALTER TABLE licenses DROP CONSTRAINT licenses_offline_grace_minutes_check;
+    UPDATE licenses SET offline_grace_minutes=1440 WHERE offline_grace_minutes=5
+      AND NOT EXISTS (SELECT 1 FROM license_events e WHERE e.license_id=licenses.id AND e.action='connection');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='licenses_connection_grace_days_check' AND conrelid='licenses'::regclass) THEN
+    ALTER TABLE licenses ADD CONSTRAINT licenses_connection_grace_days_check CHECK (offline_grace_minutes BETWEEN 1 AND 21600);
+  END IF;
+END $$;
+ALTER TABLE licenses ALTER COLUMN offline_grace_minutes SET DEFAULT 1440;
 CREATE TABLE IF NOT EXISTS admin_sessions (
   id UUID PRIMARY KEY,
   admin_id UUID NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,

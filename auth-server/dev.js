@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { clientAllowed, licenseState, pagination, announcementInput, licenseFilters, matchesLicenseFilters } from './policy.js';
 import { configureHttpSecurity } from './http-security.js';
-import { createActivationCredential, validActivation, publicLicense, clientSessionAllowed, clientClaims, tokenCodec, requireCredentialTransport, offlineGraceMinutes } from './security.js';
+import { createActivationCredential, validActivation, publicLicense, clientSessionAllowed, clientSession, tokenCodec, requireCredentialTransport, offlineGraceMinutes } from './security.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -33,7 +33,7 @@ function writeState(state) {
 
 const { sign, verify } = tokenCodec(signingSecret);
 const adminSessions = new Map();
-const session = (license, deviceId) => ({ authorized: true, serverTime: new Date().toISOString(), expiresAt: license.expires_at, offlineGraceSeconds: offlineGraceMinutes(license.offline_grace_minutes) * 60, token: sign(clientClaims(license, deviceId)) });
+const session = (license, deviceId, version) => clientSession(license, deviceId, sign, version);
 
 const bearer = (request) => verify(request.headers.authorization?.replace(/^Bearer\s+/i, ''));
 const requireAdmin = (request, response, next) => {
@@ -73,7 +73,7 @@ app.post('/api/client/login', (request, response) => {
   Object.assign(login, { device_name: String(request.body?.deviceName || ''), app_version: String(request.body?.appVersion || ''), ip_address: request.ip, last_seen_at: timestamp() });
   addEvent(state, license.id, 'client-login', account, { deviceId });
   writeState(state);
-  response.json(session(license, deviceId));
+  response.json(session(license, deviceId, request.body.connectionPolicyVersion));
 });
 
 app.post('/api/client/heartbeat', (request, response) => {
@@ -89,7 +89,7 @@ app.post('/api/client/heartbeat', (request, response) => {
   const login = state.logins.find((item) => item.alibaba_account === auth.account && item.device_id === auth.deviceId);
   if (login) login.last_seen_at = timestamp();
   writeState(state);
-  response.json(session(license, auth.deviceId));
+  response.json(session(license, auth.deviceId, auth.connectionPolicyVersion));
 });
 
 app.get('/api/admin/licenses', requireAdmin, (request, response) => {

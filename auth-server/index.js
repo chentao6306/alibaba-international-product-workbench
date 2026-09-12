@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { clientAllowed, licenseState, pagination, announcementInput, licenseFilters } from './policy.js';
 import { configureHttpSecurity } from './http-security.js';
-import { createActivationCredential, validActivation, publicLicense, clientSessionAllowed, clientClaims, tokenCodec, requireCredentialTransport, offlineGraceMinutes } from './security.js';
+import { createActivationCredential, validActivation, publicLicense, clientSessionAllowed, clientSession, tokenCodec, requireCredentialTransport, offlineGraceMinutes } from './security.js';
 import { promisify } from 'node:util';
 
 const app = express();
@@ -36,7 +36,7 @@ const requireAdmin = async (request, response, next) => {
   if (!stored || stored.password_fingerprint !== passwordFingerprint(stored.password_hash)) return response.status(401).json({ error: '管理员登录已失效' });
   request.admin = auth; next();
 };
-const session = (license, deviceId) => ({ authorized: true, serverTime: new Date().toISOString(), expiresAt: license.expires_at, offlineGraceSeconds: offlineGraceMinutes(license.offline_grace_minutes) * 60, token: sign(clientClaims(license, deviceId)) });
+const session = (license, deviceId, version) => clientSession(license, deviceId, sign, version);
 async function transaction(work) {
   const client = await pool.connect();
   try { await client.query('BEGIN'); const result = await work(client); await client.query('COMMIT'); return result; }
@@ -79,7 +79,7 @@ app.post('/api/client/login', async (request, response) => {
     if (!license.allow_multi_device) await client.query('UPDATE licenses SET active_device_id=$2 WHERE id=$1', [license.id, deviceId]);
     await client.query(`INSERT INTO client_logins (id,alibaba_account,device_id,device_name,app_version,ip_address,last_seen_at) VALUES ($1,$2,$3,$4,$5,$6,now()) ON CONFLICT (alibaba_account,device_id) DO UPDATE SET device_name=EXCLUDED.device_name,app_version=EXCLUDED.app_version,ip_address=EXCLUDED.ip_address,last_seen_at=now()`, [id(), account, deviceId, normalize(request.body?.deviceName).slice(0, 200), normalize(request.body?.appVersion).slice(0, 50), request.ip]);
     await event(client, license.id, 'client-login', account, { deviceId });
-    return session(license, deviceId);
+    return session(license, deviceId, request.body.connectionPolicyVersion);
   });
   response.json(result);
 });
@@ -95,7 +95,7 @@ app.post('/api/client/heartbeat', async (request, response) => {
     if (!clientAllowed(license, auth.deviceId)) throw fail('此账号已设为单设备登录，当前会话已被另一台设备替换', 403);
     if (!license.allow_multi_device && !license.active_device_id) await client.query('UPDATE licenses SET active_device_id=$2 WHERE id=$1', [license.id, auth.deviceId]);
     await client.query('UPDATE client_logins SET last_seen_at=now() WHERE alibaba_account=$1 AND device_id=$2', [auth.account, auth.deviceId]);
-    return session(license, auth.deviceId);
+    return session(license, auth.deviceId, auth.connectionPolicyVersion);
   });
   response.json(result);
 });

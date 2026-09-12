@@ -76,11 +76,16 @@ test('server-configured connection grace is bounded by license expiry and never 
   lease.renew({ ...response, expiresAt: '2026-09-21T00:00:20Z' });
   elapsed += 20001;
   assert.equal(lease.valid(), false); assert.equal(lease.expired(), true);
-  for (const invalid of [0, 59, 3601, '300', null, NaN]) assert.throws(() => lease.renew({ ...response, offlineGraceSeconds: invalid }));
+  for (const invalid of [0, 59, 1296001, '300', null, NaN]) assert.throws(() => lease.renew({ ...response, offlineGraceSeconds: invalid }));
   for (const status of [401, 403, 400, 426]) assert.equal(isRetryableAuthorizationError({ status }), false);
   for (const status of [408, 429, 500, 502, 503, 504]) assert.equal(isRetryableAuthorizationError({ status }), true);
   assert.equal(isRetryableAuthorizationError({ retryable: true }), true);
   assert.equal(isRetryableAuthorizationError(new Error('invalid authorization')), false);
+  lease.renew({ ...response, offlineGraceSeconds: 15 * 86400 });
+  assert.equal(lease.remainingSeconds(), 86400);
+  elapsed += 86400001;
+  assert.equal(lease.valid(), false);
+  assert.equal(lease.expired(), true);
 });
 
 test('stores integration secrets encrypted and fails closed without the platform encryption provider', () => {

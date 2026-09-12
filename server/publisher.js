@@ -3577,7 +3577,7 @@ export class SellerPublisher {
         enriched.push(enrichedProduct);
         const keepGoing = onProgress(index + 1, products.length, enriched[index]);
         if (keepGoing === false) { const error = new Error('COLLECT_PAUSED'); error.code = 'COLLECT_PAUSED'; throw error; }
-        if (Number(options.delaySeconds || 0) > 0) await page.waitForTimeout(Number(options.delaySeconds) * 1000);
+        if (index + 1 < products.length && Number(options.delaySeconds || 0) > 0) await page.waitForTimeout(Number(options.delaySeconds) * 1000);
       }
       return enriched;
     } finally {
@@ -3598,10 +3598,12 @@ export class SellerPublisher {
     // bounded window to populate before extracting it. This replaces the old
     // unconditional iframe wait that added 8 seconds even when no iframe
     // existed.
-    await page.locator(SOURCE_DESCRIPTION_SELECTOR).first().scrollIntoViewIfNeeded().catch(() => {});
-    await page.locator('[data-testid="module-attribute-row"], [data-module-name*="attribute" i], [data-module-name*="specification" i], table').first().scrollIntoViewIfNeeded().catch(() => {});
-    await page.locator('[data-module-name="module_product_specification"] iframe, iframe[src*="descIframe"]')
-      .first().scrollIntoViewIfNeeded().catch(() => {});
+    for (const selector of [SOURCE_DESCRIPTION_SELECTOR,
+      '[data-testid="module-attribute-row"], [data-module-name*="attribute" i], [data-module-name*="specification" i], table',
+      '[data-module-name="module_product_specification"] iframe, iframe[src*="descIframe"]']) {
+      const section = page.locator(selector).first();
+      if (await section.count()) await section.scrollIntoViewIfNeeded({ timeout: 1000 }).catch(() => {});
+    }
     await page.waitForTimeout(450);
     if (/login|passport/i.test(page.url())) {
       // Alibaba may require authentication for an individual detail page even
@@ -4399,25 +4401,25 @@ export class SellerPublisher {
     markSourceAttributes(['品牌名称', 'brand', 'brand name'], brandFilled);
 
     const featureValue = attributeValue(product, '功能/特性', 'Feature', 'Features');
-    const featureFilled = await fillFirst(page, ['input[name="p-373265001"]'], featureValue)
-      || await fillChoice(page, await fieldByAnyLabel(page, ['功能/特性', '功能', '特性', 'Feature', 'Features']), featureValue);
+    const featureFilled = featureValue && (await fillFirst(page, ['input[name="p-373265001"]'], featureValue)
+      || await fillChoice(page, await fieldByAnyLabel(page, ['功能/特性', '功能', '特性', 'Feature', 'Features']), featureValue));
     markSourceAttributes(['功能/特性', '功能', '特性', 'feature', 'features'], featureFilled);
 
     const functionValue = attributeValue(product, '功能', 'Function', 'function');
-    const functionFilled = await fillRequiredChoice(
+    const functionFilled = functionValue && await fillRequiredChoice(
       ['功能', 'Function', '功能/特性', 'Features'],
       functionValue
     );
     markSourceAttributes(['功能', 'Function', 'function'], functionFilled);
 
     const portValue = attributeValue(product, '端口', '接口', 'Port', 'port');
-    const portFilled = await fillRequiredChoice(['端口', '接口', 'Port'], portValue);
+    const portFilled = portValue && await fillRequiredChoice(['端口', '接口', 'Port'], portValue);
     markSourceAttributes(['端口', '接口', 'Port', 'port'], portFilled);
 
     onProgress('填写材质');
     const materialValue = attributeValue(product, '材料', '材质', 'Material');
-    const materialFilled = await fillFirst(page, ['input[name="p-390873113"]'], materialValue)
-      || await fillChoice(page, await fieldByAnyLabel(page, ['材料', '材质', 'Material']), materialValue);
+    const materialFilled = materialValue && (await fillFirst(page, ['input[name="p-390873113"]'], materialValue)
+      || await fillChoice(page, await fieldByAnyLabel(page, ['材料', '材质', 'Material']), materialValue));
     markSourceAttributes(['材料', '材质', 'material'], materialFilled);
 
     const reserved = /^(?:型号|model(?: number)?|品牌名称|brand(?: name)?|功能\/特性|功能|特性|features?|function|端口|接口|port|材料|材质|material|颜色|colou?r|产地|place of origin|产品类型|product type|销售单位|selling units?|单个包装尺寸|single package size|单个产品毛重|single gross weight)$/i;
@@ -5314,6 +5316,9 @@ export class SellerPublisher {
     ));
     const finalColorRequired = finalColorValues.length > 0;
     if (finalUsesColorSaleSpec && finalHasColorImage && finalColorRequired) {
+      if (!await ensureSaleAttributeSelected(page, finalColorId)) {
+        throw new Error('国际站颜色规格提交前复核失败：颜色规格未能启用');
+      }
       const colorFilled = await fillColorSpec(page, finalColorValues);
       const colorImageUploaded = colorFilled && await enableSpecImageUpload(
         page,
