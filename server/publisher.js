@@ -684,9 +684,9 @@ export async function waitForActionResult(page, action, mode, originalUrl) {
     await requireClearPostingOverlays(page);
     const requiredAttributes = await captureCategoryAttributes(page);
     await action.click();
-    const deadline = Date.now() + 15000;
+    let deadline = Date.now() + 15000;
     while (Date.now() < deadline) {
-      await waitForHumanVerification(page, { timeout: 300000 });
+      if (await waitForHumanVerification(page)) deadline = Date.now() + 15000;
       await page.waitForTimeout(400);
       const url = page.url();
       const feedback = await visibleFeedback(page);
@@ -3334,7 +3334,7 @@ export class SellerPublisher {
       // visible. This path is only used outside the Electron bridge.
       if (!await hasExplicitHumanChallenge(page)) return;
       await revealPage(page);
-      await waitForHumanVerification(page, { timeout: 300000 });
+      await waitForHumanVerification(page);
     } finally {
       await context.close().catch(() => {});
     }
@@ -3735,7 +3735,7 @@ export class SellerPublisher {
     await page.goto(base.sourceUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
     await page.waitForTimeout(400);
-    await waitForHumanVerification(page, { timeout: 300000 });
+    await waitForHumanVerification(page);
     await page.waitForTimeout(250);
     // Product attributes and the rich description are lazy-rendered on many
     // Alibaba templates. Trigger the section and allow the DOM a short,
@@ -3760,7 +3760,7 @@ export class SellerPublisher {
       await detailIframe.first().waitFor({ state: 'attached', timeout: 3000 }).catch(() => {});
     }
     await page.waitForTimeout(350);
-    await waitForHumanVerification(page, { timeout: 300000 });
+    await waitForHumanVerification(page);
     const detailDataScript = await page.evaluate(() => [...document.scripts]
       .map((script) => script.textContent || '')
       .find((text) => /(?:window\.)?detailData\s*=\s*\{/.test(text)) || '').catch(() => '');
@@ -5383,7 +5383,7 @@ export class SellerPublisher {
     reportStage('打开目标类目发布页');
     await gotoWithRetry(page, publishPageUrl, publishNavigation);
     await settlePage(page);
-    await waitForHumanVerification(page, { timeout: 300000 });
+    await waitForHumanVerification(page);
     // Electron owns the authenticated browser partition. Refresh its exported
     // cookies once more before classifying a login redirect, then retry the
     // publish navigation in the already-created Playwright context.
@@ -5392,7 +5392,7 @@ export class SellerPublisher {
       await syncAlibabaCookies(page.context());
       await gotoWithRetry(page, publishPageUrl, publishNavigation).catch(() => {});
       await settlePage(page);
-      await waitForHumanVerification(page, { timeout: 300000 });
+      await waitForHumanVerification(page);
     }
     if (/login|passport/i.test(page.url())) throw new Error('阿里巴巴国际站登录状态已失效，请重新登录');
     const expectedCategoryId = normalizeCategoryId(product.categoryId || product.sourceCategoryId);
@@ -5422,7 +5422,7 @@ export class SellerPublisher {
       await syncAlibabaCookies(page.context());
       await gotoWithRetry(page, publishPageUrl, publishNavigation);
       await settlePage(page);
-      await waitForHumanVerification(page, { timeout: 300000 });
+      await waitForHumanVerification(page);
     }
     if (!titleInput) {
       const shellText = compactText(await page.locator('body').innerText().catch(() => ''), 500);

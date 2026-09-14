@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright-core';
 import { readPrivateSession } from './private-session-storage.js';
+import { inspectVerificationDocument, verificationOptions, verificationPaused, waitForVerification } from './human-verification.js';
 
 const contextModes = new WeakMap();
 
@@ -207,13 +208,6 @@ export async function hidePage(page) {
   return setWindowState(page, 'normal', { x: -32000, y: -32000, width: 1280, height: 900 });
 }
 
-const HUMAN_CHALLENGE_SELECTORS = [
-  'iframe[src*="captcha" i]', 'iframe[src*="verify" i]',
-  '[id*="captcha" i]', '[class*="captcha" i]',
-  '.nc-container', '#nc_1_n1z', '[class*="baxia" i]',
-  '[class*="challenge" i]'
-].join(',');
-
 const HUMAN_CHALLENGE_TEXT = /请完成验证|请拖动滑块|滑动验证|滑块验证|人机验证|安全验证|安全校验|security verification|slide to verify|drag (?:the )?slider to verify|verify you are human|complete (?:the )?captcha|unusual traffic/i;
 
 export function isExplicitHumanVerificationSignal(text = '') {
@@ -227,12 +221,7 @@ export function isExplicitHumanVerificationSignal(text = '') {
  */
 export async function hasExplicitHumanChallenge(page) {
   if (!page || page.isClosed()) return false;
-  const text = await page.locator('body').innerText().catch(() => '');
-  const visibleChallenge = await page.locator(HUMAN_CHALLENGE_SELECTORS).evaluateAll((nodes) => nodes.some((node) => {
-    const style = window.getComputedStyle(node);
-    return style.display !== 'none' && style.visibility !== 'hidden' && Boolean(node.getClientRects().length);
-  })).catch(() => false);
-  return visibleChallenge || isExplicitHumanVerificationSignal(text);
+  return page.evaluate(inspectVerificationDocument).then((state) => state.challenge).catch(() => false);
 }
 
 export async function isHumanVerificationPage(page) {
@@ -242,6 +231,9 @@ export async function isHumanVerificationPage(page) {
 }
 
 export async function waitForHumanVerification(page, options = {}) {
+  const inherited = verificationOptions();
+  const shouldStop = () => page.isClosed() || options.shouldStop?.() || inherited.shouldStop?.();
+  const onWaiting = (message) => (options.onWaiting || inherited.onWaiting)?.(message);
   // Alibaba's punishment page often paints after domcontentloaded. A single
   // immediate check races that render and causes the CAPTCHA document to be
   // parsed as a product page (all detail fields then appear empty).
@@ -264,23 +256,34 @@ export async function waitForHumanVerification(page, options = {}) {
     if (!challenge) return false;
     const bridge = globalThis.__KUA_YIPU_SELLER_BRIDGE;
     if (typeof bridge?.humanVerification === 'function') {
-      // The desktop bridge re-checks the page while hidden. It may return
-      // false when a transient redirect was not a real challenge; in that
-      // case do not reload or treat the ordinary product page as verified.
-      const handled = await bridge.humanVerification(page.url());
-      if (!handled) return false;
-      await syncAlibabaCookies(page.context());
-      await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-      await page.waitForTimeout(450);
-      // The seller session can take one navigation to apply its cookies. Do
-      // not let the parser run against a second CAPTCHA document.
-      if (await hasExplicitHumanChallenge(page)) {
-        const error = new Error('验证码处理后商品页仍不可用');
-        error.code = 'HUMAN_VERIFICATION_REQUIRED';
-        error.verificationUrl = page.url();
-        throw error;
+      const verificationUrl = page.url();
+      for (;;) {
+        if (shouldStop()) throw verificationPaused();
+        onWaiting('等待人工验证，已保存的采集进度保留');
+        const handled = await bridge.humanVerification(verificationUrl, { shouldStop, onWaiting });
+        if (!handled) break;
+        if (shouldStop()) throw verificationPaused();
+        await syncAlibabaCookies(page.context());
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+        await page.waitForTimeout(450);
+        if (await hasExplicitHumanChallenge(page)) continue;
+        let unreadyChecks = 0;
+        await waitForVerification({ inspect: async () => {
+          const state = await page.evaluate(inspectVerificationDocument).catch(() => ({ ready: false }));
+          unreadyChecks = state.ready ? 0 : unreadyChecks + 1;
+          if (unreadyChecks >= 3) {
+            const handled = await bridge.humanVerification(verificationUrl, { shouldStop, onWaiting });
+            if (!handled) throw verificationPaused();
+            await syncAlibabaCookies(page.context());
+            await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+            unreadyChecks = 0;
+            return { ready: false };
+          }
+          return state;
+        }, shouldStop,
+          isClosed: () => page.isClosed(), onWaiting });
+        return true;
       }
-      return true;
     }
     const error = new Error('需要人工验证');
     error.code = 'HUMAN_VERIFICATION_REQUIRED';
@@ -292,18 +295,29 @@ export async function waitForHumanVerification(page, options = {}) {
   // only actual captcha text below should interrupt automation.
   if (!challenge) return false;
   await revealPage(page);
-  const timeout = Math.max(30000, Number(options.timeout || 300000));
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    await page.waitForTimeout(1000);
-    if (!await isHumanVerificationPage(page)) {
-      await hidePage(page);
-      return true;
-    }
+  try {
+    await waitForVerification({
+      inspect: async () => {
+        const state = await page.evaluate(inspectVerificationDocument);
+        if (!state.ready) await page.evaluate(() => {
+          if (document.getElementById('workbench-human-actions')) return;
+          const toolbar = document.createElement('div');
+          toolbar.id = 'workbench-human-actions';
+          toolbar.style.cssText = 'position:fixed;top:8px;right:16px;z-index:2147483647;padding:10px;background:white;border:1px solid #aabbbc;border-radius:4px;display:flex;gap:12px;font:14px sans-serif';
+          const refresh = document.createElement('button');
+          refresh.textContent = '刷新页面'; refresh.onclick = () => location.reload();
+          toolbar.append(refresh); document.body.append(toolbar);
+        });
+        return state;
+      }, shouldStop, isClosed: () => page.isClosed(), onWaiting
+    });
+    await page.evaluate(() => document.getElementById('workbench-human-actions')?.remove()).catch(() => {});
+    await hidePage(page);
+    return true;
+  } catch (error) {
+    if (shouldStop()) throw verificationPaused();
+    throw error;
   }
-  const error = new Error('验证码未完成，采集已暂停，请完成验证后继续');
-  error.code = 'COLLECT_PAUSED';
-  throw error;
 }
 
 export async function settlePage(page) {

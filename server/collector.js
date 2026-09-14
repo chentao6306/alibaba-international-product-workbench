@@ -148,22 +148,16 @@ export class ShopCollector {
     });
     const page = context.pages()[0] || await context.newPage();
     this.verificationPage = page;
-    await page.setExtraHTTPHeaders(SOURCE_LANGUAGE_HEADERS);
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
-    // Inspect while hidden first. A transient redirect must not flash a
-    // desktop window; reveal only when a real visible challenge is present.
-    if (!await hasExplicitHumanChallenge(page)) {
+    try {
+      await page.setExtraHTTPHeaders(SOURCE_LANGUAGE_HEADERS);
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      if (!await hasExplicitHumanChallenge(page)) return;
+      await revealPage(page);
+      await waitForHumanVerification(page);
+    } finally {
       await this.resetContext();
       this.visible = false;
-      return;
     }
-    await revealPage(page);
-    const completed = await waitForHumanVerification(page, { timeout: 300000 });
-    if (!completed && await hasExplicitHumanChallenge(page)) {
-      throw new Error('人工验证未完成，请重试');
-    }
-    await this.resetContext();
-    this.visible = false;
   }
 
   status() {

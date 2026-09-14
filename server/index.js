@@ -20,6 +20,7 @@ import { buildAlibabaPublishUrl, createPublishPlan, normalizeCategoryId, product
 import { createPublishedReferenceTemplate, findPublishedReferenceRepair } from './publish-reference.js';
 import { userFacingError } from './browser-error.js';
 import { runWithProgressTimeout } from './progress-timeout.js';
+import { withVerificationContext } from './human-verification.js';
 import { collectionUrls, convertProductPrices, crossPlatformPublishErrors, parseCollectionUrl, sourcePlatform } from './source-platform.js';
 import { cleanupWorkspace } from './storage-cleanup.js';
 import { AnnouncementInbox } from './announcements.js';
@@ -395,10 +396,11 @@ async function startCollectJob(jobId) {
     return;
   }
   const options = { ...(job.metadata?.options || {}), shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status)) };
+  options.onWaiting = (message) => { if (!options.shouldStop()) store.patchJob(jobId, { message }); };
   store.patchJob(jobId, { status: 'running', message: `开始采集“${group.name}”，已保存的商品会保留` });
   const savedProducts = new Set();
   try {
-    const products = await collector.collectGroup(group.url, (progress) => {
+    const products = await withVerificationContext(options, () => collector.collectGroup(group.url, (progress) => {
       if (progress.product) {
         saveCollectedProduct(group.id, progress.product, options);
         savedProducts.add(progress.product.sourceId || progress.product.sourceUrl);
@@ -415,7 +417,7 @@ async function startCollectJob(jobId) {
         message: progress.stage === 'listing' ? `正在读取第 ${progress.page} 页（${progress.allPages ? '全部页' : `${options.startPage}-${options.endPage} 页`}），已发现 ${progress.found} 件${progress.storeTotal ? `，店铺显示 ${progress.storeTotal} 件` : ''}` : `正在读取详情 ${progress.current}/${progress.total}，已保存 ${progress.current} 件`
       });
       return !options.shouldStop();
-    }, options);
+    }, options));
     for (const raw of products) {
       if (!savedProducts.has(raw.sourceId || raw.sourceUrl)) saveCollectedProduct(group.id, raw, options);
     }
@@ -491,6 +493,7 @@ async function startLinkCollectJob(jobId) {
     completedKeys: [...completedKeys],
     shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status)),
   };
+  options.onWaiting = (message) => { if (!options.shouldStop()) store.patchJob(jobId, { message }); };
   try {
     store.patchJob(jobId, { status: 'running', message: '正在读取来源商品' });
     const progress = (event) => {
@@ -506,9 +509,9 @@ async function startLinkCollectJob(jobId) {
       });
       return !options.shouldStop();
     };
-    const products = metadata.collectionMethod === 'image-search'
-      ? await collector.collectSearch(metadata.links[0], progress, options)
-      : await collector.collectLinks(metadata.links, progress, options);
+    const products = await withVerificationContext(options, () => metadata.collectionMethod === 'image-search'
+      ? collector.collectSearch(metadata.links[0], progress, options)
+      : collector.collectLinks(metadata.links, progress, options));
     if (options.shouldStop()) throw Object.assign(new Error('已暂停采集'), { code: 'COLLECT_PAUSED' });
     store.patchJob(jobId, { status: failures.length === completedKeys.size ? 'failed' : 'completed', progress: completedKeys.size, total: completedKeys.size,
       message: `采集完成，成功 ${completedKeys.size - failures.length} 件，失败 ${failures.length} 件${failures.length ? `：${failures[0].error}` : ''}` });
@@ -698,12 +701,7 @@ app.post('/api/products/:id/refresh-detail', async (request, response, next) => 
     const state = store.read();
     const product = state.products.find((item) => item.id === request.params.id);
     if (!product) return next(Object.assign(new Error('没有找到该商品'), { status: 404 }));
-    const [enriched] = await Promise.race([
-      collector.enrichProducts([product]),
-      // A real Alibaba CAPTCHA is shown to the user and may reasonably take
-      // several minutes. Keep the API request alive through that interaction.
-      new Promise((_, reject) => setTimeout(() => reject(new Error('重新采集详情超时，请完成验证码后重试')), 330000))
-    ]);
+    const [enriched] = await collector.enrichProducts([product]);
     const updated = store.update((draft) => {
       const target = draft.products.find((item) => item.id === product.id);
       // A public listing can be readable while Alibaba blocks an individual
@@ -881,7 +879,10 @@ async function runPublishJob(jobId) {
       try {
         if (sourcePlatform(product) === 'alibaba.com' && (!hasCompleteSourceData(product) || !resolvePublishRoute(product, state.settings).url)) {
           store.patchJob(jobId, { message: `正在补全商品资料 ${index + 1}/${total}：${product.title}` });
-          const [enriched] = await collector.enrichProducts([product]);
+          const [enriched] = await withVerificationContext({
+            onWaiting: (message) => store.patchJob(jobId, { message }),
+            shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status))
+          }, () => collector.enrichProducts([product]));
           store.update((draft) => {
             const target = draft.products.find((item) => item.id === product.id);
             if (target) Object.assign(target, enriched, { status: 'ready', updatedAt: new Date().toISOString() });
@@ -902,7 +903,10 @@ async function runPublishJob(jobId) {
         // stage has made no progress for an extended period.
         const stageTimeoutMs = Math.max(60000, Number(process.env.KUA_YIPU_PUBLISH_STAGE_TIMEOUT_MS || 180000));
         const result = await runWithProgressTimeout(
-          (reportStage) => publisher.publishProduct(product, route.url, mode, route.category, jobId, reportStage, { sellerGroup: job.metadata?.sellerGroup }),
+          (reportStage) => withVerificationContext({
+            onWaiting: reportStage,
+            shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status))
+          }, () => publisher.publishProduct(product, route.url, mode, route.category, jobId, reportStage, { sellerGroup: job.metadata?.sellerGroup })),
           {
             timeoutMs: stageTimeoutMs,
             initialStage: '启动国际站发布流程',
@@ -937,7 +941,8 @@ async function runPublishJob(jobId) {
         const message = userFacingError(error);
         const requiresHuman = /captcha|verify|人机验证|安全验证|滑块|登录(?:状态)?(?:已)?失效|人工验证/i.test(message);
         const currentJobStatus = store.read((state) => state.jobs.find((item) => item.id === jobId)?.status);
-        const pauseRequested = ['pause_requested', 'paused'].includes(currentJobStatus) || error.code === 'PUBLISH_PAUSED';
+        if (currentJobStatus === 'cancelled') return;
+        const pauseRequested = ['pause_requested', 'paused'].includes(currentJobStatus) || ['PUBLISH_PAUSED', 'COLLECT_PAUSED'].includes(error.code);
         // Preserve the visible publishing page on both success and failure so
         // the user can inspect Alibaba's exact validation state. It can be
         // hidden later through the normal seller-browser lifecycle.

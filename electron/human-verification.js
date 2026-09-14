@@ -1,0 +1,87 @@
+import { BrowserWindow, WebContentsView, ipcMain } from 'electron';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { inspectVerificationDocument, waitForVerification, verificationPaused } from '../server/human-verification.js';
+
+const directory = path.dirname(fileURLToPath(import.meta.url));
+const sessions = new Map();
+const allowedUrl = (value) => {
+  try { const url = new URL(value); return url.protocol === 'https:' && /(^|\.)(?:alibaba\.com|1688\.com|aliexpress\.com|alicdn\.com)$/.test(url.hostname); }
+  catch { return false; }
+};
+
+ipcMain.handle('verification:refresh', (event) => {
+  const current = sessions.get(event.sender.id);
+  if (!current || event.senderFrame !== event.sender.mainFrame) throw new Error('验证窗口不可用');
+  current.refresh();
+});
+ipcMain.handle('verification:pause', (event) => {
+  const current = sessions.get(event.sender.id);
+  if (!current || event.senderFrame !== event.sender.mainFrame) throw new Error('验证窗口不可用');
+  current.pause();
+});
+
+export async function showHumanVerification({ url, partition, icon, shouldStop = () => false,
+  onWaiting = () => {}, saveSession = async () => {}, onCreated = () => {} }) {
+  if (!allowedUrl(url)) throw new Error('验证页面地址不受支持');
+  const window = new BrowserWindow({ width: 1280, height: 920, minWidth: 640, minHeight: 480,
+    show: false, title: '抄得快 - 人工验证', icon, autoHideMenuBar: true,
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true,
+      preload: path.join(directory, 'verification-preload.cjs') } });
+  const view = new WebContentsView({ webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true } });
+  window.contentView.addChildView(view);
+  const contents = view.webContents;
+  const resize = () => { const [width, height] = window.getContentSize(); view.setBounds({ x: 0, y: 64, width, height: Math.max(1, height - 64) }); };
+  window.on('resize', resize);
+  resize();
+  let paused = false;
+  let loadFailed = false;
+  let navigation = 0;
+  let refreshedAt = 0;
+  const closed = () => window.isDestroyed() || contents.isDestroyed();
+  const status = (message) => { if (!window.isDestroyed()) window.webContents.send('verification:status', message); };
+  const refresh = () => {
+    if (closed() || Date.now() - refreshedAt < 500) return;
+    refreshedAt = Date.now();
+    loadFailed = false;
+    contents.stop();
+    status('正在刷新验证页面');
+    const current = contents.getURL();
+    if (allowedUrl(current)) contents.reload();
+    else contents.loadURL(url).catch(() => {});
+  };
+  const pause = () => { paused = true; };
+  const senderId = window.webContents.id;
+  sessions.set(senderId, { refresh, pause });
+  window.on('close', (event) => { event.preventDefault(); status('等待完成验证；需要停止时可暂停任务'); window.show(); });
+  contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  contents.on('will-navigate', (event, target) => { if (!allowedUrl(target)) event.preventDefault(); });
+  contents.on('will-redirect', (event, target) => { if (!allowedUrl(target)) event.preventDefault(); });
+  contents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame) { navigation++; loadFailed = false; } });
+  contents.on('did-fail-load', (_event, code, _description, _url, isMainFrame) => {
+    if (isMainFrame && code !== -3) { loadFailed = true; status('页面加载失败，可刷新页面后重试'); }
+  });
+  contents.on('render-process-gone', () => { loadFailed = true; status('页面已停止响应，可刷新页面后重试'); });
+  const inspect = async () => {
+    if (loadFailed || contents.isLoadingMainFrame()) return { ready: false, error: loadFailed };
+    const version = navigation;
+    const state = await contents.executeJavaScript(`(${inspectVerificationDocument.toString()})()`);
+    return { ...state, ready: state.ready && version === navigation && !contents.isLoadingMainFrame(), url: `${state.url}#navigation-${navigation}` };
+  };
+  try {
+    await window.loadFile(path.join(directory, 'verification.html'));
+    window.show(); window.focus();
+    onCreated({ window, contents, refresh, inspect });
+    // did-fail-load tracks the active navigation; a replaced load rejects too.
+    contents.loadURL(url).catch(() => {});
+    await waitForVerification({ inspect, isClosed: closed, shouldStop: () => paused || shouldStop(),
+      onWaiting: (message) => { status(message); onWaiting(message); } });
+    if (paused || shouldStop()) throw verificationPaused();
+    await saveSession({ webContents: contents });
+    return true;
+  } finally {
+    sessions.delete(senderId);
+    if (!contents.isDestroyed()) contents.close();
+    if (!window.isDestroyed()) window.destroy();
+  }
+}
