@@ -67,7 +67,7 @@ export async function waitForVerification({ inspect, shouldStop = () => false, i
       if (shouldStop() || isClosed()) throw verificationPaused();
       if (!outcome) onWaiting('等待人工验证，已保存的采集进度保留');
     }
-    if (['COLLECT_PAUSED', 'PUBLISH_PAUSED', 'HUMAN_VERIFICATION_REQUIRED', 'VERIFICATION_PAGE_UNAVAILABLE'].includes(outcome.error?.code)) throw outcome.error;
+    if (['COLLECT_PAUSED', 'PUBLISH_PAUSED', 'HUMAN_VERIFICATION_REQUIRED', 'VERIFICATION_PAGE_UNAVAILABLE', 'VERIFICATION_RECHECK_REQUIRED'].includes(outcome.error?.code)) throw outcome.error;
     const state = outcome.state || { ready: false, error: true };
     if (shouldStop() || isClosed()) throw verificationPaused();
     stable = state.ready ? (state.url === previousUrl ? stable + 1 : 1) : 0;

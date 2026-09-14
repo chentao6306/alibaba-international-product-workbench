@@ -412,7 +412,9 @@ async function startCollectJob(jobId) {
         // The old unconditional `running` update made the stop request vanish
         // before the callback checked shouldStop(), so collection continued.
         status: preservedStatus,
-        progress: progress.current || progress.found || 0,
+        collectionStage: progress.stage,
+        discovered: progress.found || 0,
+        progress: progress.stage === 'listing' ? 0 : (progress.current ?? 0),
         total: progress.total || 0,
         message: progress.stage === 'listing' ? `正在读取第 ${progress.page} 页（${progress.allPages ? '全部页' : `${options.startPage}-${options.endPage} 页`}），已发现 ${progress.found} 件${progress.storeTotal ? `，店铺显示 ${progress.storeTotal} 件` : ''}` : `正在读取详情 ${progress.current}/${progress.total}，已保存 ${progress.current} 件`
       });

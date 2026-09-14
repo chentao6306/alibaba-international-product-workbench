@@ -66,7 +66,8 @@ async function saveAlibabaSession(login) {
     const url = login.webContents.getURL();
     const origin = new URL(url).origin;
     if (!/(^|\.)alibaba\.com$/i.test(new URL(url).hostname)) return;
-    const storage = await login.webContents.executeJavaScript('Object.fromEntries(Object.entries(localStorage))', true);
+    const storage = login.readStorage ? await login.readStorage()
+      : await login.webContents.executeJavaScript('Object.fromEntries(Object.entries(localStorage))', true);
     const file = path.join(path.dirname(alibabaCookiesFile()), 'alibaba-storage.json');
     let all = {};
     try { all = readPrivateSession(file); } catch {}

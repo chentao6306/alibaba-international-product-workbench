@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { chromium } from 'playwright-core';
-import { findChromium, waitForHumanVerification } from '../server/browser-runtime.js';
+import { findChromium, launchPersistent, waitForHumanVerification } from '../server/browser-runtime.js';
 import { inspectVerificationDocument, waitForVerification, verificationOptions, withVerificationContext } from '../server/human-verification.js';
 
 test('human verification waits beyond days and requires consecutive healthy pages after refresh', async () => {
@@ -56,6 +59,38 @@ test('an unresponsive verification renderer still allows cancellation and progre
     shouldStop: () => ticks >= 3, onWaiting: () => { heartbeats++; }
   }), (error) => error.code === 'COLLECT_PAUSED');
   assert.equal(heartbeats, 2);
+});
+
+test('verification resumes at the healthy destination and bounds ineffective session handoffs', { skip: !findChromium(), timeout: 30000 }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'verification-handoff-'));
+  const previousBridge = globalThis.__KUA_YIPU_SELLER_BRIDGE;
+  const context = await launchPersistent(root, { headless: true });
+  try {
+    const page = await context.newPage();
+    await page.route('https://www.alibaba.com/**', (route) => route.fulfill({ contentType: 'text/html; charset=utf-8', body:
+      new URL(route.request().url()).pathname === '/product-detail/verified.html'
+        ? '<main data-module-name="module_description">Real product</main>'
+        : '<div class="nc-container">请拖动下方滑块完成验证</div>' }));
+    let calls = 0;
+    globalThis.__KUA_YIPU_SELLER_BRIDGE = { humanVerification: async () => {
+      calls++;
+      return { verified: true, url: 'https://www.alibaba.com/product-detail/verified.html' };
+    } };
+    await page.goto('https://www.alibaba.com/punish');
+    assert.equal(await waitForHumanVerification(page, { shouldStop: () => calls >= 3 }), true);
+    assert.equal(calls, 1);
+    assert.equal(page.url(), 'https://www.alibaba.com/product-detail/verified.html');
+    calls = 0;
+    globalThis.__KUA_YIPU_SELLER_BRIDGE.humanVerification = async () => { calls++; return true; };
+    await page.goto('https://www.alibaba.com/punish');
+    await assert.rejects(waitForHumanVerification(page, { shouldStop: () => calls >= 3 }),
+      (error) => error.code === 'COLLECT_PAUSED' && /同步/.test(error.message));
+    assert.equal(calls, 2, 'Healthy desktop probes must not loop forever when the collector remains blocked');
+  } finally {
+    globalThis.__KUA_YIPU_SELLER_BRIDGE = previousBridge;
+    await context.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('challenge errors, empty refreshes and login pages do not count as verification completion', { skip: !findChromium() }, async () => {

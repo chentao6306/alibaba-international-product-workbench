@@ -17,6 +17,12 @@ test('group completion does not resave stale products over an already checkpoint
   });
   const original = ShopCollector.prototype.collectGroup;
   ShopCollector.prototype.collectGroup = async (_url, onProgress) => {
+    onProgress({ stage: 'listing', page: 1, found: 24, storeTotal: 24 });
+    assert.equal(store.read().jobs[0].progress, 0, 'Discovered links are not saved products');
+    assert.equal(store.read().jobs[0].discovered, 24);
+    onProgress({ stage: 'detail', current: 0, total: 24, found: 24 });
+    assert.equal(store.read().jobs[0].progress, 0);
+    assert.equal(store.read().jobs[0].total, 24, 'Detail total must be visible before the first product or CAPTCHA');
     const product = { sourceId: '123', title: 'Collected camera', mainImages: ['https://example.com/main.jpg'], sourcePlatform: 'alibaba.com' };
     onProgress({ stage: 'detail', current: 1, total: 1, product });
     store.update((state) => { state.products[0].title = 'User edited title'; });

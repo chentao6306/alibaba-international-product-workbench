@@ -18,11 +18,14 @@ async function main() {
   const partition = `verification-qa-${Date.now()}`;
   let phase = 'challenge';
   let loads = 0;
-  await session.fromPartition(partition).protocol.handle('https', () => {
+  await session.fromPartition(partition).protocol.handle('https', (request) => {
+    if (new URL(request.url).pathname === '/slow.png') return new Promise(() => {});
     loads++;
     return new Response(phase === 'challenge' ? '<div class="nc-container">请拖动下方滑块完成验证</div>'
       : phase === 'expired' ? '<div class="nc-container">请点我重试(error:FrgxUe)</div>'
         : phase === 'blank' ? '<body></body>'
+          : phase === 'stalled-challenge' ? '<div class="nc-container">请拖动下方滑块完成验证</div><img src="/slow.png">'
+          : phase === 'stalled-ready' ? '<main data-module-name="module_description">Phone loaded</main><img src="/slow.png">'
           : phase === 'delayed' ? '<body><script>setTimeout(() => { document.body.innerHTML = \'<main data-module-name="module_description">Phone loaded</main>\'; }, 1500)</script></body>'
             : phase === 'late-challenge' ? '<body><script>setTimeout(() => { document.body.innerHTML = \'<div class="nc-container">请拖动下方滑块完成验证</div>\'; }, 1500)</script></body>'
             : '<main data-module-name="module_description">Real product page after verification</main><div class="baxia-container" style="height:300px"></div><div style="opacity:0"><div class="nc-container">请点我重试(error:FrgxUe)</div></div>',
@@ -34,11 +37,20 @@ async function main() {
   };
   let saved = 0;
   try {
-    for (const normalPhase of ['ready', 'delayed', 'ready']) {
+    phase = 'stalled-challenge';
+    let stalled;
+    const stalledOperation = showHumanVerification({ url: 'https://www.alibaba.com/product-detail/qa.html', partition,
+      onCreated: (value) => { stalled = value; } });
+    const stoppedStalled = assert.rejects(stalledOperation, (error) => error.code === 'COLLECT_PAUSED');
+    await until(() => stalled?.window.isVisible());
+    assert.equal(stalled.contents.isLoadingMainFrame(), true, 'CAPTCHA must appear even while a secondary resource is still loading');
+    await stalled.window.webContents.executeJavaScript('document.querySelector("#pause").click()');
+    await stoppedStalled;
+    for (const normalPhase of ['ready', 'delayed', 'stalled-ready']) {
       phase = normalPhase;
       let shows = 0;
       await showHumanVerification({ url: 'https://www.alibaba.com/product-detail/qa.html', partition,
-        saveSession: async () => { saved++; }, onCreated: ({ window }) => {
+        saveSession: async ({ readStorage }) => { assert.equal(typeof await readStorage(), 'object'); saved++; }, onCreated: ({ window }) => {
           assert.equal(window.isVisible(), false, 'Normal product must start hidden');
           window.on('show', () => { shows++; });
         } });

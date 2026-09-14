@@ -258,33 +258,41 @@ export async function waitForHumanVerification(page, options = {}) {
     const bridge = globalThis.__KUA_YIPU_SELLER_BRIDGE;
     if (typeof bridge?.humanVerification === 'function') {
       const verificationUrl = page.url();
-      for (;;) {
+      for (let attempt = 0; attempt < 2; attempt++) {
         if (shouldStop()) throw verificationPaused();
         onWaiting('等待人工验证，已保存的采集进度保留');
         const handled = await bridge.humanVerification(verificationUrl, { shouldStop, onWaiting });
         if (!handled) break;
         if (shouldStop()) throw verificationPaused();
         await syncAlibabaCookies(page.context());
-        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-        await page.waitForTimeout(450);
-        if (await hasExplicitHumanChallenge(page)) continue;
-        let unreadyChecks = 0;
-        await waitForVerification({ inspect: async () => {
-          const state = await page.evaluate(inspectVerificationDocument).catch(() => ({ ready: false }));
-          unreadyChecks = state.ready ? 0 : unreadyChecks + 1;
-          if (unreadyChecks >= 3) {
-            const handled = await bridge.humanVerification(verificationUrl, { shouldStop, onWaiting });
-            if (!handled) throw verificationPaused();
-            await syncAlibabaCookies(page.context());
-            await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-            unreadyChecks = 0;
-            return { ready: false };
-          }
-          return state;
-        }, shouldStop,
-          isClosed: () => page.isClosed(), onWaiting });
-        return true;
+        // A punishment URL may contain an expired challenge token. Resume at
+        // the actual healthy destination reached by the verification window.
+        let resumeUrl = verificationUrl;
+        if (handled.verified && handled.url) {
+          try {
+            const target = new URL(handled.url);
+            if (target.protocol === 'https:' && /(^|\.)(?:alibaba\.com|1688\.com|aliexpress\.com|alicdn\.com)$/.test(target.hostname)) resumeUrl = target.href;
+          } catch {}
+        }
+        onWaiting('验证已完成，正在恢复商品采集');
+        await page.goto(resumeUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+        const deadline = performance.now() + 15000;
+        const recheck = () => Object.assign(new Error('采集页面尚未恢复'), { code: 'VERIFICATION_RECHECK_REQUIRED' });
+        try {
+          await waitForVerification({ inspect: async () => {
+            const state = await page.evaluate(inspectVerificationDocument);
+            if (state.challenge || performance.now() >= deadline) throw recheck();
+            return state;
+          }, shouldStop, isClosed: () => page.isClosed(), onWaiting: () => {
+            if (performance.now() >= deadline) throw recheck();
+            onWaiting('验证已完成，正在恢复商品采集');
+          } });
+          return true;
+        } catch (error) {
+          if (error.code !== 'VERIFICATION_RECHECK_REQUIRED') throw error;
+        }
       }
+      throw Object.assign(verificationPaused(), { message: '验证会话未能同步到采集页面，任务已暂停并保留进度，请稍后继续采集' });
     }
     const error = new Error('需要人工验证');
     error.code = 'HUMAN_VERIFICATION_REQUIRED';

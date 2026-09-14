@@ -409,6 +409,9 @@ export class ShopCollector {
       const products = [...items.values()];
       if (options.sort === 'priceAsc') products.sort((a, b) => Number(a.price || 0) - Number(b.price || 0));
       if (options.sort === 'priceDesc') products.sort((a, b) => Number(b.price || 0) - Number(a.price || 0));
+      if (onProgress({ stage: 'detail', current: 0, total: products.length, found: products.length }) === false || shouldStop()) {
+        throw Object.assign(new Error('COLLECT_PAUSED'), { code: 'COLLECT_PAUSED' });
+      }
       if (international && this.detailReader) {
         return this.detailReader(products, (current, total, product) => {
           return onProgress({ stage: 'detail', current, total, found: products.length, product });

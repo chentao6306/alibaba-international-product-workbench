@@ -34,8 +34,9 @@ test('all-pages collection reads past ten pages and respects explicit ranges wit
   assert.equal(collectionPageRange({ endPage: 10 }).allPages, false);
   const all = await collector.collectGroup('https://example.en.alibaba.com/productlist.html', (event) => events.push(event), { allPages: true, endPage: 10 });
   assert.equal(all.length, 982);
-  assert.equal(events.at(-1).page, 62);
-  assert.equal(events.at(-1).storeTotal, 982);
+  assert.equal(events.filter((event) => event.stage === 'listing').at(-1).page, 62);
+  assert.equal(events.filter((event) => event.stage === 'listing').at(-1).storeTotal, 982);
+  assert.deepEqual(events.at(-1), { stage: 'detail', current: 0, total: 982, found: 982 });
   const limited = await collector.collectGroup('https://example.en.alibaba.com/productlist.html', () => {}, { endPage: 10 });
   assert.equal(limited.length, 160);
   const tail = await collector.collectGroup('https://example.en.alibaba.com/productlist.html', () => {}, { startPage: 61, endPage: 62 });

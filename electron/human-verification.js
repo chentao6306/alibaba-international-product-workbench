@@ -41,6 +41,7 @@ export async function showHumanVerification({ url, partition, icon, shouldStop =
   let revealed = false;
   let probeExpired = false;
   let probeTimer;
+  let documentCommitted = false;
   const closed = () => window.isDestroyed() || contents.isDestroyed();
   const status = (message) => { if (!window.isDestroyed()) window.webContents.send('verification:status', message); };
   const refresh = () => {
@@ -64,23 +65,33 @@ export async function showHumanVerification({ url, partition, icon, shouldStop =
   contents.setWindowOpenHandler(() => ({ action: 'deny' }));
   contents.on('will-navigate', (event, target) => { if (!allowedUrl(target)) event.preventDefault(); });
   contents.on('will-redirect', (event, target) => { if (!allowedUrl(target)) event.preventDefault(); });
-  contents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame) { navigation++; loadFailed = false; } });
+  contents.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => {
+    if (isMainFrame) { navigation++; loadFailed = false; if (!inPlace) documentCommitted = false; }
+  });
+  contents.on('did-navigate', () => { documentCommitted = true; });
   contents.on('did-fail-load', (_event, code, _description, _url, isMainFrame) => {
     if (isMainFrame && code !== -3) { loadFailed = true; status('页面加载失败，可刷新页面后重试'); }
   });
   contents.on('render-process-gone', () => { loadFailed = true; status('页面已停止响应，可刷新页面后重试'); });
   const inspect = async () => {
-    if (probeExpired && !revealed) throw Object.assign(new Error('验证地址未加载出有效页面，请稍后重试'), { code: 'VERIFICATION_PAGE_UNAVAILABLE' });
-    if (loadFailed || contents.isLoadingMainFrame()) return { ready: false, error: loadFailed };
+    if (probeExpired && !revealed) throw Object.assign(verificationPaused(), { message: '页面访问检查超时，任务已暂停，进度已保留；请检查网络后继续采集' });
+    if (loadFailed || !documentCommitted) return { ready: false, error: loadFailed };
     const version = navigation;
-    const state = await contents.executeJavaScript(`(${inspectVerificationDocument.toString()})()`);
-    if (state.challenge && version === navigation && !contents.isLoadingMainFrame() && !revealed) {
+    // executeJavaScript waits for the load event, which Alibaba images/iframes
+    // can hold open indefinitely. Inspect the committed DOM independently.
+    if (!contents.debugger.isAttached()) contents.debugger.attach('1.3');
+    const result = await contents.debugger.sendCommand('Runtime.evaluate', {
+      expression: `(${inspectVerificationDocument.toString()})()`, returnByValue: true,
+    });
+    if (result.exceptionDetails || !result.result?.value) return { ready: false };
+    const state = result.result.value;
+    if (state.challenge && version === navigation && documentCommitted && !revealed) {
       revealed = true;
       clearTimeout(probeTimer);
       window.setSkipTaskbar(false);
       window.show(); window.focus();
     }
-    return { ...state, ready: state.ready && version === navigation && !contents.isLoadingMainFrame(), url: `${state.url}#navigation-${navigation}` };
+    return { ...state, ready: state.ready && version === navigation && documentCommitted, url: `${state.url}#navigation-${navigation}` };
   };
   try {
     await window.loadFile(path.join(directory, 'verification.html'));
@@ -92,15 +103,21 @@ export async function showHumanVerification({ url, partition, icon, shouldStop =
     contents.loadURL(url).catch(() => {});
     await waitForVerification({ inspect, isClosed: closed, shouldStop: () => paused || shouldStop(),
       onWaiting: (message) => {
-        if (probeExpired && !revealed) throw Object.assign(new Error('验证地址未加载出有效页面，请稍后重试'), { code: 'VERIFICATION_PAGE_UNAVAILABLE' });
+        if (probeExpired && !revealed) throw Object.assign(verificationPaused(), { message: '页面访问检查超时，任务已暂停，进度已保留；请检查网络后继续采集' });
         status(message); onWaiting(revealed ? message : '正在检查页面访问状态');
       } });
     if (paused || shouldStop()) throw verificationPaused();
-    await saveSession({ webContents: contents });
-    return true;
+    await saveSession({ webContents: contents, readStorage: async () => {
+      const response = await contents.debugger.sendCommand('Runtime.evaluate', {
+        expression: 'Object.fromEntries(Object.entries(localStorage))', returnByValue: true,
+      });
+      return response.result?.value || {};
+    } });
+    return { verified: true, url: contents.getURL() };
   } finally {
     clearTimeout(probeTimer);
     sessions.delete(senderId);
+    if (!contents.isDestroyed() && contents.debugger.isAttached()) contents.debugger.detach();
     if (!contents.isDestroyed()) contents.close();
     if (!window.isDestroyed()) window.destroy();
   }
