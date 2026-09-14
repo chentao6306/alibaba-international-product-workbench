@@ -860,6 +860,30 @@ test('automatic reference repair only fills missing publish fields', () => {
   ]);
 });
 
+test('missing-only references preserve existing values across translated attributes and SKU groups', () => {
+  const target = {
+    attributes: [{ name: 'brand name', value: 'Holybro' }, { name: 'Material', value: 'Plastic' }],
+    customAttributes: [{ name: 'private mold', value: 'Yes' }],
+    variantGroups: [{ name: 'type', options: ['Flight Controller'] }, { name: 'color', options: ['V1', 'V2'] }],
+    skus: [{ attributes: { type: 'Flight Controller', color: 'V1' }, price: 68 }]
+  };
+  const reference = {
+    brandName: 'Other', productType: 'Propellers', color: 'Black',
+    attributes: [{ name: '品牌名称', value: 'Other' }, { name: '材质', value: 'Nylon' }, { name: '私模', value: 'No' }, { name: '类型', value: 'Propellers' }, { name: '颜色', value: 'Black' }, { name: '适用型号', value: 'General' }]
+  };
+  const patch = applyPublishedProductReference(target, reference, { onlyMissing: true });
+  assert.deepEqual(patch.attributes.map((item) => [item.name, item.value]), [['brand name', 'Holybro'], ['Material', 'Plastic'], ['适用型号', 'General']]);
+  assert.equal(patch.brandName, undefined);
+  assert.equal(patch.productType, undefined);
+  assert.equal(patch.color, undefined);
+  assert.equal(patch.variantGroups, undefined);
+  assert.equal(patch.skus, undefined);
+  const repeated = applyPublishedProductReference({ ...target, ...patch }, reference, { onlyMissing: true });
+  assert.deepEqual(repeated.attributes, patch.attributes);
+  const missingType = applyPublishedProductReference({ productType: 'Drones Accessories', categoryPath: ['Drones Accessories'] }, reference, { onlyMissing: true });
+  assert.equal(missingType.attributes.find((item) => item.name === '类型')?.value, 'Propellers');
+});
+
 test('removes Alibaba Lens promotional text from collected category fields', () => {
   assert.deepEqual(sanitizeCategoryPath(['Telephones', 'Corded Telephones', 'Alibaba Lens 我们的免费比价插件帮助您寻找价格更低的相似商品']), ['Telephones', 'Corded Telephones']);
   const product = sanitizeCollectedProduct({ productType: 'Alibaba Lens 我们的免费比价插件帮助您寻找价格更低的相似商品', sourceCategoryPath: ['Telephones', 'Corded Telephones', 'Alibaba Lens 我们的免费比价插件帮助您寻找价格更低的相似商品'], keywords: ['corded telephone', 'Alibaba Lens 免费比价插件'], subtitle: 'Accio Work 免费比价插件' });
@@ -880,6 +904,19 @@ test('keeps source-language metadata and legitimate source text unchanged', () =
   const synced = syncProductModel({ ...product, id: 'language-source', sourceId: '11000034856073' }, { captureSource: true });
   assert.equal(synced.source.snapshot.sourceLanguage, 'en');
   assert.equal(synced.source.snapshot.sourceCaptureLocale, 'en-US');
+});
+
+test('audits source language against captured fields after a successful product reference', () => {
+  const product = syncProductModel({
+    sourceLanguage: 'en', sourceOriginalTitle: 'Motor', title: 'Motor',
+    attributes: [{ name: 'Material', value: 'Steel' }], description: 'Steel motor'
+  }, { captureSource: true });
+  const patch = applyPublishedProductReference(product, { attributes: [{ name: '类型', value: 'Motor' }] }, { onlyMissing: true });
+  recordProductMutation(product, patch, { action: 'reference-published-product' });
+  assert.equal(product.attributes.some((item) => item.name === '类型'), true);
+  assert.equal(auditProduct(product).issues.some((item) => item.code === 'source.language.mismatch'), false);
+  const mixedSource = syncProductModel({ ...product, description: '中文描述' }, { captureSource: true });
+  assert.equal(auditProduct(mixedSource).issues.some((item) => item.code === 'source.language.mismatch'), true);
 });
 
 test('audits and records product source versus working changes', () => {

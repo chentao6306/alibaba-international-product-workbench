@@ -312,7 +312,17 @@ export async function visibleFeedback(page) {
 const SUBMIT_SUCCESS_TEXT = /(?:发布成功|提交成功|已提交发布|审核中|产品信息已经成功提交|产品已经进入审核流程|您的产品信息已经成功提交|您的产品已经进入审核流程|successfully\s+(?:submitted|published)|submitted successfully)/i;
 const DRAFT_SUCCESS_TEXT = /(?:保存成功|草稿.*成功|已保存|successfully\s+saved|saved successfully)/i;
 const ACCOUNT_LIMIT_TEXT = /(?:产品|商品)(?:总量|数量).{0,20}(?:超出|超过|上限)|product.{0,30}(?:quota|limit).{0,20}(?:exceed|reach)/i;
+const POLICY_WARNING_TEXT = /疑似涉及禁限售|涉嫌侵权|疑似侵权|(?:产品|商品).{0,40}(?:违反禁限售|涉及违禁)|(?:suspected|potential).{0,40}(?:restricted|prohibited|infringement)/i;
 const BLOCKING_FEEDBACK_TEXT = /(?:报错反馈|错误项|必填项.*不能为空|无效起订量|物流属性.*(?:请填写完整|不能为空)|重量、体积.*(?:请填写完整|不能为空)|请上传相关产品图片|请不要输入如下(?:非英文)?字符|required|invalid)/i;
+
+function requireNoPolicyWarning(feedback) {
+  const warnings = feedback.filter((text) => POLICY_WARNING_TEXT.test(text));
+  if (!warnings.length) return;
+  const detail = warnings.find((text) => /商品名称|产品名称|product name/i.test(text)) || warnings[0];
+  const error = new Error(`国际站提示商品需人工核对禁限售或侵权风险，未继续提交：${compactText(detail, 700)}`);
+  error.code = 'PUBLISH_POLICY_REVIEW_REQUIRED';
+  throw error;
+}
 
 export function alibabaKeywordText(product) {
   const keywords = (product.keywords || []).length
@@ -329,6 +339,7 @@ export function classifyAlibabaActionResult({ mode = 'draft', url = '', original
   const feedbackText = messages.join(' ');
   const combinedText = `${feedbackText} ${String(bodyText || '')}`;
   if (ACCOUNT_LIMIT_TEXT.test(combinedText)) return { succeeded: false, verifiedBy: '', blockingFeedback: true };
+  if (POLICY_WARNING_TEXT.test(feedbackText)) return { succeeded: false, verifiedBy: '', blockingFeedback: true };
   let currentUrl = null;
   let initialUrl = null;
   try { currentUrl = new URL(url); } catch {}
@@ -661,7 +672,7 @@ async function captureCategoryAttributes(page) {
     }).filter((item) => item.name && item.value)).catch(() => []);
 }
 
-async function waitForActionResult(page, action, mode, originalUrl) {
+export async function waitForActionResult(page, action, mode, originalUrl) {
   const responses = [];
   const onResponse = (response) => {
     const request = response.request();
@@ -679,6 +690,7 @@ async function waitForActionResult(page, action, mode, originalUrl) {
       await page.waitForTimeout(400);
       const url = page.url();
       const feedback = await visibleFeedback(page);
+      requireNoPolicyWarning(feedback);
       const accountLimit = await page.locator('body').innerText().then((value) => value.match(/[^\n]*您发布的产品总量已超出限制[^\n]*/)?.[0]).catch(() => '');
       if (accountLimit) {
         const error = new Error(`国际站账号发布额度不足：${accountLimit.trim()}`);
@@ -689,6 +701,7 @@ async function waitForActionResult(page, action, mode, originalUrl) {
       if (result.succeeded) return { verifiedBy: result.verifiedBy, feedback, responses, requiredAttributes };
     }
     const feedback = await visibleFeedback(page);
+    requireNoPolicyWarning(feedback);
     const bodyText = await page.locator('body').innerText().catch(() => '');
     // The success page can render immediately after the polling deadline. The
     // final snapshot must be classified before it is used to build an error.
@@ -3136,6 +3149,7 @@ export async function enableImageBackedVariantSpecs(page, product, groups, downl
 const POSTING_BLOCKERS = '.next-overlay-backdrop:visible, .next-dialog:visible, [role="dialog"]:visible, .mce-window:visible, #mce-modal-block:visible';
 
 export async function dismissPostingOverlays(page) {
+  requireNoPolicyWarning(await visibleFeedback(page));
   const harmlessActions = [
     /^(?:我知道了|知道了|关闭|取消|稍后再说|暂不|以后再说|Got it|Close|Cancel)$/i,
     /^(?:继续返回旧版|确认返回旧版)$/i

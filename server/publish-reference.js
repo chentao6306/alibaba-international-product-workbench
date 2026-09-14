@@ -2,7 +2,7 @@ import { productCategory } from './category-routing.js';
 
 export const REQUIRED_ATTRIBUTE_ALIASES = [
   ['屏幕', '屏幕尺寸', 'screen', 'display', 'screen size'],
-  ['电池容量', 'battery capacity', 'battery'],
+  ['电池容量', 'battery capacity', 'battery', '电池'],
   ['蜂窝网络', 'cellular network', 'cellular', 'mobile network', 'network'],
   ['蜂窝频段', 'cellular band', 'frequency band', 'network band', 'band'],
   ['操作系统', 'operating system', 'operation system', 'os'],
@@ -23,6 +23,8 @@ export const REQUIRED_ATTRIBUTE_ALIASES = [
   ['类型', 'type', 'product type', '产品类型'],
   ['产地', 'place of origin', 'origin'],
   ['品牌名称', 'brand name', 'brand'],
+  ['适用品牌', 'compatible brand'],
+  ['颜色', 'color', 'colour'],
   ['型号', 'model number', 'model'],
   ['省份', 'province'],
   ['私模', 'private mold']

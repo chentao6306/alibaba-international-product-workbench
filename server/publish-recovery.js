@@ -1,6 +1,6 @@
 export function publishRepairPlan(error) {
   const message = String(error?.message || error || '');
-  if (/PUBLISH_ACCOUNT_LIMIT|HUMAN_VERIFICATION|LOGIN_REQUIRED/.test(error?.code || '')
+  if (/PUBLISH_ACCOUNT_LIMIT|PUBLISH_POLICY_REVIEW_REQUIRED|HUMAN_VERIFICATION|LOGIN_REQUIRED/.test(error?.code || '')
     || /禁限售|违禁|风控违规|侵权|发布额度|总量已超出限制|登录状态.*失效|prohibited|restricted product/i.test(message)) return [];
 
   const mainImages = /商品图片|主图.*(?:为空|失败)|请上传.*图片|image.*required/i.test(message);

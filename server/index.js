@@ -963,7 +963,7 @@ async function runPublishJob(jobId) {
           ? jobState.metadata.autoReferenceRetries : {};
         const requiredFields = [...new Set([...(error.requiredFields || []), ...requiredLabelsFromError(message)])];
         const attempted = retries[product.id]?.referenceIds || (retries[product.id]?.referenceId ? [retries[product.id].referenceId] : []);
-        if (!pauseRequested && !requiresHuman && requiredFields.length && attempted.length < 2) {
+        if (!pauseRequested && !requiresHuman && error.code !== 'PUBLISH_POLICY_REVIEW_REQUIRED' && requiredFields.length && attempted.length < 2) {
           const repair = findPublishedReferenceRepair(product, store.read().products, requiredFields, attempted);
           if (repair) {
             store.update((draft) => {

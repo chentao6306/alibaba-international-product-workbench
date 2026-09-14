@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { crossPlatformPublishErrors, sourcePlatform } from './source-platform.js';
+import { requiredAttributeKey } from './publish-reference.js';
 
 export const PRODUCT_SCHEMA_VERSION = 5;
 
@@ -126,9 +127,18 @@ export function copyMissingProductData(target, reference) {
 // silently change what the customer collected or priced.
 export function applyPublishedProductReference(target, reference, options = {}) {
   const patch = {};
+  const fieldNames = { origin: 'origin', province: 'province', brand: 'brand', brandName: 'brand', compatibleBrand: 'compatible brand', compatibleBrands: 'compatible brand', privateMold: 'private mold', model: 'model', compatibleModel: 'compatible model', compatibleModels: 'compatible model', productType: 'type', type: 'type', color: 'color' };
+  const existingValues = new Set([
+    ...list(target.attributes), ...list(target.customAttributes),
+    ...list(target.variantGroups).map((group) => ({ name: group.name, value: list(group.options).filter((value) => !isBlank(value)) })),
+    ...Object.entries(fieldNames)
+      .filter(([field]) => field !== 'productType' || ![target.categoryPath?.at(-1), target.sourceCategoryPath?.at(-1)].filter(Boolean).includes(target[field]))
+      .map(([field, name]) => ({ name, value: target[field] }))
+  ].filter((item) => !isBlank(item.value)).map((item) => requiredAttributeKey(item.name)));
   const cloneIfPresent = (field) => {
     if (!Object.hasOwn(reference || {}, field) || isBlank(reference[field])) return;
     if (options.onlyMissing && !isBlank(target?.[field])) return;
+    if (options.onlyMissing && fieldNames[field] && existingValues.has(requiredAttributeKey(fieldNames[field]))) return;
     patch[field] = clone(reference[field]);
   };
 
@@ -171,13 +181,7 @@ export function applyPublishedProductReference(target, reference, options = {}) 
   // a reference remains usable across old and new workspace schemas.
   const referenceAttributes = Array.isArray(reference?.attributes) ? reference.attributes.map((item) => ({ ...item })) : [];
   const targetAttributes = Array.isArray(target?.attributes) ? target.attributes.map((item) => ({ ...item })) : [];
-  const normalizeAttributeName = (value) => String(value || '').toLowerCase().replace(/[\s_\-/]+/g, ' ').trim();
-  const attributeKey = (value) => ({
-    screen: 'screen size', 'screen size': 'screen size', display: 'screen size', 屏幕: 'screen size', 屏幕尺寸: 'screen size',
-    battery: 'battery capacity', 'battery capacity': 'battery capacity', 电池: 'battery capacity', 电池容量: 'battery capacity',
-    'compatible model': 'compatible model', 适用型号: 'compatible model',
-    type: 'type', 'product type': 'type', 类型: 'type', 产品类型: 'type'
-  })[normalizeAttributeName(value)] || normalizeAttributeName(value);
+  const attributeKey = requiredAttributeKey;
   const mergedAttributes = options.onlyMissing ? targetAttributes : referenceAttributes;
   const knownAttributeNames = new Map(mergedAttributes
     .map((item, index) => [attributeKey(item?.name), index])
@@ -186,6 +190,7 @@ export function applyPublishedProductReference(target, reference, options = {}) 
     for (const item of referenceAttributes) {
       const key = attributeKey(item?.name);
       if (!key) continue;
+      if (existingValues.has(key)) continue;
       const currentIndex = knownAttributeNames.get(key);
       if (currentIndex == null) {
         mergedAttributes.push({ ...item });
@@ -198,6 +203,7 @@ export function applyPublishedProductReference(target, reference, options = {}) 
   const addReferenceAttribute = (name, value) => {
     if (isBlank(value)) return;
     const key = attributeKey(name);
+    if (options.onlyMissing && existingValues.has(key)) return;
     const existingIndex = knownAttributeNames.get(key);
     if (existingIndex != null) {
       if (isBlank(mergedAttributes[existingIndex].value)) mergedAttributes[existingIndex] = { ...mergedAttributes[existingIndex], value: clone(value) };
@@ -371,7 +377,8 @@ export function auditProduct(product) {
   if (!list(product.deliveryTime).length) add('logistics.lead.missing', 'logistics', 'warning', 'deliveryTime', '缺少发货期');
   if (!text(product.description) && !text(product.descriptionHtml)) add('description.missing', 'description', 'error', 'descriptionHtml', '缺少商品详情');
   if (!text(product.descriptionHtml)) add('description.html.missing', 'description', 'warning', 'descriptionHtml', '未保留来源富文本详情');
-  if (/^(?:en|en[-_])/i.test(sourceLanguage) && /[\u3400-\u9fff]/.test(JSON.stringify({ title: product.sourceOriginalTitle, subtitle: product.subtitle, keywords: product.keywords, attributes: product.attributes, description: product.description }))) {
+  const captured = product.source?.snapshot || product;
+  if (/^(?:en|en[-_])/i.test(captured.sourceLanguage || sourceLanguage) && /[\u3400-\u9fff]/.test(JSON.stringify({ title: captured.sourceOriginalTitle, subtitle: captured.subtitle, keywords: captured.keywords, attributes: captured.attributes, description: captured.description }))) {
     add('source.language.mismatch', 'source', 'warning', 'sourceLanguage', '来源标记为英文，但采集字段仍含中文，请重新采集源站资料');
   }
 

@@ -61,7 +61,7 @@ export function collectionPageRange(options = {}) {
   return { allPages, startPage, endPage: allPages ? null : Math.max(startPage, positivePage(options.endPage, 100)) };
 }
 
-async function readInternationalModules(page) {
+export async function readInternationalModules(page) {
   return page.locator('[module-data]').evaluateAll((nodes) => {
     const result = { groups: [], products: [], companyName: '', pageNav: null };
     const flattenGroups = (groups) => {
@@ -79,8 +79,12 @@ async function readInternationalModules(page) {
         if (data.companyName) result.companyName = data.companyName;
         if (Array.isArray(data.groups)) flattenGroups(data.groups);
         if (Array.isArray(data.productList)) {
-          result.products.push(...data.productList);
-          result.pageNav = data.pageNavView || null;
+          // Store recommendations also use productList but have no pager.
+          // They must not replace or contaminate the actual listing module.
+          if (data.pageNavView) {
+            result.products = data.productList;
+            result.pageNav = data.pageNavView;
+          } else if (!result.pageNav) result.products.push(...data.productList);
         }
       } catch {}
     }
@@ -314,6 +318,7 @@ export class ShopCollector {
       const visited = new Set();
       const delaySeconds = Math.max(0, Number(options.delaySeconds || 0));
       const international = isInternationalShopUrl(groupUrl);
+      let needsPager = international && /\/product(?:group)?list(?:[-./]|$)/i.test(new URL(groupUrl).pathname);
       const shouldStop = () => typeof options.shouldStop === 'function' && options.shouldStop();
       while (nextUrl && (allPages || pageNumber < endPage)) {
         if (visited.has(nextUrl)) throw new Error(`店铺翻页重复，已读取 ${pageNumber} 页，采集未完成`);
@@ -321,18 +326,29 @@ export class ShopCollector {
         if (shouldStop()) { const error = new Error('COLLECT_PAUSED'); error.code = 'COLLECT_PAUSED'; throw error; }
         pageNumber += 1;
         let internationalData = null;
-        for (let attempt = 0; attempt < 2; attempt++) {
-          await page.goto(nextUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (shouldStop()) { const error = new Error('COLLECT_PAUSED'); error.code = 'COLLECT_PAUSED'; throw error; }
+          try { await page.goto(nextUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }); }
+          catch (error) {
+            if (attempt === 2 || !/Timeout|net::ERR_(?:CONNECTION|TIMED_OUT|NETWORK|EMPTY_RESPONSE)/i.test(error.message)) throw error;
+            await page.waitForTimeout(1500 * (attempt + 1));
+            continue;
+          }
           await settlePage(page);
           await waitForHumanVerification(page);
           if (!international) break;
           internationalData = await readInternationalModules(page);
-          if (internationalData.products.length || (internationalData.pageNav && Number(internationalData.pageNav.totalLines) === 0)) break;
-          if (attempt === 0) await page.waitForTimeout(1500);
+          const hasPager = Boolean(internationalData.pageNav);
+          const expectedPage = !hasPager || Number(internationalData.pageNav.currentPage || pageNumber) === pageNumber;
+          const validEmpty = hasPager && Number(internationalData.pageNav.totalLines) === 0 && pageNumber === 1;
+          if ((!needsPager || hasPager) && expectedPage && (internationalData.products.length || validEmpty)) break;
+          if (attempt < 2) await page.waitForTimeout(1500 * (attempt + 1));
         }
-        if (international && !internationalData.products.length && !internationalData.pageNav) {
-          throw new Error(`店铺第 ${pageNumber} 页未返回商品列表，采集未完成，请稍后重试`);
+        const validEmptyListing = internationalData?.pageNav && Number(internationalData.pageNav.totalLines) === 0 && pageNumber === 1;
+        if (international && ((!internationalData.products.length && !validEmptyListing) || (needsPager && !internationalData.pageNav))) {
+          throw new Error(`店铺第 ${pageNumber} 页未返回商品列表或分页信息，已重试 2 次，采集未完成，请稍后重试`);
         }
+        if (internationalData?.pageNav) needsPager = true;
         if (pageNumber < startPage) {
           onProgress({ stage: 'listing', page: pageNumber, found: items.size, skipped: true });
         }

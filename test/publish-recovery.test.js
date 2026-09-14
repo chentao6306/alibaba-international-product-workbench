@@ -6,7 +6,29 @@ import test from 'node:test';
 import { chromium } from 'playwright-core';
 import { findChromium } from '../server/browser-runtime.js';
 import { userFacingError } from '../server/browser-error.js';
-import { enableImageBackedVariantSpecs, enableSpecImageUpload, ensureColorSpecImageSwitch, fillVariantSpecs, forceClearLogisticsSection, recoverRequiredAttributes, setImageUploadFiles } from '../server/publisher.js';
+import { dismissPostingOverlays, enableImageBackedVariantSpecs, enableSpecImageUpload, ensureColorSpecImageSwitch, fillVariantSpecs, forceClearLogisticsSection, recoverRequiredAttributes, setImageUploadFiles, waitForActionResult } from '../server/publisher.js';
+import { submitWithRepairs } from '../server/publish-recovery.js';
+
+test('reports platform policy warnings before stale logistics errors and never confirms or retries them', { skip: !findChromium() }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<button id="publish">发布商品</button><div role="alert">物流属性: 请填写完整，或者全部清除</div>
+      <div class="next-dialog" style="display:none"><h2>警告</h2>疑似涉及禁限售，会造成风控违规问题。商品名称: drone
+        <button id="continue">继续提交</button><button id="back">返回编辑</button></div>
+      <script>window.clicks = 0; window.confirmed = false;
+        document.querySelector('#publish').onclick = () => { window.clicks++; document.querySelector('.next-dialog').style.display = 'block'; };
+        document.querySelector('#continue').onclick = () => { window.confirmed = true; };</script>`);
+    let repairs = 0;
+    await assert.rejects(submitWithRepairs({
+      submit: () => waitForActionResult(page, page.locator('#publish'), 'submit', page.url()),
+      repairs: { logistics: async () => { repairs++; return true; } },
+    }), (error) => error.code === 'PUBLISH_POLICY_REVIEW_REQUIRED' && /drone/.test(error.message));
+    assert.equal(repairs, 0);
+    assert.deepEqual(await page.evaluate(() => ({ clicks: window.clicks, confirmed: window.confirmed })), { clicks: 1, confirmed: false });
+    await assert.rejects(dismissPostingOverlays(page), (error) => error.code === 'PUBLISH_POLICY_REVIEW_REQUIRED');
+  } finally { await browser.close(); }
+});
 
 test('fills collected headphone and tablet values in Chinese fields and commits loaded dropdown options', { skip: !findChromium() }, async () => {
   const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
