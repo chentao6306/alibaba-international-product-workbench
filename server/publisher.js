@@ -177,14 +177,16 @@ async function fillFirst(page, selectors, value) {
   return true;
 }
 
-async function fillAndVerify(locator, value, fieldName) {
+export async function fillAndVerify(locator, value, fieldName) {
   const expected = String(value ?? '').trim();
   const matches = (actual) => {
-    const normalized = String(actual || '').replace(/,/g, '').trim();
+    const normalized = String(actual ?? '').trim();
     if (normalized === expected) return true;
     const expectedNumber = Number(expected);
-    const actualNumber = Number(normalized);
-    return expected !== '' && Number.isFinite(expectedNumber) && Number.isFinite(actualNumber) && expectedNumber === actualNumber;
+    const numericText = /^[-+]?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?$/;
+    const actualNumber = Number(normalized.replace(/,/g, ''));
+    return expected !== '' && numericText.test(expected) && numericText.test(normalized)
+      && Number.isFinite(expectedNumber) && Number.isFinite(actualNumber) && expectedNumber === actualNumber;
   };
   let actual = '';
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -310,15 +312,15 @@ export async function visibleFeedback(page) {
 const SUBMIT_SUCCESS_TEXT = /(?:发布成功|提交成功|已提交发布|审核中|产品信息已经成功提交|产品已经进入审核流程|您的产品信息已经成功提交|您的产品已经进入审核流程|successfully\s+(?:submitted|published)|submitted successfully)/i;
 const DRAFT_SUCCESS_TEXT = /(?:保存成功|草稿.*成功|已保存|successfully\s+saved|saved successfully)/i;
 const ACCOUNT_LIMIT_TEXT = /(?:产品|商品)(?:总量|数量).{0,20}(?:超出|超过|上限)|product.{0,30}(?:quota|limit).{0,20}(?:exceed|reach)/i;
-const BLOCKING_FEEDBACK_TEXT = /(?:报错反馈|错误项|必填项.*不能为空|无效起订量|物流属性.*(?:请填写完整|不能为空)|重量、体积.*(?:请填写完整|不能为空)|请上传相关产品图片|请不要输入如下非英文字符|required|invalid)/i;
+const BLOCKING_FEEDBACK_TEXT = /(?:报错反馈|错误项|必填项.*不能为空|无效起订量|物流属性.*(?:请填写完整|不能为空)|重量、体积.*(?:请填写完整|不能为空)|请上传相关产品图片|请不要输入如下(?:非英文)?字符|required|invalid)/i;
 
 export function alibabaKeywordText(product) {
   const keywords = (product.keywords || []).length
     ? product.keywords.slice(0, 10).join('\n')
     : String(product.title || '').split(/\s+/).filter((word) => word.length > 2).slice(0, 8).join(' ');
-  // The keyword validator rejects colons although titles and radio-band
-  // attributes accept them. Keep ratios meaningful and scope this to keywords.
-  const normalized = keywords.replace(/(\d)\s*:\s*(?=\d)/g, '$1 to ').replace(/:/g, ' ').replace(/[ \t]+/g, ' ').trim();
+  // Keywords reject commas and colons accepted in titles. Preserve numeric
+  // ratios, while model suffixes such as "KV100:" remain model identifiers.
+  const normalized = keywords.replace(/\b(\d+(?:\.\d+)?)\s*:\s*(?=\d)/g, '$1 to ').replace(/[,:]/g, ' ').replace(/[ \t]+/g, ' ').trim();
   return normalized.length <= 384 ? normalized : normalized.slice(0, 384).replace(/\s+\S*$/, '').trim();
 }
 
@@ -1183,6 +1185,71 @@ export function mainImageSlotsComplete(initialSlotCount, remainingSlotCount, exp
   const remaining = Math.max(0, Number(remainingSlotCount) || 0);
   const expected = Math.max(0, Number(expectedCount) || 0);
   return remaining <= Math.max(0, initial - expected);
+}
+
+export async function mainImageUploadRecords(page, removeNames = []) {
+  return page.locator('.image-uploader .image-upload-list-item').evaluateAll(async (slots, removeNames) => {
+    const records = [];
+    for (const slot of slots) {
+      if (!slot.getClientRects().length) continue;
+      const key = Object.getOwnPropertyNames(slot).find((key) => key.startsWith('__reactFiber'));
+      let fiber = key && slot[key];
+      let file;
+      let remove;
+      for (let depth = 0; fiber && depth < 24; depth++, fiber = fiber.return) {
+        const props = fiber.memoizedProps;
+        if (!file && props?.file) file = props.file;
+        if (file && Array.isArray(props?.fileList) && props.fileList.some((item) => item === file || item.uid === file.uid) && typeof props.onRemove === 'function') {
+          remove = props.onRemove;
+          break;
+        }
+      }
+      if (!file) continue;
+      const name = String(file.fileName || file.name || '');
+      const status = String(file.status || '');
+      const remote = /^(?:https?:)?\/\//i.test(file.fileURL || '');
+      const error = file.error || {};
+      const code = Number(error.code);
+      const retryable = status === 'error' && (error.isRequestError === true || [408, 429].includes(code) || code >= 500)
+        && ![401, 403].includes(code);
+      let removed = false;
+      if (retryable && removeNames.includes(name) && remove) {
+        await remove(file);
+        removed = true;
+      }
+      records.push({ name, status, remote, retryable, removed, code: Number.isFinite(code) ? code : null });
+    }
+    return records;
+  }, removeNames).catch(() => []);
+}
+
+export async function restoreMainImageOrder(page, filenames) {
+  const changed = await page.locator('.image-uploader .image-upload-list-item').evaluateAll((slots, filenames) => {
+    for (const slot of slots) {
+      const key = Object.getOwnPropertyNames(slot).find((key) => key.startsWith('__reactFiber'));
+      let fiber = key && slot[key];
+      for (let depth = 0; fiber && depth < 24; depth++, fiber = fiber.return) {
+        const props = fiber.memoizedProps;
+        if (!Array.isArray(props?.fileList) || typeof props.onSort !== 'function') continue;
+        const files = props.fileList;
+        const name = (file) => String(file.fileName || file.name || '');
+        if (files.length !== filenames.length || files.some((file) => !filenames.includes(name(file)))) return false;
+        const sorted = filenames.map((filename) => files.find((file) => name(file) === filename));
+        if (sorted.every((file, index) => file === files[index])) return true;
+        props.onSort(sorted);
+        return true;
+      }
+    }
+    return false;
+  }, filenames);
+  if (!changed) return false;
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const records = await mainImageUploadRecords(page);
+    if (JSON.stringify(records.map((file) => file.name)) === JSON.stringify(filenames)) return true;
+    await page.waitForTimeout(150);
+  }
+  return false;
 }
 
 async function mainImageFormState(page) {
@@ -4163,6 +4230,44 @@ export class SellerPublisher {
     const urls = product.mainImages?.length ? product.mainImages : [product.mainImage, ...(product.images || [])];
     const downloaded = await this.downloadImageSet(product, urls, 'main', 6);
     if (downloaded.length < 4) throw new Error(`主图资料不足：仅下载到 ${downloaded.length} 张，至少需要 4 张`);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const result = await this.uploadMainImageBatch(page, downloaded);
+        if (attempt && !await restoreMainImageOrder(page, downloaded.map((file) => path.basename(file)))) {
+          throw new Error('主图补传成功，但图片顺序未能恢复，请重试当前商品');
+        }
+        return result;
+      }
+      catch (error) {
+        if (error.code !== 'MAIN_IMAGE_UPLOAD_RETRYABLE' || attempt === 2) throw error;
+        // Remove only confirmed failed files through the uploader's own
+        // handler. Accepted files retain their server IDs and are not resent.
+        const filenames = downloaded.map((file) => path.basename(file));
+        let removed = false;
+        for (let cleanup = 0; cleanup < filenames.length; cleanup++) {
+          const records = await mainImageUploadRecords(page, filenames);
+          if (!records.some((file) => file.removed)) break;
+          removed = true;
+          // Removing a file can remount the remaining slots. Read fresh
+          // component records before removing another failed file.
+          await page.waitForTimeout(150);
+        }
+        const remaining = await mainImageUploadRecords(page);
+        if (!removed || remaining.some((file) => file.status === 'error' && filenames.includes(file.name))) throw error;
+        await page.waitForTimeout(500 * (attempt + 1));
+      }
+    }
+  }
+
+  async uploadMainImageBatch(page, downloaded) {
+    const records = await mainImageUploadRecords(page);
+    const pendingDeadline = Date.now() + 60000;
+    let pending = records.some((file) => file.status === 'uploading');
+    while (pending && Date.now() < pendingDeadline) {
+      await page.waitForTimeout(400);
+      pending = (await mainImageUploadRecords(page)).some((file) => file.status === 'uploading');
+    }
+    const confirmedNames = new Set((await mainImageUploadRecords(page)).filter((file) => file.remote && file.status === 'done').map((file) => file.name));
     const placeholders = () => page.locator('.image-uploader .image-upload-list-item #image-placeholder-span:visible');
     const initialSlotCount = await placeholders().count().catch(() => 0);
     const initialState = await mainImageFormState(page);
@@ -4173,7 +4278,7 @@ export class SellerPublisher {
     // slots as missing capacity or reporting a false required-image error.
     const desiredTotal = Math.min(6, downloaded.length);
     const uploadCount = Math.min(initialSlotCount, Math.max(0, desiredTotal - initialOccupied));
-    const images = downloaded.slice(0, uploadCount);
+    const images = downloaded.filter((file) => !confirmedNames.has(path.basename(file))).slice(0, uploadCount);
     if (initialOccupied + images.length < 4) throw new Error(`国际站主图槽位不足：已有 ${initialOccupied} 张，可用空槽位 ${initialSlotCount} 个，至少需要 4 张`);
     const finishBatchUpload = async () => {
       const result = await this.waitForMainImageUploads(page, images.length, initialSlotCount);
@@ -4398,6 +4503,13 @@ export class SellerPublisher {
       // every per-image upload had already succeeded.
       const remainingSlots = await page.locator('.image-uploader .image-upload-list-item #image-placeholder-span:visible')
         .count().catch(() => initialSlotCount);
+      const records = await mainImageUploadRecords(page);
+      const failed = records.filter((file) => file.status === 'error');
+      if (failed.length) {
+        const error = new Error(`国际站主图上传失败：${failed.length} 张未被接收${failed[0].code != null ? `（错误码 ${failed[0].code}）` : ''}`);
+        error.code = failed.every((file) => file.retryable) ? 'MAIN_IMAGE_UPLOAD_RETRYABLE' : 'MAIN_IMAGE_UPLOAD_FAILED';
+        throw error;
+      }
       const feedback = (await visibleFeedback(page)).join(' ');
       if (/上传失败|文件.*过大|图片.*不符合|upload failed/i.test(feedback)) {
         throw new Error(`国际站主图上传失败：${compactText(feedback, 300)}`);
@@ -4408,8 +4520,8 @@ export class SellerPublisher {
     }
     const remainingSlots = await page.locator('.image-uploader .image-upload-list-item #image-placeholder-span:visible')
       .count().catch(() => initialSlotCount);
-    const occupiedSlots = Math.max(0, initialSlotCount - remainingSlots);
-    throw new Error(`国际站主图上传超过 60 秒仍未完成（已占用 ${occupiedSlots}/${expectedCount} 个槽位，空槽位 ${remainingSlots}）`);
+    const state = await mainImageFormState(page);
+    throw new Error(`国际站主图上传超过 60 秒仍未完成（已确认 ${state.occupied} 张，需上传 ${expectedCount} 张，空槽位 ${remainingSlots}）`);
   }
 
   async fillProductFields(page, product, onProgress = () => {}) {

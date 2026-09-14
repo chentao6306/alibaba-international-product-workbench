@@ -515,14 +515,16 @@ test('does not treat Alibaba feature notices as a publish result', () => {
 });
 
 test('keeps visible posting errors blocking on the publish form', () => {
-  const result = classifyAlibabaActionResult({
-    mode: 'submit',
-    url: 'https://post.alibaba.com/product/publish.htm?catId=201346401',
-    originalUrl: 'https://post.alibaba.com/product/publish.htm?catId=201346401',
-    feedback: ['报错反馈 1 错误项 商品图片必填项不能为空', '提交成功']
-  });
-  assert.equal(result.succeeded, false);
-  assert.equal(result.blockingFeedback, true);
+  for (const error of ['报错反馈 1 错误项 商品图片必填项不能为空', '请不要输入如下字符: ,']) {
+    const result = classifyAlibabaActionResult({
+      mode: 'submit',
+      url: 'https://post.alibaba.com/product/publish.htm?catId=201346401',
+      originalUrl: 'https://post.alibaba.com/product/publish.htm?catId=201346401',
+      feedback: [error, '提交成功']
+    });
+    assert.equal(result.succeeded, false);
+    assert.equal(result.blockingFeedback, true);
+  }
 });
 
 test('blocks obvious phone-to-business-service category mismatches', () => {

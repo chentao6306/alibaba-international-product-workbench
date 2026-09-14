@@ -9,6 +9,7 @@ if (!output || !process.env.QA_PRODUCT_FILE) throw new Error('Set QA_OUTPUT_DIR 
 fs.mkdirSync(output, { recursive: true });
 const imported = JSON.parse(fs.readFileSync(process.env.QA_PRODUCT_FILE, 'utf8'));
 const product = imported.product || imported;
+if (process.env.QA_TITLE) product.title = process.env.QA_TITLE;
 const publisher = new SellerPublisher(output);
 const report = { stages: [], requests: [], errors: [], snapshots: [] };
 let page;
@@ -27,6 +28,20 @@ async function snapshot(stage) {
 }
 try {
   page = await publisher.currentSellerPage();
+  if (process.env.QA_FAIL_MAIN_UPLOAD === '1') {
+    const uploadMainImages = publisher.uploadMainImages.bind(publisher);
+    publisher.uploadMainImages = async (...args) => {
+      let failed = false;
+      const pattern = 'https://filebroker.alibaba.com/t/upload**';
+      const handler = async (route) => {
+        if (!failed) { failed = true; report.injectedMainFailure = true; await route.abort('connectionreset'); }
+        else await route.continue();
+      };
+      await page.route(pattern, handler);
+      try { return await uploadMainImages(...args); }
+      finally { await page.unroute(pattern, handler); }
+    };
+  }
   if (process.env.QA_FAIL_ONE_DETAIL_UPLOAD === '1') {
     let failed = false;
     await page.route('https://filebroker.alibaba.com/x/upload**', async (route) => {

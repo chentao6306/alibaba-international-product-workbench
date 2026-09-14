@@ -3,7 +3,7 @@ import path from 'node:path';
 import express from 'express';
 import { fileURLToPath } from 'node:url';
 import { deleteWorkspaceEntities, findWorkspaceJobs, JsonStore, newId } from './store.js';
-import { ShopCollector } from './collector.js';
+import { ShopCollector, collectionPageRange } from './collector.js';
 import {
   canonicalizePriceTiers,
   categoryMismatchMessage,
@@ -412,7 +412,7 @@ async function startCollectJob(jobId) {
         status: preservedStatus,
         progress: progress.current || progress.found || 0,
         total: progress.total || 0,
-        message: progress.stage === 'listing' ? `正在读取第 ${progress.page} 页（${options.startPage}-${options.endPage}），已发现 ${progress.found} 件` : `正在读取详情 ${progress.current}/${progress.total}，已保存 ${progress.current} 件`
+        message: progress.stage === 'listing' ? `正在读取第 ${progress.page} 页（${progress.allPages ? '全部页' : `${options.startPage}-${options.endPage} 页`}），已发现 ${progress.found} 件${progress.storeTotal ? `，店铺显示 ${progress.storeTotal} 件` : ''}` : `正在读取详情 ${progress.current}/${progress.total}，已保存 ${progress.current} 件`
       });
       return !options.shouldStop();
     }, options);
@@ -430,7 +430,7 @@ async function startCollectJob(jobId) {
         status: 'completed',
         progress: products.length,
         total: products.length,
-        message: warningCount ? `读取完成，共保存 ${count} 件，其中 ${warningCount} 件详情待补全` : `读取完成，共保存 ${count} 件`,
+        message: `${collectionPageRange(options).allPages ? '全部页读取完成' : `第 ${options.startPage}-${options.endPage} 页读取完成`}，共保存 ${count} 件${warningCount ? `，其中 ${warningCount} 件详情待补全` : ''}`,
         updatedAt: new Date().toISOString()
       });
     });
@@ -471,8 +471,7 @@ app.post('/api/groups/:id/collect', (request, response, next) => {
   if (!group) return next(Object.assign(new Error('没有找到该分组'), { status: 404 }));
   const unfinished = state.jobs.find((item) => item.type === 'collect' && item.metadata?.groupId === group.id && ['queued', 'running', 'pause_requested', 'paused'].includes(item.status));
   if (unfinished) return next(Object.assign(new Error('该分组已有未完成的采集任务，请先继续或取消该任务'), { status: 409 }));
-  const options = { collectionFolderId: request.body.collectionFolderId, startPage: Math.max(1, Number(request.body.startPage || 1)), endPage: Math.max(1, Number(request.body.endPage || 100)), delaySeconds: Math.max(0, Number(request.body.delaySeconds || 0)), destinationCountry: String(request.body.destinationCountry || ''), sort: String(request.body.sort || 'default') };
-  if (options.endPage < options.startPage) options.endPage = options.startPage;
+  const options = { collectionFolderId: request.body.collectionFolderId, ...collectionPageRange(request.body), delaySeconds: Math.max(0, Number(request.body.delaySeconds || 0)), destinationCountry: String(request.body.destinationCountry || ''), sort: String(request.body.sort || 'default') };
   const job = store.createJob('collect', { groupId: group.id, groupName: group.name, collectionFolderId: options.collectionFolderId, options });
   store.update((draft) => { const target = draft.groups.find((item) => item.id === group.id); target.status = 'collecting'; target.activeJobId = job.id; });
   response.status(202).json(job);

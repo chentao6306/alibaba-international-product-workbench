@@ -33,6 +33,9 @@ test('group completion does not resave stale products over an already checkpoint
     while (store.read((state) => state.jobs[0]?.status) !== 'completed' && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
     const state = store.read();
     assert.equal(state.jobs[0].status, 'completed');
+    assert.equal(state.jobs[0].metadata.options.allPages, true);
+    assert.equal(state.jobs[0].metadata.options.endPage, null);
+    assert.match(state.jobs[0].message, /全部页读取完成/);
     assert.equal(state.products.length, 1);
     assert.equal(state.products[0].title, 'User edited title');
   } finally {

@@ -54,6 +54,13 @@ export function productIdFromUrl(value) {
     || '';
 }
 
+export function collectionPageRange(options = {}) {
+  const positivePage = (value, fallback) => Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : fallback;
+  const startPage = positivePage(options.startPage, 1);
+  const allPages = options.allPages === true || (options.allPages == null && !options.endPage);
+  return { allPages, startPage, endPage: allPages ? null : Math.max(startPage, positivePage(options.endPage, 100)) };
+}
+
 async function readInternationalModules(page) {
   return page.locator('[module-data]').evaluateAll((nodes) => {
     const result = { groups: [], products: [], companyName: '', pageNav: null };
@@ -303,21 +310,35 @@ export class ShopCollector {
       const items = new Map();
       let nextUrl = groupUrl;
       let pageNumber = 0;
-      const startPage = Math.max(1, Number(options.startPage || 1));
-      const endPage = Math.max(startPage, Number(options.endPage || 100));
+      const { startPage, endPage, allPages } = collectionPageRange(options);
+      const visited = new Set();
       const delaySeconds = Math.max(0, Number(options.delaySeconds || 0));
       const international = isInternationalShopUrl(groupUrl);
       const shouldStop = () => typeof options.shouldStop === 'function' && options.shouldStop();
-      while (nextUrl && pageNumber < endPage) {
+      while (nextUrl && (allPages || pageNumber < endPage)) {
+        if (visited.has(nextUrl)) throw new Error(`店铺翻页重复，已读取 ${pageNumber} 页，采集未完成`);
+        visited.add(nextUrl);
         if (shouldStop()) { const error = new Error('COLLECT_PAUSED'); error.code = 'COLLECT_PAUSED'; throw error; }
         pageNumber += 1;
-        await page.goto(nextUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
-        await settlePage(page);
-        await waitForHumanVerification(page);
+        let internationalData = null;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          await page.goto(nextUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+          await settlePage(page);
+          await waitForHumanVerification(page);
+          if (!international) break;
+          internationalData = await readInternationalModules(page);
+          if (internationalData.products.length || (internationalData.pageNav && Number(internationalData.pageNav.totalLines) === 0)) break;
+          if (attempt === 0) await page.waitForTimeout(1500);
+        }
+        if (international && !internationalData.products.length && !internationalData.pageNav) {
+          throw new Error(`店铺第 ${pageNumber} 页未返回商品列表，采集未完成，请稍后重试`);
+        }
         if (pageNumber < startPage) {
           onProgress({ stage: 'listing', page: pageNumber, found: items.size, skipped: true });
         }
-        const internationalData = international ? await readInternationalModules(page) : null;
+        if (internationalData?.pageNav?.currentPage && Number(internationalData.pageNav.currentPage) !== pageNumber) {
+          throw new Error(`店铺第 ${pageNumber} 页未成功加载，实际返回第 ${internationalData.pageNav.currentPage} 页，采集未完成`);
+        }
         const pageItems = international
           ? internationalData.products.map((product) => ({
               id: String(product.id || ''), url: product.url || '', title: product.subject || '',
@@ -352,7 +373,7 @@ export class ShopCollector {
             stock: 100, description: '', attributes: [], skus: []
           });
         }
-        onProgress({ stage: 'listing', page: pageNumber, found: items.size, startPage, endPage, destinationCountry: options.destinationCountry || '' });
+        onProgress({ stage: 'listing', page: pageNumber, found: items.size, startPage, endPage, allPages, storeTotal: Number(internationalData?.pageNav?.totalLines || 0), destinationCountry: options.destinationCountry || '' });
         let next = '';
         if (international && internationalData?.pageNav) {
           const nav = internationalData.pageNav;
@@ -360,15 +381,19 @@ export class ShopCollector {
           const totalPages = Math.ceil(Number(nav.totalLines || 0) / Number(nav.pageLines || 1));
           const format = nav.urlCreator?.formatString || nav.formatString || '';
           if (current < totalPages && format) next = absoluteUrl(format.replace('{0}', String(current + 1)), page.url());
+          if (current < totalPages && (allPages || pageNumber < endPage) && (!next || !pageItems.length)) {
+            throw new Error(`店铺还有未读取商品，但第 ${pageNumber} 页分页数据异常，采集未完成`);
+          }
         } else {
           next = await page.locator('a').evaluateAll((anchors) => {
             const candidate = anchors.find((anchor) => /^(下一页|下页|next|>)$/i.test((anchor.textContent || '').replace(/\s+/g, '').trim()) && anchor.href && !anchor.className.includes('disabled'));
             return candidate?.href || '';
           });
         }
-        if (!next || next === nextUrl) break;
+        if (!next) break;
+        if (next === nextUrl) throw new Error(`店铺翻页未前进，已读取 ${pageNumber} 页，采集未完成`);
         nextUrl = next;
-        if (pageNumber < endPage && delaySeconds) await page.waitForTimeout(delaySeconds * 1000);
+        if ((allPages || pageNumber < endPage) && delaySeconds) await page.waitForTimeout(delaySeconds * 1000);
       }
 
       const products = [...items.values()];

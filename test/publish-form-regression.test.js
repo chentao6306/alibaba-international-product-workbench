@@ -5,15 +5,30 @@ import path from 'node:path';
 import test from 'node:test';
 import { chromium } from 'playwright-core';
 import { findChromium } from '../server/browser-runtime.js';
-import { SellerPublisher, dismissPostingOverlays, emptyRequiredSpecificationLabels, enableImageBackedVariantSpecs, recoverRequiredAttributes, specImageIsUploaded, visibleFeedback, fillModelNumber, fillColorSpec, ensureColorSpecificationReady, alibabaKeywordText } from '../server/publisher.js';
+import { SellerPublisher, fillAndVerify, dismissPostingOverlays, emptyRequiredSpecificationLabels, enableImageBackedVariantSpecs, recoverRequiredAttributes, specImageIsUploaded, visibleFeedback, fillModelNumber, fillColorSpec, ensureColorSpecificationReady, alibabaKeywordText } from '../server/publisher.js';
 import { createPublishedReferenceTemplate } from '../server/publish-reference.js';
 import { applyPublishedProductReference } from '../server/product-model.js';
 
-test('formats forbidden keyword colons without changing source titles or attribute values', () => {
+test('accepts exact titles containing commas and still validates formatted numeric inputs', { skip: !findChromium() }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<input id="title"><input id="price" onblur="this.value = Number(this.value.replaceAll(\',\', \'\')).toLocaleString(\'en-US\')">');
+    const title = 'T-MOTOR MN1315 KV100: 50kg Max Thrust, Powering 130kg Heavy-Lift Multirotor UAV';
+    await fillAndVerify(page.locator('#title'), title, '商品标题');
+    assert.equal(await page.locator('#title').inputValue(), title);
+    await fillAndVerify(page.locator('#price'), '1250', '价格');
+    assert.equal(await page.locator('#price').inputValue(), '1,250');
+  } finally { await browser.close(); }
+});
+
+test('formats forbidden keyword punctuation without changing source titles or attribute values', () => {
   const product = { title: 'Cross-Border 1:1 Android Phone', keywords: ['1:1 Phone', 'Color: Black'], attributes: [{ name: 'Band', value: '3G: WCDMA850/2100MHz' }] };
   const original = structuredClone(product);
   assert.equal(alibabaKeywordText(product), '1 to 1 Phone\nColor Black');
   assert.equal(alibabaKeywordText({ ...product, keywords: [] }), 'Cross-Border 1 to 1 Android Phone');
+  assert.equal(alibabaKeywordText({ title: 'T-MOTOR MN1315 KV100: 50kg Max Thrust, Powering 130kg' }), 'T-MOTOR MN1315 KV100 50kg Max Thrust Powering 130kg');
+  assert.equal(alibabaKeywordText({ keywords: ['Carbon Fiber, Propeller', 'Ratio 1:1'] }), 'Carbon Fiber Propeller\nRatio 1 to 1');
   assert.ok(alibabaKeywordText({ keywords: ['Android Smartphone '.repeat(40)] }).length <= 384);
   assert.deepEqual(product, original);
 });

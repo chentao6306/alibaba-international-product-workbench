@@ -177,7 +177,7 @@ function Metric({ icon: Icon, label, value, detail, tone }) {
 function SourceView({ state, refresh, notify, onMenu, folderId }) {
   const [url, setUrl] = useState('');
   const [reading, setReading] = useState(false);
-  const [collectConfig, setCollectConfig] = useState({ startPage: 1, endPage: 10, delaySeconds: 3, destinationCountry: 'United States', sort: 'default' });
+  const [collectConfig, setCollectConfig] = useState({ allPages: true, startPage: 1, endPage: 10, delaySeconds: 3, destinationCountry: 'United States', sort: 'default' });
   const [shopPage, setShopPage] = useState(1);
   const [expandedShops, setExpandedShops] = useState({});
   const [groupPages, setGroupPages] = useState({});
@@ -283,9 +283,9 @@ function SourceView({ state, refresh, notify, onMenu, folderId }) {
         <button className="primary-button" disabled={reading}>{reading ? <LoaderCircle className="spin" size={17} /> : <Search size={17} />}读取分组</button>
       </form>
       <div className="collection-options">
-        <div className="option-heading"><strong>采集参数</strong><small>先读取分组，再选择指定分组或全部分组开始采集</small></div>
-        <label><span>起始页</span><input type="number" min="1" value={collectConfig.startPage} onChange={(event) => setCollectConfig((v) => ({ ...v, startPage: event.target.value }))} /></label>
-        <label><span>结束页</span><input type="number" min="1" value={collectConfig.endPage} onChange={(event) => setCollectConfig((v) => ({ ...v, endPage: event.target.value }))} /></label>
+        <label><span>采集范围</span><select value={collectConfig.allPages ? 'all' : 'range'} onChange={(event) => setCollectConfig((v) => ({ ...v, allPages: event.target.value === 'all', startPage: 1 }))}><option value="all">全部页</option><option value="range">指定页数</option></select></label>
+        <label><span>起始页</span><input type="number" min="1" disabled={collectConfig.allPages} value={collectConfig.startPage} onChange={(event) => setCollectConfig((v) => ({ ...v, startPage: event.target.value }))} /></label>
+        <label><span>结束页</span><input type="number" min="1" disabled={collectConfig.allPages} value={collectConfig.allPages ? '' : collectConfig.endPage} placeholder={collectConfig.allPages ? '最后一页' : ''} onChange={(event) => setCollectConfig((v) => ({ ...v, endPage: event.target.value }))} /></label>
         <label><span>采集间隔（秒/条）</span><input type="number" min="0" step="0.5" value={collectConfig.delaySeconds} onChange={(event) => setCollectConfig((v) => ({ ...v, delaySeconds: event.target.value }))} /></label>
         <label><span>交货地国家</span><select value={collectConfig.destinationCountry} onChange={(event) => setCollectConfig((v) => ({ ...v, destinationCountry: event.target.value }))}><option>United States</option><option>United Kingdom</option><option>Germany</option><option>Canada</option><option>Australia</option><option>Saudi Arabia</option><option>United Arab Emirates</option><option>全部国家</option></select></label>
         <label><span>排序</span><select value={collectConfig.sort} onChange={(event) => setCollectConfig((v) => ({ ...v, sort: event.target.value }))}><option value="default">默认排序</option><option value="priceAsc">价格从低到高</option><option value="priceDesc">价格从高到低</option><option value="newest">最新商品</option></select></label>

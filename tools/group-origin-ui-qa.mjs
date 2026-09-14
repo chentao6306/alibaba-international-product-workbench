@@ -30,6 +30,22 @@ await page.route('**/api/jobs/*/pause', async (route) => {
 try {
   await page.goto(`http://127.0.0.1:${listener.address().port}`);
   await page.getByLabel('采集分组', { exact: true }).selectOption('qa');
+  const rangeSelect = page.locator('label').filter({ hasText: '采集范围' }).locator('select');
+  const endPageInput = page.locator('label').filter({ hasText: '结束页' }).locator('input');
+  assert.equal(await rangeSelect.inputValue(), 'all');
+  assert.equal(await endPageInput.isDisabled(), true);
+  for (const width of [1440, 430]) {
+    await page.setViewportSize({ width, height: 932 });
+    if (width < 700) await page.waitForFunction(() => document.querySelector('.sidebar').getBoundingClientRect().right <= 1);
+    await page.locator('.collection-options').scrollIntoViewIfNeeded();
+    await page.screenshot({ path: path.join(root, `collection-range-${width}.png`) });
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await rangeSelect.selectOption('range');
+  assert.equal(await endPageInput.inputValue(), '10');
+  assert.equal(await endPageInput.isDisabled(), false);
+  await rangeSelect.selectOption('all');
   await page.getByRole('button', { name: '查看任务', exact: true }).waitFor();
   assert.equal(await page.locator('.collection-task-row').count(), 0);
   assert.ok((await page.locator('.collection-tasks').boundingBox()).height < 160);
