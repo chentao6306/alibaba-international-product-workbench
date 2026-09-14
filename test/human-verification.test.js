@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { chromium } from 'playwright-core';
-import { findChromium } from '../server/browser-runtime.js';
+import { findChromium, waitForHumanVerification } from '../server/browser-runtime.js';
 import { inspectVerificationDocument, waitForVerification, verificationOptions, withVerificationContext } from '../server/human-verification.js';
 
 test('human verification waits beyond days and requires consecutive healthy pages after refresh', async () => {
@@ -64,6 +64,7 @@ test('challenge errors, empty refreshes and login pages do not count as verifica
     const page = await browser.newPage();
     let markup = '';
     await page.route('https://www.alibaba.com/**', (route) => route.fulfill({ contentType: 'text/html', body: markup }));
+    await page.route('https://captcha.alibaba.com/**', (route) => route.fulfill({ contentType: 'text/html', body: '<p>Verification frame</p>' }));
     for (const [url, html, expected] of [
       ['product-detail/example.html', '<div>亲，请拖动下方滑块完成验证</div>', false],
       ['punish', '<div>请点我重试(error:FrgxUe)</div>', false],
@@ -72,10 +73,24 @@ test('challenge errors, empty refreshes and login pages do not count as verifica
       ['login', `<div>${'Login '.repeat(30)}</div>`, false],
       ['product-detail/example.html', '<div data-module-name="module_description">Real product description</div>', true],
       ['product-detail/example.html', '<div class="captcha" style="display:none">Captcha</div><div data-module-name="module_description">Real product</div>', true],
+      ['product-detail/example.html', '<div class="baxia-container" style="height:300px"></div><div data-module-name="module_description">Real product</div>', true],
+      ['product-detail/example.html', '<div class="nc-container" style="height:40px"></div><div data-module-name="module_description">Real product</div>', true],
+      ['product-detail/example.html', '<main data-module-name="module_description"><div class="challenge-description">Challenging conditions camera</div></main>', true],
+      ['product-detail/example.html', '<div style="opacity:0"><div class="nc-container">请拖动下方滑块完成验证</div></div><main data-module-name="module_description">Phone</main>', true],
+      ['product-detail/example.html', '<div style="opacity:0"><div class="nc-container">请点我重试(error:FrgxUe)</div></div><main data-module-name="module_description">Phone</main>', true],
+      ['product-detail/example.html', '<div style="position:absolute;left:-10000px"><div class="nc-container">请拖动下方滑块完成验证</div></div><main data-module-name="module_description">Phone</main>', true],
+      ['product-detail/example.html', '<main data-module-name="module_description">Phone</main><iframe style="width:1px;height:1px;border:0" src="https://captcha.alibaba.com/captcha"></iframe>', true],
+      ['product-detail/example.html', '<main data-module-name="module_description">Phone</main><iframe style="width:400px;height:300px" src="https://captcha.alibaba.com/captcha"></iframe>', false],
+      ['product-detail/example.html', '<main data-module-name="module_description">Phone</main><div role="dialog"><div class="nc_scale" style="width:300px;height:40px"></div></div>', false],
     ]) {
       markup = html;
       await page.goto(`https://www.alibaba.com/${url}`);
-      assert.equal((await page.evaluate(inspectVerificationDocument)).ready, expected, url + html);
+      const state = await page.evaluate(inspectVerificationDocument);
+      assert.equal(state.ready, expected, url + html);
+      if (expected) {
+        assert.equal(state.challenge, false, url + html);
+        assert.equal(await waitForHumanVerification(page), false, 'Normal collection must not enter human verification');
+      }
     }
   } finally { await browser.close(); }
 });

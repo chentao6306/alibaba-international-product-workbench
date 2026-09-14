@@ -25,10 +25,10 @@ export async function showHumanVerification({ url, partition, icon, shouldStop =
   onWaiting = () => {}, saveSession = async () => {}, onCreated = () => {} }) {
   if (!allowedUrl(url)) throw new Error('验证页面地址不受支持');
   const window = new BrowserWindow({ width: 1280, height: 920, minWidth: 640, minHeight: 480,
-    show: false, title: '抄得快 - 人工验证', icon, autoHideMenuBar: true,
+    show: false, skipTaskbar: true, title: '抄得快 - 人工验证', icon, autoHideMenuBar: true,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true,
       preload: path.join(directory, 'verification-preload.cjs') } });
-  const view = new WebContentsView({ webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true } });
+  const view = new WebContentsView({ webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false } });
   window.contentView.addChildView(view);
   const contents = view.webContents;
   const resize = () => { const [width, height] = window.getContentSize(); view.setBounds({ x: 0, y: 64, width, height: Math.max(1, height - 64) }); };
@@ -38,6 +38,9 @@ export async function showHumanVerification({ url, partition, icon, shouldStop =
   let loadFailed = false;
   let navigation = 0;
   let refreshedAt = 0;
+  let revealed = false;
+  let probeExpired = false;
+  let probeTimer;
   const closed = () => window.isDestroyed() || contents.isDestroyed();
   const status = (message) => { if (!window.isDestroyed()) window.webContents.send('verification:status', message); };
   const refresh = () => {
@@ -53,7 +56,11 @@ export async function showHumanVerification({ url, partition, icon, shouldStop =
   const pause = () => { paused = true; };
   const senderId = window.webContents.id;
   sessions.set(senderId, { refresh, pause });
-  window.on('close', (event) => { event.preventDefault(); status('等待完成验证；需要停止时可暂停任务'); window.show(); });
+  window.on('close', (event) => {
+    event.preventDefault();
+    if (!revealed) { paused = true; return; }
+    status('等待完成验证；需要停止时可暂停任务'); window.show();
+  });
   contents.setWindowOpenHandler(() => ({ action: 'deny' }));
   contents.on('will-navigate', (event, target) => { if (!allowedUrl(target)) event.preventDefault(); });
   contents.on('will-redirect', (event, target) => { if (!allowedUrl(target)) event.preventDefault(); });
@@ -63,23 +70,36 @@ export async function showHumanVerification({ url, partition, icon, shouldStop =
   });
   contents.on('render-process-gone', () => { loadFailed = true; status('页面已停止响应，可刷新页面后重试'); });
   const inspect = async () => {
+    if (probeExpired && !revealed) throw Object.assign(new Error('验证地址未加载出有效页面，请稍后重试'), { code: 'VERIFICATION_PAGE_UNAVAILABLE' });
     if (loadFailed || contents.isLoadingMainFrame()) return { ready: false, error: loadFailed };
     const version = navigation;
     const state = await contents.executeJavaScript(`(${inspectVerificationDocument.toString()})()`);
+    if (state.challenge && version === navigation && !contents.isLoadingMainFrame() && !revealed) {
+      revealed = true;
+      clearTimeout(probeTimer);
+      window.setSkipTaskbar(false);
+      window.show(); window.focus();
+    }
     return { ...state, ready: state.ready && version === navigation && !contents.isLoadingMainFrame(), url: `${state.url}#navigation-${navigation}` };
   };
   try {
     await window.loadFile(path.join(directory, 'verification.html'));
-    window.show(); window.focus();
     onCreated({ window, contents, refresh, inspect });
+    // The authenticated partition may already show a healthy product even
+    // when the background collector was challenged. Keep that probe hidden.
+    probeTimer = setTimeout(() => { probeExpired = true; }, 60000);
     // did-fail-load tracks the active navigation; a replaced load rejects too.
     contents.loadURL(url).catch(() => {});
     await waitForVerification({ inspect, isClosed: closed, shouldStop: () => paused || shouldStop(),
-      onWaiting: (message) => { status(message); onWaiting(message); } });
+      onWaiting: (message) => {
+        if (probeExpired && !revealed) throw Object.assign(new Error('验证地址未加载出有效页面，请稍后重试'), { code: 'VERIFICATION_PAGE_UNAVAILABLE' });
+        status(message); onWaiting(revealed ? message : '正在检查页面访问状态');
+      } });
     if (paused || shouldStop()) throw verificationPaused();
     await saveSession({ webContents: contents });
     return true;
   } finally {
+    clearTimeout(probeTimer);
     sessions.delete(senderId);
     if (!contents.isDestroyed()) contents.close();
     if (!window.isDestroyed()) window.destroy();

@@ -227,7 +227,7 @@ export async function hasExplicitHumanChallenge(page) {
 export async function isHumanVerificationPage(page) {
   if (!page || page.isClosed()) return false;
   const authUrl = /(^|\/)(login|passport|signin|sign-in)([/?#]|$)/i.test(page.url());
-  return authUrl || await hasExplicitHumanChallenge(page);
+  return authUrl || await page.evaluate(inspectVerificationDocument).then((state) => state.challenge || state.pending).catch(() => false);
 }
 
 export async function waitForHumanVerification(page, options = {}) {
@@ -250,10 +250,11 @@ export async function waitForHumanVerification(page, options = {}) {
   }
   if (!verificationVisible) return false;
   const challenge = await hasExplicitHumanChallenge(page);
+  const pending = !challenge && await page.evaluate(inspectVerificationDocument).then((state) => state.pending).catch(() => false);
   if (contextModes.get(page.context())?.headless) {
     // A plain Alibaba login redirect is handled as an unavailable detail page
     // by the caller. Only an actual challenge should interrupt headless work.
-    if (!challenge) return false;
+    if (!challenge && !pending) return false;
     const bridge = globalThis.__KUA_YIPU_SELLER_BRIDGE;
     if (typeof bridge?.humanVerification === 'function') {
       const verificationUrl = page.url();
@@ -293,13 +294,14 @@ export async function waitForHumanVerification(page, options = {}) {
   // A normal login redirect is not a human challenge. Treat it as an
   // unavailable authenticated page without revealing the off-screen browser;
   // only actual captcha text below should interrupt automation.
-  if (!challenge) return false;
-  await revealPage(page);
+  if (!challenge && !pending) return false;
+  let revealed = false;
   try {
     await waitForVerification({
       inspect: async () => {
         const state = await page.evaluate(inspectVerificationDocument);
-        if (!state.ready) await page.evaluate(() => {
+        if (state.challenge && !revealed) { await revealPage(page); revealed = true; }
+        if (revealed && !state.ready) await page.evaluate(() => {
           if (document.getElementById('workbench-human-actions')) return;
           const toolbar = document.createElement('div');
           toolbar.id = 'workbench-human-actions';
