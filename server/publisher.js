@@ -13,6 +13,7 @@ import { submitWithRepairs } from './publish-recovery.js';
 import { readSellerGroups, applySellerGroup } from './seller-groups.js';
 import { ImageDownloadQueue } from './image-download-queue.js';
 import { originCountry, isOriginRegionAttribute } from './origin-country.js';
+import { uploadEditorDetailImages } from './description-image-upload.js';
 
 const WORKBENCH_URL = 'https://i.alibaba.com/';
 const SOURCE_DESCRIPTION_SELECTOR = '[data-module-name="module_description"], [data-testid="module-description"], [data-module-name="module_structure_description"], [data-testid="module-details-structure-description"]';
@@ -4891,65 +4892,7 @@ export class SellerPublisher {
       return assigned;
     };
     const initialEditorImages = await editorImageCount();
-    const uploadViaAlibabaEditorPlugin = async () => {
-      const payloads = imagePaths.map((filePath) => ({
-        name: path.basename(filePath),
-        type: path.extname(filePath).toLowerCase() === '.png' ? 'image/png' : 'image/jpeg',
-        data: fs.readFileSync(filePath).toString('base64')
-      }));
-      const started = await page.evaluate((files) => {
-        const editors = [...(window.tinymce?.editors || []), ...(window.tinyMCE?.editors || [])];
-        const editor = editors.find((item) => item && !item.hidden && item.plugins?.alipicpastedrag);
-        const plugin = editor?.plugins?.alipicpastedrag;
-        if (!editor || !plugin?.insertAnchorImages || !plugin?.uploadFiles) return false;
-        const created = files.map((item, index) => {
-          const binary = atob(item.data);
-          const bytes = new Uint8Array(binary.length);
-          for (let offset = 0; offset < binary.length; offset += 1) bytes[offset] = binary.charCodeAt(offset);
-          const file = new File([bytes], item.name, { type: item.type || 'image/jpeg' });
-          file.fileUUID = `kyp-${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`;
-          return file;
-        });
-        if (plugin.checkFilesError?.(created)) return { started: false, reason: 'rejected' };
-        // Alibaba's custom drag/paste plugin requires placeholders before its
-        // uploader can associate server responses with editor images.
-        plugin.insertAnchorImages(created);
-        plugin.uploadFiles(created);
-        return { started: true };
-      }, payloads).catch(() => ({ started: false, reason: 'exception' }));
-      if (!started?.started) return null;
-
-      const deadline = Date.now() + 60000;
-      let lastReported = -1;
-      while (Date.now() < deadline) {
-        let stable = 0;
-        for (const frame of page.frames()) {
-          const body = frame.locator('body.mce-content-body, body[contenteditable="true"]');
-          if (!await body.isVisible().catch(() => false)) continue;
-          stable = Math.max(stable, await body.locator('img[src], img[data-src]').evaluateAll((nodes) => nodes.filter((node) => {
-            const url = String(node.getAttribute('data-src') || node.getAttribute('src') || '').trim();
-            return /^(?:https?:)?\/\//i.test(url) && !/loading|progress|placeholder/i.test(url);
-          }).length).catch(() => 0));
-        }
-        const uploaded = Math.max(0, stable - initialEditorImages);
-        if (uploaded !== lastReported) {
-          lastReported = uploaded;
-          onProgress(`上传详情图片 ${uploaded}/${imagePaths.length}`);
-        }
-        if (stable >= initialEditorImages + imagePaths.length) {
-          await syncEditor();
-          return stable - initialEditorImages;
-        }
-        const feedback = (await visibleFeedback(page)).join(' ');
-        if (/上传失败|图片.*失败|文件.*过大|图片.*不符合|upload failed/i.test(feedback)) {
-          throw new Error(`国际站详情图上传失败：${compactText(feedback, 300)}`);
-        }
-        await page.waitForTimeout(600);
-      }
-      const inserted = await editorImageCount();
-      throw new Error(`普通编辑器未完成详情图上传（已插入 ${Math.max(0, inserted - initialEditorImages)}/${imagePaths.length} 张）`);
-    };
-    const pluginInserted = await uploadViaAlibabaEditorPlugin();
+    const pluginInserted = await uploadEditorDetailImages(page, imagePaths, onProgress);
     if (pluginInserted !== null) return pluginInserted;
 
     let uploadButton = null;
