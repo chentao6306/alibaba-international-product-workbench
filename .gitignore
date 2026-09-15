@@ -11,3 +11,8 @@ vendor/chromium/
 release-installer*/
 .e2e-category-routing/
 .packaged/
+release/
+docx_render/
+*.enc
+*restore-key*.json
+*.dump

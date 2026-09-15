@@ -1,0 +1,21 @@
+[Unit]
+Description=Kua Yipu authorization service
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=kua-yipu
+Group=kua-yipu
+WorkingDirectory=/opt/kua-yipu-auth
+EnvironmentFile=/etc/kua-yipu/auth.env
+ExecStart=/opt/kua-yipu-runtime/node-v22.23.2-linux-x64/bin/node /opt/kua-yipu-auth/auth-server/index.js
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,764 +1,228 @@
-# 抄得快：阿里巴巴国际站商品工作台
+# 抄得快 · 阿里巴巴国际站商品工作台
 
-这是一个运行在 Windows 本机的阿里巴巴国际站商品采集、资料整理和批量上架工具。系统读取同行店铺的分组及公开商品资料，将商品保存到本地工作台，支持人工编辑、批量修改、资料完整性检查，并通过已登录的 My Alibaba 浏览器保存草稿或提交发布。
+**Stable 分支：1.4.17。** Windows 桌面客户端，提供国际站、1688、速卖通商品采集、资料编辑、引用成功商品、批量保存草稿与提交上架。授权管理后台部署在 Linux 服务器。
 
-本项目发布目标为 **Alibaba.com 阿里巴巴国际站**，支持国际站、1688 和速卖通商品采集。原始资料保留在来源快照中；1688、速卖通商品可按设置使用 DeepSeek 将中文标题翻译为英文，并按用户汇率换算美元售价。图片翻译尚未提供。
+客户端通过 Playwright 操作真实浏览器页面，不是 Alibaba 官方发布 API。验证码需要用户完成；平台审核、账号权限和类目必填规则仍由 Alibaba 决定。
 
-> 重要说明：本系统通过浏览器自动化操作公开商品页和 My Alibaba 发布页，不使用阿里巴巴官方商品发布 API。Alibaba 页面结构、类目规则、账号权限或风控策略变化时，自动化流程可能需要同步适配。
+## 下载与完整备份
 
-## 当前代码基线
+- [Stable 完整源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/Stable)
+- [1.4.17 安装包与加密数据备份](https://github.com/chentao6306/alibaba-international-product-workbench/releases/tag/v1.4.17-stable)
+- [1.4.17 修复和验证记录](docs/verification-1.4.17.md)
+- [备份范围、解密和恢复说明](docs/stable-backup.md)
+- [Stable 源码与备份核查记录](docs/stable-1.4.17-audit.md)
 
-- GitHub 仓库：`chentao6306/alibaba-international-product-workbench`
-- 完整项目分支：`codex/full-project-20260901`
-- 当前应用版本：`1.4.17`
-- 源码语言：JavaScript（ES Modules）、JSX、HTML、CSS、PowerShell 和 Windows Batch
+此分支包含前端、本地服务、Electron 桌面端、授权服务器、数据库结构、管理页面、部署脚本、测试、静态资源与锁定依赖清单。`build/installer.nsh` 是构建源码，必须保留。
 
-仓库保存可复现构建所需的源码、锁定依赖清单、测试、构建配置、授权服务源码和维护脚本。`node_modules`、`dist`、内置 Chromium、安装包以及包含账号会话和业务商品的运行时数据不进入 Git；它们分别由依赖安装、构建、浏览器准备和应用运行产生。这样既能从源码完整重建程序，也不会把卖家 Cookie、密码或业务数据上传到 GitHub。
+Release 另存安装包和加密数据备份，覆盖项目本地数据、当前桌面用户数据、商品/任务/图片、服务器数据库和实际部署配置。密码、Cookie、环境变量等仅位于加密备份，解密密钥由项目所有者在 GitHub 之外保管。
 
-## 1. 系统功能
+`node_modules`、`dist`、`.packaged`、`vendor/chromium` 是可再生成依赖或构建输出，不直接进入 Git 历史；通过锁定依赖和下文命令恢复，发行 EXE 已包含依赖和浏览器。备份清单会列出未纳入的运行时锁文件等例外。源码和数据备份不是整台 Windows 系统镜像。
 
-> 桌面版说明：项目现在同时提供 Electron 桌面壳、Windows 安装包/便携包配置，以及独立的 Linux 授权服务。桌面版启动后先验证 Alibaba 账号授权，再进入现有工作台；授权服务地址通过打包环境变量 `KUA_YIPU_AUTH_URL` 配置。Electron 发布包自带 Chromium，不依赖用户电脑安装 Edge 或 Chrome。授权服务部署说明见 `auth-server/README.md`。
+## 环境要求
 
-### 1.1 店铺与商品采集
+| 项目 | 要求 |
+| --- | --- |
+| 桌面开发/打包 | Windows 10/11 x64，Git，Node.js 22 LTS，npm 10+ |
+| 资源 | 建议 8 GB 以上内存，首次安装/打包预留至少 8 GB 磁盘 |
+| 浏览器 | 与锁定 Playwright Core 匹配的 Chromium，按下文下载 |
+| 授权服务器 | Linux、Node.js 22、PostgreSQL、Nginx、有效 HTTPS 证书 |
+| 业务使用 | 网络可访问 Alibaba，有发布权限的卖家账号、有效软件授权码 |
 
-- 采集前先新建或选择本地采集分组；店铺、单品、以图搜品、1688 和速卖通入口均保存到任务创建时选定的分组。
-- 商品工作台和上架队列按采集分组隔离，可重命名分组、移动商品和删除空分组。升级前的商品自动归入“历史商品”，原有资料保留。
-- 同一来源商品可以分别采到不同分组，各自独立编辑；同一分组内重复采集不会新增重复商品。
-- 支持 `*.en.alibaba.com` 店铺首页、商品列表页和商品分组链接。
-- 先读取店铺全部分组，再采集指定分组或全部分组。
-- 国际站店铺会额外读取“橱窗（Featured products）”页面，并作为独立分组展示；用户可以只勾选橱窗采集。
-- 支持设置起始页、结束页、采集间隔、交货地国家和排序方式。
-- 逐条读取商品详情，并在每件商品完成后立即保存，避免中途退出造成全部数据丢失。
-- 支持暂停、继续和取消采集任务；列表页、下一页地址、已发现链接和已完成详情编号写入独立断点文件，暂停或重启后接续未完成位置。1.4.17 之前未记录的列表断点无法从计数还原。
-- 验证码等待不设人工操作超时，支持刷新失效页面；验证会话不能同步时回到原采集浏览器完成验证并保留断点。
-- 分组操作按钮使用“采集商品”文案，避免将采集动作误解为单纯读取。
-- 支持删除单个或多个店铺、分组和商品；有关联任务运行时会阻止危险删除。
-- 使用英文站点语言和指定交货地读取数据，避免浏览器本地语言污染来源字段。
+版本以 `package.json` 和 `package-lock.json` 为准：Electron 44.3.0、Playwright Core 1.62.1、React 19、Vite 6、Express 5、Sharp 0.35.4、SheetJS 0.20.3。不要删除锁文件后任意升级依赖。
 
-### 1.2 商品资料工作台
+## 从 GitHub 首次启动
 
-- 上架任务可读取当前账号的国际站商品分组，选择目标分组后逐件设置并复核；任务暂停后继续仍使用原分组，分组不存在时不会误投到其他分组。
-- 发布前提前下载当前商品图片，与打开表单同时进行；总下载并发仍限制为 3，上传确认、必填校验和失败重试流程保留。
-- 按标题或商品 ID 搜索，并按资料状态筛选。
-- 每页显示 10、20 或 50 件商品。
-- 支持勾选当前页，也支持显式选择“全部商品”，跨页批量处理。
-- 支持单个删除、批量删除、单品编辑和批量修改。
-- 批量修改抽屉支持中文/English 界面切换；类目使用选择控件，类目 ID 由选项或已绑定发布页生成。
-- 展示主图数、详情图数、属性数、SKU 数、价格档数以及资料检查结果。
-- 对缺图、缺少产地、阶梯价异常、SKU 信息不完整等问题进行发布前检查。
-- 保存来源商品链接，便于随时回查和人工核对。
-
-### 1.3 单品编辑
-
-商品编辑器按业务维度拆分为多个标签页，包括：
-
-- 基础信息：标题、副标题、关键词、目标类目、基准价、库存、起订量和交期。
-- 图片与视频：主图、详情图、SKU 图片、主视频和详情视频。
-- 商品属性：类目属性、产地、品牌、型号等。
-- 自定义属性：自定义名称和值。
-- 规格与 SKU：规格名称、规格选项、SKU 组合、编码、价格、库存和图片。
-- 交易信息：销售单位、定价模式、阶梯价和付款方式。
-- 物流信息：重量、尺寸、包装、发货期和物流模板。
-- 服务与证书：定制、样品、售后服务及证书资料。
-- 商品描述：摘要、普通富文本详情 HTML 和详情图片。
-- 国家/地区定价：按国家或地区维护差异化价格资料。
-- 主图编辑提供 1-6 号图片清单、删除、清空、本地图片上传和来源图片库还原；可对本地图片添加水印或还原来源图，并在批量修改中按主图 1 至主图 6 删除。
-- 交易信息支持数量阶梯价、SKU 价、FOB 区间价格和 FOB 阶梯价格；FOB 区间/阶梯会在发布前校验数值和起订量顺序。
-
-### 1.4 批量修改
-
-批量修改会先列出每件商品的旧值和拟修改的新值，确认后才保存。当前工作台覆盖以下批量编辑维度：
-
-- 基础信息和标题字段。
-- 产品类目。
-- 交易信息和价格。
-- 物流信息。
-- 商品描述。
-- 商品属性和自定义属性。
-- 产品规格、SKU 价格和库存。
-- 商品图片和详情描述。
-- 证书与服务。
-- 国家/地区定价。
-- 图片去重、主图复制到详情图和空图片清理。
-- SKU 表格导入、导出。
-
-批量修改只改变工作副本，不覆盖不可变的来源快照；每次修改都会记录审计信息。
-
-### 1.5 保存草稿与直接发布
-
-- 使用独立持久化浏览器打开并保持 My Alibaba 登录状态。
-- 采集时保存来源商品的国际站叶子类目 ID；发布时按叶子类目自动分组，并为每组生成对应的 `post.alibaba.com/product/publish.htm?catId=...` 发布页。
-- 新采集商品不需要人工绑定发布页。系统以来源商品的末级类目 ID 为准生成发布地址，自动按该 ID 分组并分别填写。
-- 商品已有末级类目 ID 时，旧的名称缓存或手工绑定不能覆盖这个 ID，避免同名类目、历史绑定和中英文显示差异把商品送进错误表单。
-- 对没有解析到类目 ID 的旧商品，优先重新采集以补齐真实 ID；确实无法重新采集时，才使用一次性手工绑定作为兼容方案。同类目绑定会缓存复用，不需要逐件绑定。
-- 发布前校验 URL 中的 `catId` 和商品目标类目 ID；ID 一致时不再因页面显示中文、采集结果显示英文而误报类目不匹配。
-- 不允许用一级类目或不绑定类目强行混发。Alibaba 的叶子类目决定必填属性、规格和发布表单，跨叶子类目混发会造成字段丢失或平台拒绝。
-- 批量逐件填充标题、属性、规格、SKU、阶梯价、物流、图片和详情。
-- 支持保存草稿和直接提交发布两种模式，默认选择“直接提交”；仍可在任务面板切换为“保存草稿”。
-- 普通编辑器详情图通过 Alibaba 当前 `alipicpastedrag` 上传插件逐张上传，并等待每张图片替换为正式图片地址。
-- 有颜色规格时先打开规格图片开关，再按颜色逐项上传对应规格图；上传失败会阻止提交，避免生成缺图商品。
-- 支持暂停、继续和取消上架任务；点击暂停会立即关闭当前商品的自动化发布页并停止当前上传及后续商品，已完成商品和数据会保留。
-- 保存每件商品的执行结果、错误原因和任务历史。
-- 登录失效或触发验证码时自动显示浏览器，等待人工处理；验证完成后继续任务并重新最小化。
-- 采集和上架期间的普通页面始终使用无头浏览器；验证码先在隐藏探测窗口中确认，只有检测到真实可见滑块/人机验证控件时才最大化显示，完成后立即关闭并从任务栏移除。
-- 详情页的属性、包装、价格、SKU 和详情图片按懒加载模块等待并在首次结果不完整时自动重试一次，避免把页面尚未渲染完成的空字段保存进商品资料。
-- 能识别“产品信息已经成功提交并进入审核流程”等成功反馈，避免把已提交商品误报为失败。
-
-## 2. 环境与版本
-
-### 2.1 必需环境
-
-| 项目 | 要求 | 当前验证环境 |
-| --- | --- | --- |
-| 操作系统 | Windows 10/11，64 位 | Windows 11 |
-| Node.js | 20 LTS 或更高版本 | 22.22.2 |
-| npm | 随 Node.js 安装，建议 10 或更高 | 10.9.7 |
-| 浏览器 | Electron 桌面版自带 Chromium；源码开发可使用项目准备的 Chromium | 发布包不依赖外部 Edge/Chrome |
-| 网络 | 可正常访问 `alibaba.com` 和 `post.alibaba.com` | 必需 |
-| 卖家账号 | 已开通 My Alibaba 商品发布权限 | 发布功能必需 |
-| 磁盘空间 | 建议至少预留 5 GB | 图片、缓存和浏览器资料会持续增长 |
-| 内存 | 建议 8 GB 以上，批量任务建议 16 GB | 取决于浏览器和商品数量 |
-
-安装 Node.js 后，在 PowerShell 或命令提示符中检查：
+以下命令在 Windows PowerShell 执行。私有仓库需要已获授权的 GitHub SSH 身份。
 
 ```powershell
+git clone --branch Stable git@github.com:chentao6306/alibaba-international-product-workbench.git
+cd alibaba-international-product-workbench
 node --version
 npm --version
+npm ci
+
+# 使用已锁定的 playwright-core CLI，避免另下载不同版本的 Playwright
+node node_modules/playwright-core/cli.js install chromium
+npm run prepare:chromium
+npm run build
+npm run desktop
 ```
 
-如果系统提示找不到 `node` 或 `npm`，请安装 Node.js 20 LTS 或更高版本，然后重新打开命令窗口。
+`prepare:chromium` 将对应 revision 的 Chromium 复制到 `vendor/chromium`。自备同版本浏览器时可先设置 `$env:KUA_YIPU_CHROMIUM_SOURCE='D:/browsers/chrome-win64'`，目录内必须有 `chrome.exe`。
 
-### 2.2 项目依赖版本
+桌面版先显示登录和授权码窗口。成功后进入工作台，数据保存在 `%APPDATA%\alibaba-international-product-workbench`。已安装 EXE 的日常使用直接打开“抄得快”快捷方式，不需要 Node.js。
 
-依赖由 `package-lock.json` 锁定，首次安装必须保留该文件并使用仓库内的版本。主要依赖如下：
+## 日常启动和开发
 
-| 依赖 | 声明版本 | 用途 |
+所有 npm 命令均在仓库根目录执行。
+
+| 场景 | 命令 | 地址/结果 |
 | --- | --- | --- |
-| React / React DOM | `^19.0.0` | 前端界面 |
-| Vite | `^6.2.2` | 前端构建和开发服务 |
-| Express | `^5.1.0` | 本地 API 和静态页面服务 |
-| Playwright Core | `1.62.1` | 内置 Chromium 浏览器自动化 |
-| Cheerio | `^1.1.2` | HTML 结构化解析 |
-| Sharp | `^0.35.3` | 图片格式识别、压缩和尺寸处理 |
-| SheetJS xlsx | `^0.18.5` | SKU 表格导入和导出 |
-| Lucide React | `^0.468.0` | 界面图标 |
-| Concurrently | `^9.1.2` | 同时运行开发前端和后端 |
+| 源码桌面日常启动 | `npm run desktop` | Electron 窗口，使用现有 `dist` |
+| 浏览器版日常启动 | `npm start` | `http://127.0.0.1:8787` |
+| 前后端开发 | `npm run dev` | Vite `5173`，API `8787` |
+| 开发服务与桌面壳 | `npm run desktop:dev` | 桌面仍需已有 `dist`，Vite 热更新在 `5173` |
+| 重新构建前端 | `npm run build` | `dist/` |
+| 全部测试 | `npm test -- --test-concurrency=2` | 降低同时运行浏览器测试的内存竞争 |
+| 本地授权后台预览 | `node auth-server/dev.js` | `http://127.0.0.1:8790`，仅开发 |
 
-`package-lock.json` 使用 lockfile v3。不要手工删除锁文件后随意升级依赖；升级前应先完整运行测试和上架回归。
+桌面界面更改后需 `npm run build` 并重新打开桌面端。`start.bat` 会按需安装依赖、构建并启动浏览器版；`dev.bat` 启动开发服务。关闭命令窗口或按 `Ctrl+C` 停止对应服务。
 
-### 2.3 端口
-
-| 模式 | 地址 | 说明 |
-| --- | --- | --- |
-| 正常运行 | `http://127.0.0.1:8787/` | 后端 API 与构建后的前端 |
-| 开发前端 | `http://127.0.0.1:5173/` | Vite 开发服务器 |
-| 开发后端 | `http://127.0.0.1:8787/` | Vite 将 `/api` 转发到此端口 |
-
-服务只监听本机 `127.0.0.1`，局域网和公网设备默认无法访问。
-
-## 3. 第一次启动
-
-### 3.1 推荐方式：双击启动脚本
-
-1. 确认已经安装 Node.js 20 LTS 或更高版本。
-2. 进入项目根目录。
-3. 双击 `start.bat`。
-4. 首次运行会自动执行依赖安装和前端构建，请等待命令窗口出现“系统地址”。
-5. 浏览器会自动打开 `http://127.0.0.1:8787/`。
-6. 启动后不要关闭命令窗口；关闭窗口会停止本地服务。
-
-`start.bat` 实际执行的工作是：
-
-1. 检查 `node` 和 `npm`。
-2. 在没有 `node_modules` 时执行 `npm install`。
-3. 执行 `npm run build`，生成 `dist` 前端文件。
-4. 执行 `npm start`，启动本地服务。
-5. 自动打开系统页面。
-
-### 3.2 手工首次启动
-
-在项目根目录打开 PowerShell：
+更新 Stable 后：
 
 ```powershell
-npm install
-npm run build
-npm start
-```
-
-然后访问：
-
-```text
-http://127.0.0.1:8787/
-```
-
-停止系统时，在运行 `npm start` 的窗口按 `Ctrl+C`。
-
-### 3.3 第一次使用的初始化
-
-1. 打开“店铺采集”，点击“打开采集浏览器”。如 Alibaba 要求登录或验证，请人工完成。
-2. 输入同行店铺链接，读取分组，再选择分组和采集参数。
-3. 打开“上架任务”，点击“打开 My Alibaba”。
-4. 在弹出的浏览器中登录卖家账号。
-5. 打开与待上架商品一致的商品发布类目页面。
-6. 回到系统点击“绑定国际站发布页”。
-7. 建议先用 1 件商品执行“保存草稿”，人工检查资料后再使用批量直接发布。
-
-浏览器登录资料会保存在本地应用数据目录，正常情况下不需要每次重新登录。Electron 会在启动采集或发布流程前同步桌面浏览器会话 Cookie 和 Alibaba 本地存储；如果 Alibaba 要求重新登录或人工验证，程序才会最大化显示内置浏览器窗口，验证完成后继续任务并重新隐藏窗口和任务栏图标。
-
-## 4. 日常启动
-
-### 4.1 最稳妥的日常方式
-
-每天使用时直接双击：
-
-```text
-start.bat
-```
-
-该脚本会重新构建前端后启动，适合不确定代码是否更新过的情况。
-
-### 4.2 快速日常启动命令
-
-如果已经完成首次安装，并且代码和前端文件没有变化，可以在项目目录运行：
-
-```powershell
-npm start
-```
-
-这条命令不会重新安装依赖，也不会重新构建前端，只会启动现有 `dist`。如果拉取了新代码、修改了前端，或页面看起来不是最新版本，应先执行：
-
-```powershell
-npm install
-npm run build
-npm start
-```
-
-从 GitHub 更新项目后的推荐流程：
-
-```powershell
-git pull
-npm install
-npm run build
-npm start
-```
-
-同一台电脑不要同时启动多个实例，否则端口、浏览器资料目录和任务状态可能冲突。
-
-## 5. 开发启动
-
-双击 `dev.bat`，或在项目根目录运行：
-
-```powershell
-npm install
-npm run dev
-```
-
-开发页面：
-
-```text
-http://127.0.0.1:5173/
-```
-
-开发模式会同时运行：
-
-- Vite 前端热更新服务，端口 `5173`。
-- Node.js 后端监听服务，端口 `8787`。
-
-开发模式用于改代码和调试，不建议作为长期生产运行方式。
-
-## 6. 标准业务流程
-
-### 6.1 采集同行商品
-
-1. 进入“店铺采集”。
-2. 粘贴 Alibaba 国际站同行店铺、商品列表或分组链接。
-3. 点击“读取分组”。
-4. 展开店铺，选择一个、多个或全部分组。
-5. 设置起始页、结束页、采集间隔、交货地国家和排序。
-6. 点击读取选中分组或读取全部分组。
-7. 任务运行中可暂停；点击暂停后立即停止当前商品页面操作并保留已完成数据。
-8. 进入“商品工作台”检查采集结果。
-
-采集间隔表示两件商品之间额外等待的秒数，不包含页面加载、动态数据等待、图片解析和重试时间，因此实际每件商品耗时通常会大于设置值。
-
-### 6.2 整理商品资料
-
-1. 根据“资料完整”“资料待补”或“资料阻断”筛选商品。
-2. 点击编辑，核对来源类目、标题、属性、规格、SKU、阶梯价、图片、详情和物流数据。
-3. 对多件商品使用批量修改，并在旧值/新值预览中确认修改范围。
-4. 修复资料阻断项。
-5. 勾选当前页商品，或使用“全选全部商品”跨页选择全部结果。
-
-### 6.3 保存草稿或直接发布
-
-1. 打开“上架任务”，点击“打开 My Alibaba”并确认卖家账号已登录。
-2. 在商品工作台勾选要处理的商品；系统会显示识别出的类目组和每组商品数量。
-3. 有类目 ID 的商品会自动路由，无需手动绑定。系统按叶子类目逐组打开正确发布页并处理商品。
-4. 只有“缺少叶子类目 ID”的旧数据会显示待确认提示。此时在 My Alibaba 打开对应发布表单，点击“绑定国际站发布页”一次即可，绑定会缓存到该类目。
-5. 选择“保存草稿”或“直接提交”。
-6. 点击“开始处理”。任务运行中可暂停；暂停会立即关闭当前商品页面并停止后续商品，已完成数据会保留。
-7. 查看每件商品结果，不要只看任务总数；失败商品会保留具体原因，便于补齐属性或重新映射规格。
-
-系统不会因为一级类目相同就把不同叶子类目合并，也不会把一个成功商品的全部字段复制给其他类目。类目属性、规格和必填字段必须以目标叶子类目的发布表单为准；标题、关键词、价格和详情图片仍按每个商品自身数据填写。生产使用建议先保存少量草稿、人工核对，再直接发布。直接提交会在真实卖家账号产生商品和审核记录。
-
-## 7. 技术架构
-
-```text
-React + Vite 前端
-        |
-        | HTTP / JSON
-        v
-Express 本地服务
-        |
-        +-- JSON 数据仓库与原子写入
-        +-- 采集/上架任务状态机
-        +-- 来源结构化数据解析
-        +-- 数据完整性与一致性校验
-        +-- Sharp 图片处理
-        +-- xlsx SKU 表格处理
-        |
-        v
-Playwright Core + Electron 内置 Chromium
-        |
-        +-- Alibaba.com 来源商品页
-        +-- My Alibaba 商品发布页
-```
-
-### 7.1 前端
-
-前端使用 React 19 和 Vite 6，负责店铺采集、商品工作台、单品编辑、批量修改、上架任务、设置和任务反馈。前端不直接控制 Alibaba 页面，而是调用本地 Express API。
-
-### 7.2 后端
-
-Express 服务负责：
-
-- 数据持久化和 API。
-- 采集任务、上架任务及暂停/恢复状态。
-- 来源页面解析和结构化字段归一。
-- 发布前资料校验。
-- 浏览器生命周期、登录状态和验证码处理。
-- 图片下载、格式验证、压缩和临时文件管理。
-- 执行结果和错误记录。
-
-主要后端模块的职责如下：
-
-| 模块 | 职责 |
-| --- | --- |
-| `server/index.js` | API、静态资源、任务编排和应用启动 |
-| `server/collector.js` | 店铺、普通分组、橱窗以及分组商品采集 |
-| `server/publisher.js` | 商品详情补全、资料完整性判定和 My Alibaba 发布自动化 |
-| `server/browser-runtime.js` | Chromium 启动、会话同步、隐藏窗口和验证码切换 |
-| `server/alibaba-source-data.js` | Alibaba 页面结构化数据提取和字段归一 |
-| `server/product-model.js` | 来源快照、工作副本、发布快照和审计记录 |
-| `server/store.js` | `workspace.json` 原子持久化和关联数据删除保护 |
-
-### 7.3 浏览器自动化
-
-Electron 桌面版使用打包在安装目录 `resources/chromium` 下的 Chromium，通过持久化浏览器配置保存登录状态。采集浏览器与卖家发布浏览器使用不同资料目录，防止来源站点和卖家后台会话互相干扰。源码开发时运行 `npm run prepare:chromium` 将 Chromium 准备到 `vendor/chromium`；如果桌面版找不到内置浏览器，程序会明确提示安装包不完整，而不会偷偷切换到用户的外部浏览器。
-
-正常任务中浏览器会保持最小化。检测到登录、验证码、安全验证或人工确认页面时才显示窗口。不要手工关闭自动化浏览器；关闭后当前任务可能失败，需要重新打开并继续。
-
-### 7.4 来源数据提取
-
-系统优先读取页面内的结构化数据和动态渲染结果，再使用 HTML 解析作为补充。采集时会设置英文语言环境和用户选择的交货地，减少语言、币种和地区造成的数据混淆。
-
-公开商品页不一定暴露全部卖家后台字段。系统会标记字段来源和不确定项，不能把推导值伪装成来源原值。
-
-### 7.5 发布自动化
-
-Alibaba 不同末级类目的发布表单字段、可选值和必填规则并不相同。系统根据采集到的末级类目 ID 自动打开对应表单，再根据当前 DOM 控件填充字段；不要求用户为每个不同类目预先绑定发布页。当来源规格在目标类目中没有同名选项时，会尝试使用页面允许的“添加”功能。若目标类目不允许该值，系统会阻止发布，避免静默替换来源数据。
-
-发布器会对 AliCDN 图片下载和 Alibaba 表单导航的瞬时断连做有限重试，并在提交前重新核对主图数量、上传状态、颜色规格和阶梯价输入。有限重试仍失败时会保留明确错误，不会无限请求平台，也不会把未确认成功的商品标记为上架成功。
-
-## 8. 数据一致性设计
-
-系统将商品数据分为三个层次：
-
-1. **来源快照**：采集时保存的原始来源数据，不随人工修改而覆盖。
-2. **工作副本**：用户在商品工作台看到和修改的数据。
-3. **发布执行快照**：某次上架任务实际使用的数据和结果。
-
-来源快照使用 SHA-256 指纹校验。人工修改会记录修改历史，发布时使用工作副本，但来源快照仍可用于核对。这样可以区分“同行原数据”“人工修改后数据”和“实际发布数据”。
-
-数据一致性的原则是：
-
-- 不翻译、不擅自改写来源文本。
-- 不用基准价冒充来源 SKU 精确价格。
-- 不用默认库存冒充来源 SKU 库存。
-- 不在目标类目无匹配值时静默换成其他选项。
-- 归一化只用于字段格式、去重和发布控件匹配，不修改来源快照。
-- 无法确认的值显示为待确认或资料阻断，不猜测填充。
-
-## 9. 任务、暂停与恢复
-
-采集和上架任务都使用持久化状态。上架任务收到暂停请求后会立即关闭当前自动化发布页，中断正在进行的上传或等待，并在已保存的任务进度处停止；恢复时从尚未完成的商品继续。
-
-- `运行中`：正在处理商品。
-- `正在暂停`：已收到暂停请求，等待当前商品结束。
-- `已暂停`：可以继续。
-- `已取消`：任务不会自动继续。
-- `已完成`：所有目标已处理。
-- `失败`：保留已完成数据和具体错误。
-
-服务意外关闭后重新启动，系统会读取本地任务状态并进行恢复判断。恢复前仍应检查浏览器登录和发布页是否有效。
-
-## 10. 数据目录与安全
-
-源码方式执行 `npm start` 时，运行数据默认保存在项目根目录的 `.data` 中。Electron 源码桌面端和已安装的 EXE 使用 Electron 的 `userData` 目录：Windows 当前通常为 `%APPDATA%\alibaba-international-product-workbench\`，具体目录由 Electron 根据应用标识决定，不位于安装目录。主要内容包括：
-
-```text
-.data/
-├─ workspace.json          # 店铺、分组、商品、任务和设置
-├─ collector-profile/      # 采集浏览器资料
-├─ seller-profile/         # My Alibaba 登录会话
-├─ source-profile/         # 采集浏览器会话
-├─ publish-images/         # 上架图片临时文件
-└─ publish-videos/         # 上架视频临时文件
-```
-
-桌面登录窗口还会在同一 `userData` 目录保存 `alibaba-cookies.json`、`alibaba-storage.json` 和 `credentials.bin`。1.4.4 新导出的会话及已记住的密码使用 Windows DPAPI 加密；旧版明文会话兼容读取，下次同步时覆盖为加密内容。这些文件只用于本机保持登录和同步自动化会话，不属于源码，严禁提交到 GitHub。
-
-### DeepSeek 配置
-
-设置页的“DeepSeek 与跨平台商品加工”可保存 API 密钥、模型、标题翻译开关、美元转换开关和汇率。密钥由 Windows DPAPI 加密存放在 `.data/integrations.bin`，接口只返回是否已配置；保存后输入框清空，留空再次保存不会清除旧密钥。重启软件会自动读取，无需重复填写。“移除密钥”会删除本机保存的密钥。密钥绑定当前 Windows 用户，换电脑需重新配置；开发模式可使用 `DEEPSEEK_API_KEY` 环境变量。
-
-翻译固定调用 DeepSeek 官方 HTTPS 接口，失败保留原标题并返回具体原因。美元转换使用“1 来源币种兑美元”汇率，覆盖销售价、SKU 和阶梯价，不重复换算已为美元的商品。显式“引用成功商品资料”替换目标类目、商品属性、规格选项、规格图片及 SKU 编码/数量/启用状态；保留目标标题、售价、主图和详情，并补齐缺失包装资料。提交错误触发的自动补字段仍限定同类目且只修复报错字段。商品工作台的“加工跨平台商品”可处理已采集商品。
-
-安全边界和此次验证范围见 [1.4.4 验证记录](docs/verification-1.4.4.md)。
-
-设置页的“图片与视频存储目录”会显示当前工作区、发布图片、视频和媒体上传目录的绝对路径及空间占用，便于磁盘不足时定位清理。清理前必须停止采集和上架任务。
-
-`.data` 已加入 `.gitignore`，不会提交到 GitHub。这个目录可能包含卖家登录会话和业务数据，**不要上传、不要发给他人、不要提交到代码仓库**。
-
-### 10.1 备份
-
-1. 先按 `Ctrl+C` 停止系统。
-2. 确认没有采集或上架任务运行。
-3. 完整复制 `.data` 目录到安全位置。
-4. 记录备份日期和对应代码版本。
-
-只备份代码不能恢复商品和登录状态；只备份 `.data` 也不能保证旧数据与新代码兼容，因此生产备份应同时保留代码版本和 `.data`。
-
-### 10.2 恢复
-
-1. 停止系统。
-2. 备份当前 `.data`。
-3. 将目标备份恢复为项目根目录的 `.data`。
-4. 使用与备份匹配的代码版本启动。
-5. 先检查商品数量和任务状态，再执行发布。
-
-数据文件采用临时文件加重命名的原子写入方式，降低断电或进程中止造成 JSON 半写入的风险，但仍不能替代定期备份。
-
-## 11. 目录结构
-
-```text
-e_commerce_assistant_2/
-├─ auth-server/                 # 可独立部署的授权服务、数据库结构和管理页
-├─ electron/                    # Electron 主进程、预加载脚本和登录页
-├─ src/                         # React 前端
-├─ server/
-│  ├─ index.js                  # Express API 和任务编排
-│  ├─ collector.js              # 店铺、分组和商品采集
-│  ├─ alibaba-source-data.js    # 来源结构化数据提取
-│  ├─ source-locale.js          # 来源语言和交货地环境
-│  ├─ browser-runtime.js        # Edge/Chrome 生命周期
-│  ├─ product-model.js          # 商品模型、快照和审计
-│  ├─ publisher.js              # My Alibaba 发布自动化
-│  └─ store.js                  # 本地 JSON 持久化
-├─ test/                        # Node.js 自动化测试
-├─ tools/                       # Chromium 准备、构建产物清理和进程诊断脚本
-├─ .data/                       # 本地业务数据，不进 Git
-├─ dist/                        # 前端构建产物，不进 Git
-├─ start.bat                    # 正常启动脚本
-├─ dev.bat                      # 开发启动脚本
-├─ package.json                 # npm 命令与依赖声明
-├─ package-lock.json            # 锁定依赖版本
-├─ vite.config.js               # Vite 与 API 代理配置
-└─ README.md                    # 本文档
-```
-
-## 12. 常用命令
-
-```powershell
-# 安装依赖
-npm install
-
-# 构建前端
-npm run build
-
-# 正常启动，访问 127.0.0.1:8787
-npm start
-
-# 开发模式，访问 127.0.0.1:5173
-npm run dev
-
-# 只启动后端开发监听
-npm run dev:server
-
-# 只启动 Vite 前端
-npm run dev:web
-
-# 运行自动化测试
-npm test
-
-# 准备源码开发用 Chromium
+git switch Stable
+git pull --ff-only origin Stable
+npm ci
+node node_modules/playwright-core/cli.js install chromium
 npm run prepare:chromium
-
-# 构建 Windows NSIS 安装包
-npm run dist:win:installer
-
-# 构建 Windows 便携版
-npm run dist:win:portable
-```
-
-发布新版本前至少执行：
-
-```powershell
-npm test
 npm run build
-```
-
-## 13. 已知边界与生产风险
-
-### 13.1 图片与详情图存储
-
-编辑器支持主图和详情图的本地上传、来源快照还原、清空、删除以及本工具水印处理。上传文件保存在设置中显示的本地媒体目录；删除编辑器中的详情图不会删除来源快照，可随时点击“从来源图片库还原详情图”恢复。系统不提供图片银行地址录入功能，发布时仍由 Alibaba 页面按账号权限处理图片上传。
-
-### 13.2 来源页不公开完整 SKU 商业数据
-
-部分商品公开页只显示价格区间、基准价或选定组合价格，没有公开每个 SKU 的独立价格和库存。此时系统会保留公开数据并标记待确认，不会伪造来源精确值。
-
-### 13.3 来源类目与卖家发布类目规则不同
-
-来源商品展示类目名称相同，不代表当前卖家账号发布页的字段配置完全相同。类目 ID、账号权限、销售模式和规则版本都会影响必填项。绑定发布页后仍需检查目标类目的规格选项和必填属性。
-
-### 13.4 Alibaba 页面改版
-
-发布流程依赖真实页面控件。Alibaba 调整 DOM、弹层、按钮文字或验证流程后，可能出现找不到输入框、按钮或成功反馈。遇到此类问题应保留截图和任务错误，不要连续重复直接发布。
-
-### 13.5 视频和证书
-
-公开页面未必提供可直接复用的视频源文件，证书还可能受卖家账号资质限制。系统只能发布来源可获取且目标账号允许使用的数据。
-
-### 13.6 直接发布的外部影响
-
-“直接提交”会真实创建商品并进入审核流程。生产批量任务应先用少量商品保存草稿验证类目和数据，再逐步扩大批次。测试账号和正式账号的数据应分开管理。
-
-## 14. 常见问题
-
-### 页面打不开或提示端口占用
-
-确认没有另一个项目实例运行。可检查端口：
-
-```powershell
-Get-NetTCPConnection -LocalPort 8787 -ErrorAction SilentlyContinue
-```
-
-关闭旧的命令窗口后重新运行 `start.bat`。
-
-### 页面不是最新版本
-
-停止系统后重新执行：
-
-```powershell
-npm run build
-npm start
-```
-
-### 启动时报依赖缺失
-
-```powershell
-npm install
-npm run build
-npm start
-```
-
-不要复制其他电脑的 `node_modules`，应在当前电脑重新安装。
-
-### 桌面版提示缺少内置 Chromium
-
-请重新下载完整的 Windows 安装包并重新安装。发布包必须包含 `resources/chromium/chrome.exe`；不要只复制 `win-unpacked` 的部分文件。源码开发时先运行 `npm run prepare:chromium`，再运行 `npm run desktop`。
-
-### 采集很慢
-
-采集间隔只表示额外等待时间。实际耗时还包括页面加载、动态接口、图片和详情解析、风控等待及失败重试。不要把间隔设置过低，否则可能触发验证码或访问限制。
-
-### 商品显示“资料待补”或“资料阻断”
-
-点击商品编辑或查看资料检查详情。常见原因包括：
-
-- 主图或详情图不足。
-- 缺少产地或类目必填属性。
-- 阶梯价缺失、重复或起订量未递增。
-- SKU 组合、价格、库存或图片不完整。
-- 来源页没有公开有效价格区间。
-- 旧商品缺少末级类目 ID，或目标类目规则不匹配。
-
-### 自动类目路由后仍无法发布
-
-确认发布 URL 中的 `catId` 与当前商品目标类目 ID 一致，并检查该发布页实际提供的规格和必填属性。页面中文类目和来源英文类目只作提示，内部末级类目 ID 才是路由依据。旧数据没有 ID 时应优先重新采集，不要批量猜测类目。
-
-### 浏览器弹出验证码
-
-在显示的自动化浏览器中手工完成验证码，不要关闭窗口。验证通过后任务会继续，并尽量将浏览器重新最小化。
-
-### Alibaba 后台显示成功，但系统显示失败
-
-先在任务记录中查看系统捕获的反馈，再到产品管理页核对是否已进入审核。不要立即重复提交，否则可能生成重复商品。保存截图和完整错误信息后再修正成功识别规则。
-
-## 15. 生产发布检查清单
-
-在大量采集或发布前，建议按以下顺序验证：
-
-1. `npm test` 全部通过。
-2. `npm run build` 成功。
-3. 备份 `.data`。
-4. 用 1 个分组采集 1 至 3 件商品。
-5. 对照来源链接核查标题、类目、属性、SKU、价格、图片、详情和物流。
-6. 用 1 件商品保存草稿。
-7. 人工打开草稿核对发布数据。
-8. 用 1 件商品直接提交，并确认进入审核。
-9. 检查系统是否正确记录成功状态。
-10. 再逐步扩大批次，不要第一次就全量直接提交。
-
-开发人员可以在已有本机登录态下执行单品真实验收。下面的命令默认会在卖家后台保存一个真实草稿；加 `--submit` 会真实提交发布，只能在已获授权的测试账号和测试商品上使用：
-
-```powershell
-$env:KUA_YIPU_ALIBABA_COOKIES_FILE = "$env:APPDATA\alibaba-international-product-workbench\alibaba-cookies.json"
-node tools/live-publish-smoke.mjs <商品ID或来源ID>
-node tools/live-publish-smoke.mjs <商品ID或来源ID> --submit
-```
-
-真实验收需同时核对命令返回、My Alibaba 草稿/产品管理页和商品内容。网络断开、账号限流、验证码、账号权限或平台规则拒绝不属于“发布成功”，系统不会绕过这些限制。
-
-## 16. Git 与敏感数据
-
-以下内容不应提交到 GitHub：
-
-- `.data/`
-- `node_modules/`
-- `dist/`
-- `.env` 和任何密钥文件
-- 日志、临时图片、压缩包和浏览器会话
-
-提交前检查：
-
-```powershell
-git status --short
-git ls-files .data
-```
-
-第二条命令正常应无输出。GitHub 仓库即使是私密仓库，也不应保存卖家 Cookie、浏览器配置、商品业务数据或 API 密钥。
-
-### 16.1 完整性核对
-
-以下命令用于确认本地提交与远程完整项目分支完全相同：
-
-```powershell
-git fetch origin
-git status --short
-git rev-parse HEAD
-git rev-parse origin/codex/full-project-20260901
-git diff --exit-code HEAD origin/codex/full-project-20260901
-git ls-tree -r --name-only origin/codex/full-project-20260901
-```
-
-两个 `rev-parse` 结果应相同，`git status --short` 和 `git diff` 应无输出。受 Git 跟踪的项目范围应包括 `auth-server`、`electron`、`server`、`src`、`test`、`tools`、启动脚本、`package.json`、`package-lock.json`、Vite 配置和本 README。
-
----
-
-## 17. Electron 桌面端与 EXE 打包
-
-### 17.1 源码首次运行桌面端
-
-在项目根目录打开 PowerShell，首次运行执行：
-
-```powershell
-npm install
-npm run build
-npm run prepare:chromium
 npm run desktop
 ```
 
-桌面端会先显示登录窗口。登录成功后进入商品工作台；采集浏览器和 My Alibaba 发布浏览器使用项目自己的持久化资料目录。开发源码时不要删除 `vendor/chromium`，否则桌面端无法启动内置浏览器。
+同一工作区不要同时运行多个桌面或后端实例。浏览器版数据默认为仓库 `.data`，与桌面用户目录不同；浏览器开发入口不等同于正式桌面授权入口。
 
-### 17.2 日常运行桌面端
+## 生成 Windows EXE
 
-代码没有变化时直接运行：
-
-```powershell
-npm run desktop
-```
-
-拉取新代码或修改了前端后，先重新构建：
+首次先完成 `npm ci` 和 Chromium 下载。确认 `package.json` 与锁文件版本均为 `1.4.17`，然后执行：
 
 ```powershell
-npm install
-npm run build
-npm run prepare:chromium
-npm run desktop
-```
-
-需要同时调试 Vite 前端和 Electron 时运行：
-
-```powershell
-npm run desktop:dev
-```
-
-### 17.3 生成 Windows EXE 安装包
-
-生成 NSIS 安装版（输出到 `release-installer/`）：
-
-```powershell
+npm test -- --test-concurrency=2
 npm run dist:win:installer
 ```
 
-生成 Electron 便携版（不写入系统安装目录）：
+输出：`release-installer/chaodekuai-1.4.17-setup.exe`。脚本依次构建前端、准备 Chromium，再执行 Electron Builder NSIS x64 打包。安装包支持选择安装目录、桌面和开始菜单快捷方式。
 
 ```powershell
-npm run dist:win:portable
+npm run dist:win:portable   # 便携 EXE，输出在 release/
+npm run dist:win            # 按 package.json 构建 Windows 目标
 ```
 
-也可以执行完整 Windows 打包命令：
+Electron 下载失败但 `node_modules/electron/dist` 已完整时，可指定本地分发目录：
 
 ```powershell
-npm run dist:win
-```
-
-每次打包都会先构建前端并准备 `vendor/chromium`，发布包必须包含 `resources/chromium/chrome.exe`。打包前建议执行：
-
-```powershell
-npm test
 npm run build
-```
-
-首次打包需要网络下载 Electron 和 Playwright Chromium。如果依赖和 `node_modules/electron/dist` 已经完整，但 Electron Builder 的远程下载临时失败，可使用本地 Electron 分发目录构建 NSIS 安装包：
-
-```powershell
-$env:CSC_IDENTITY_AUTO_DISCOVERY='false'
+npm run prepare:chromium
 npx electron-builder --win nsis --x64 `
   --config.electronDist=node_modules/electron/dist `
   --config.directories.output=release-installer `
-  --config.artifactName='chaodekuai-${version}-setup.${ext}' `
+  '--config.artifactName=chaodekuai-${version}-setup.${ext}' `
   --publish never
 ```
 
-标准安装包输出位置为：
+`beforePack` 运行 `tools/prepare-package.mjs`，从 `server/` 和 `electron/` 生成 `.packaged/`。不要手工修改生成目录或用旧输出代替缺失源码。程序必须包含 `resources/chromium/chrome.exe`。
 
-```text
-release-installer/chaodekuai-<版本>-setup.exe
-```
-
-交付前应校验文件大小和 SHA-256，避免把未完成或损坏的文件交给测试人员：
+交付前检查：
 
 ```powershell
-Get-Item .\release-installer\chaodekuai-*-setup.exe |
-  Select-Object FullName, Length, LastWriteTime
-Get-FileHash .\release-installer\chaodekuai-*-setup.exe -Algorithm SHA256
+node tools/desktop-package-qa.mjs release-installer
+npx electron tools/verification-window-qa.mjs .packaged/electron/human-verification.js
+Get-Item .\release-installer\chaodekuai-1.4.17-setup.exe
+Get-FileHash .\release-installer\chaodekuai-1.4.17-setup.exe -Algorithm SHA256
 ```
 
-安装包和便携包只包含代码、依赖和内置 Chromium，不包含 `.data` 下的登录会话、Cookie、商品数据或任务记录；升级程序不会自动迁移或覆盖这些本地数据。
+包检查核对版本、打包源码、浏览器、安全开关、登录窗口和未登录 API 鉴权，使用隔离用户目录。当前 EXE 未配置 Authenticode 签名；有证书后按 Electron Builder 签名配置构建。`publish` 地址是占位配置，目前通过 GitHub Release 手工分发，没有启用可用的自动更新服务。
 
----
+打包文件占用时退出对应旧程序和安装器，再使用新的输出目录。安装临时目录写入异常可用 `tools/install-with-local-temp.cmd` 选择本机可写目录，无需关闭杀毒软件。
 
-系统设计目标是让采集、人工整理、资料校验、草稿检查和批量发布形成可追踪闭环。生产使用时，数据一致性和可审计性优先于“强行发布成功”；遇到来源不完整、目标类目不兼容或 Alibaba 风控时，系统应明确阻断并要求人工确认，而不是静默篡改数据。
+## 授权服务器部署
+
+完整代码位于 [`auth-server/`](auth-server/README.md)，与客户端共用根目录依赖清单。包括生产入口、安全模块、PostgreSQL 增量结构、管理员初始化、后台页面、Dockerfile 与运维脚本。
+
+首次部署、systemd、HTTPS、管理员初始化和数据库恢复的逐步命令见 [服务器部署教程](auth-server/README.md)。现有服务器常用命令：
+
+```bash
+sudo systemctl status kua-yipu-auth --no-pager
+sudo journalctl -u kua-yipu-auth -n 100 --no-pager
+curl --fail http://127.0.0.1:8790/health
+sudo systemctl restart kua-yipu-auth
+```
+
+正式客户端授权入口由 `server/auth-endpoint.js` 固定。源码桌面可用 `KUA_YIPU_AUTH_URL` 指向本机开发后台；**正式打包客户端忽略此环境变量**。迁移生产地址需要修改该模块默认地址、配置对应有效证书并重新打包。仅设置打包终端环境变量不能改变正式入口。
+
+授权服务 `/health` 中的版本为 `1.4.9`，代表独立授权协议实现；桌面版本为 `1.4.17`。线上实际运行模块已与本分支核对。后台可配置 1/3/15 天等断线保持时间，不延长付费授权到期日，在线停用仍立即生效。
+
+## 项目原理
+
+```mermaid
+flowchart TD
+  UI[React 商品工作台] -->|本机 HTTP JSON| API[Express 本地服务]
+  Desktop[Electron 登录与授权] --> API
+  Desktop -->|HTTPS 登录和心跳| Auth[Linux 授权服务]
+  Auth --> DB[(PostgreSQL)]
+  API --> Store[(工作区 JSON 与断点文件)]
+  API --> Collector[采集和详情解析]
+  API --> Publisher[类目路由和发布器]
+  Collector --> Browser[Playwright 与内置 Chromium]
+  Publisher --> Browser
+  Browser --> Alibaba[来源网站与 My Alibaba]
+  Browser -->|真实验证码| Verify[人工验证窗口]
+  Verify -->|核对原页面恢复后继续| Browser
+```
+
+1. **采集**：解析列表、分页和类目，逐页保存下一页地址和链接队列。每件详情保存后推进断点，暂停、重启或验证码后接续未完成位置。1.4.17 之前未记录的列表断点不能从旧计数还原。
+2. **数据模型**：保存不可变来源快照、可编辑工作副本、发布执行快照。来源 SHA-256 指纹和修改记录用于核查。完整度分数不是上架成功率。
+3. **引用**：明确选择成功商品后替换类目、属性、规格选项/图片、SKU 编码/数量/启用状态，补齐缺失包装资料。保留目标标题、售价、主图和详情；需要核对模板适用于实际商品。
+4. **发布**：按末级类目 ID 打开表单，填写并核对受控控件、主图、普通编辑器详情图、物流、规格和虚拟 SKU 表。收到平台明确成功反馈或成功地址才标记完成；不把不确定提交自动当成失败重发。
+5. **进度**：逐件保存成功、失败和剩余数，前端实时更新。暂停保留已完成结果；来源失败、平台拒绝、登录失效有独立错误状态。
+6. **验证**：普通页面隐藏，确认真实可见验证码后显示。人工完成不设等待超时，过期可刷新；核对原页面恢复后继续。跨浏览器会话同步失败时保留原浏览器验证状态。
+7. **授权**：服务器管理授权、设备、授权码哈希和签名令牌，不接收 Alibaba 密码。客户端按后台策略处理临时断线；到期或撤销则暂停后续工作并保留数据。
+
+本项目依赖网站 DOM。改版、必填项变化、网络和账号权限会影响成功率；生产使用先检查少量草稿，再批量提交。不会自动绕过验证码。
+
+## 目录和数据
+
+| 路径 | 内容 |
+| --- | --- |
+| `src/`、`index.html`、`public/` | React 界面、入口、静态资源 |
+| `server/` | 本地 API、采集、发布、断点、图片处理、模型、存储 |
+| `electron/` | 主进程、登录/验证窗口、预加载桥接、授权保持 |
+| `auth-server/` | 授权服务、后台、SQL、Docker、部署配置 |
+| `test/`、`tools/` | 测试、真实页面验收、构建、维护工具 |
+| `assets/`、`build/installer.nsh` | 图标、NSIS 自定义安装逻辑 |
+| `docs/` | 验证、完整性、备份说明 |
+| `package.json`、`package-lock.json` | 版本、命令、锁定依赖、打包配置 |
+| `.data/` | 浏览器版运行数据，进入加密备份 |
+
+桌面数据目录：
+
+```text
+%APPDATA%/alibaba-international-product-workbench/
+├─ .data/workspace.json             # 商品、店铺、分组、任务、设置
+├─ .data/collection-checkpoints/    # 列表和详情断点
+├─ .data/media/                     # 用户上传图片
+├─ .data/publish-images/            # 发布图片缓存
+├─ .data/*-profile/                 # 浏览器持久化配置
+├─ .data/announcement-reads.json    # 公告状态
+├─ credentials.bin                 # DPAPI 加密账号密码
+├─ activation-credentials.bin       # 加密授权码
+├─ alibaba-cookies.json             # 加密会话文件
+└─ alibaba-storage.json             # 加密网站存储
+```
+
+DeepSeek 密钥加密保存在 `.data/integrations.bin`。更换 Windows 用户或电脑后，DPAPI 凭据可能无法解密，需要重新登录并配置密钥；商品和任务 JSON 不受此限制。恢复步骤见 [备份说明](docs/stable-backup.md)。
+
+## 测试与完整性检查
+
+```powershell
+npm test -- --test-concurrency=2
+npm run build
+node tools/reference-ui-qa.mjs
+node tools/group-origin-ui-qa.mjs
+npx electron tools/verification-window-qa.mjs
+```
+
+1.4.17 应用修复通过 186 项自动测试，以及真实草稿、20 行 SKU 核对和一件正式提交。Stable 归档增加加密备份往返/篡改拒绝测试。真实验证码人工完成验收仍按 [验证记录](docs/verification-1.4.17.md) 的未完成项继续，不宣称所有商品百分之百成功。
+
+源站未公开的 SKU 商业数据无法凭空获得，图片链接可能失效，跨类目引用可能带来不适用属性。带 `live`、`publish` 的工具可能操作真实站点，先阅读脚本并使用隔离数据目录。
+
+```powershell
+git fetch origin Stable
+git rev-parse HEAD
+git rev-parse origin/Stable
+git diff --exit-code HEAD origin/Stable
+git status --short
+git ls-tree -r --name-only origin/Stable
+```
+
+首次 Stable 归档从已验收的 `65dc255` 建立并保留全部历史。应用源码保持 1.4.17，归档提交补充文档、备份工具和核查记录。Release 的 SHA-256 清单用于下载校验；解密密钥不上传 GitHub。

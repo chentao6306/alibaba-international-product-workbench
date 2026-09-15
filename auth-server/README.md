@@ -1,67 +1,151 @@
-# 抄得快授权服务
+# 授权服务器 · 1.4.17 Stable 配套服务
 
-授权服务部署在 Linux 服务器，生产环境必须使用 HTTPS、PostgreSQL 和随机的 `KUA_YIPU_AUTH_SECRET`（至少 32 个字符）。
+这是独立运行的 Linux/Express/PostgreSQL 服务。完整源码在本目录，依赖使用根目录 `package.json` 和 `package-lock.json`。`index.js` 是生产入口；`dev.js` 只用于本机 JSON 数据预览，不用于正式部署。客户端当前版本 1.4.17，服务健康接口的协议版本保留 1.4.9。
+
+## 配置与安全边界
+
+| 环境变量 | 用途 |
+| --- | --- |
+| `DATABASE_URL` | PostgreSQL 连接地址，必须提供 |
+| `KUA_YIPU_AUTH_SECRET` | 至少 32 字符随机签名密钥，必须提供 |
+| `PORT` | 默认 8790 |
+| `BIND_HOST` | 建议 127.0.0.1，仅由 Nginx 对外提供 HTTPS |
+| `PGSSL` | 默认验证数据库 TLS；仅本机非 TLS PostgreSQL 可设 `disable` |
+| `KUA_YIPU_ADMIN_USERNAME` | 初始化管理员用 |
+| `KUA_YIPU_ADMIN_PASSWORD` | 初始化管理员密码，至少 12 字符 |
+
+不要把实际环境文件提交进源码；完整迁移备份应加密后存储。`.env.example` 只作格式示例，服务不会自动加载 `.env`，应使用 systemd `EnvironmentFile` 或 shell 导出环境变量。
+
+客户端只提交软件授权信息，不向此服务发送 Alibaba 密码。授权码仅保存哈希；管理员会话可撤销。后台支持账号授权/续期/停用/删除、多设备策略、公告和断线保持时长。1.4.9 以上客户端可配置 1 至 21600 分钟（15 天），默认 1 天；在线自动续期，断线保持不延长实际授权有效期。
+
+## 新服务器首次安装
+
+以下示例针对 Ubuntu。操作前准备 Node.js 22、PostgreSQL、Nginx 和有效证书；目录固定为 `/opt/kua-yipu-auth`。已有生产服务不要重复执行初始化或覆盖原密钥。
 
 ```bash
-export DATABASE_URL='postgres://user:password@db:5432/kua_yipu'
-export KUA_YIPU_AUTH_SECRET='change-this-to-a-long-random-secret'
-psql "$DATABASE_URL" -f auth-server/schema.sql
-export KUA_YIPU_ADMIN_USERNAME='admin'
-export KUA_YIPU_ADMIN_PASSWORD='change-this-admin-password'
-node auth-server/bootstrap-admin.js
-node auth-server/index.js
+sudo apt-get update
+sudo apt-get install -y git curl ca-certificates xz-utils postgresql postgresql-client nginx
+sudo useradd --system --home /opt/kua-yipu-auth --shell /usr/sbin/nologin kua-yipu
+sudo git clone --branch Stable git@github.com:chentao6306/alibaba-international-product-workbench.git /opt/kua-yipu-auth
+cd /opt/kua-yipu-auth
+sudo bash auth-server/deploy/prepare-runtime.sh
+sudo env PATH=/opt/kua-yipu-runtime/node-v22.23.2-linux-x64/bin:$PATH npm ci --omit=dev
 ```
 
-管理员接口使用 `Authorization: Bearer <token>`。客户端接口为 `/api/client/login` 和 `/api/client/heartbeat`。从 1.4.6 起，新账号还必须提交独立的软件授权码；Alibaba 密码只在客户端本机通过 Windows DPAPI 加密保存，授权服务器不会接收或保存 Alibaba 密码。
+私有仓库 clone 需要服务器上配置只读部署身份，或者先在本机下载源码并通过 SCP 传入。`prepare-runtime.sh` 下载并校验其固定 Node.js 版本，部署前可审阅该脚本。
 
-## 1.4.7 授权连接策略
+创建数据库和角色，交互输入独立数据库密码：
 
-当前生产入口为 `https://106.55.45.126/`，腾讯云防火墙已开放 TCP 443。1.4.7 客户端使用此标准 HTTPS 地址；80 端口的 TLS 继续兼容已安装的 1.4.6。浏览器访问旧 HTTP 管理地址会跳转到标准 HTTPS 入口。
+```bash
+sudo -u postgres createuser --pwprompt kua_yipu
+sudo -u postgres createdb --owner=kua_yipu kua_yipu
+sudo install -d -m 700 /etc/kua-yipu
+sudo install -m 600 auth-server/.env.example /etc/kua-yipu/auth.env
+sudoedit /etc/kua-yipu/auth.env
+```
 
-账号操作中的“断线宽限”可设置 1 至 60 分钟，默认 5 分钟，从客户端最后一次成功校验开始计时，在下次成功心跳后生效。仅 1.4.7 及更新客户端支持。临时网络错误或可重试的服务错误不会立即退出；宽限内继续任务，超时后保留工作台和进度，当前商品处理结束后暂停后续商品。重连成功后可手动继续暂停任务，已完成商品不会重新处理。
+编辑实际连接地址、随机签名密钥与管理员初始化信息。可用 `openssl rand -hex 32` 在服务器本机生成随机值。不要把生成值发到日志或 GitHub。
 
-宽限不超过服务器返回的授权到期时间，也不会因重试失败或修改电脑日期延长。服务器明确拒绝、授权到期、账号停用和授权码重置仍会终止授权。长时间断网导致会话令牌过期时仍需重新登录。数据迁移只增加 `licenses.offline_grace_minutes`，不改变账号到期日、授权码或多端策略。
+以 root shell 加载环境并初始化结构/管理员：
 
-## 1.4.6 安全升级
+```bash
+sudo -i
+cd /opt/kua-yipu-auth
+export PATH=/opt/kua-yipu-runtime/node-v22.23.2-linux-x64/bin:$PATH
+set -a
+source /etc/kua-yipu/auth.env
+set +a
+psql "$DATABASE_URL" --set ON_ERROR_STOP=1 -f auth-server/schema.sql
+node auth-server/bootstrap-admin.js
+exit
+```
 
-1.4.6 发布时云端 443 尚未放通，使用 `https://106.55.45.126:80/`。该入口继续保留兼容，证书正常校验，不允许忽略证书错误。已有客户端的 HTTP 登录、心跳和公开公告接口暂时保留兼容，但启用了授权码的账号必须使用 HTTPS。当前配置是 `deploy/nginx-compatible-https.conf`，不要同时启用旧的站点配置。
+`bootstrap-admin.js` 对已有同名管理员会重设密码，仅用于首次初始化或明确的密码重置。完成后从环境文件移除 `KUA_YIPU_ADMIN_PASSWORD`。
 
-新建账号会返回一次 `activationCode`，格式为 `CDK-` 加 43 位随机字符，数据库只保存哈希。`POST /api/client/login` 的请求包含 `username`、`deviceId`、`activationCode` 及可选设备描述。客户端第一次输入后加密保存，再次登录复用。令牌由服务器签名，绑定授权记录、设备及授权码版本，最长有效期 10 分钟，心跳重新检查实际授权状态。
+安装 systemd 服务：
 
-旧账号为避免客户被突然退出，迁移后显示“授权安全待升级”。先让客户安装 1.4.6，再点击该账号的“启用授权码”，把仅显示一次的授权码交给该客户。尚未启用的旧账号仍保留账号名授权的风险；所有旧账号完成迁移后，才应删除 HTTP 客户端兼容入口。重置授权码会使旧授权码和旧会话失效，客户必须重新输入。续期不重置授权码；停用、注销和删除仍终止授权。
+```bash
+sudo chown -R kua-yipu:kua-yipu /opt/kua-yipu-auth
+sudo install -m 644 auth-server/deploy/kua-yipu-auth.service /etc/systemd/system/kua-yipu-auth.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now kua-yipu-auth
+curl --fail http://127.0.0.1:8790/health
+```
 
-管理员令牌还必须对应数据库中的有效会话；退出登录会撤销该会话，修改管理员密码会使旧会话失效。管理接口只允许 HTTPS（本机直连例外用于测试和运维），登录限速、输入校验和参数化 SQL 持续生效。
+## HTTPS 与现有服务器
 
-生产服务使用独立的 Node.js 22.23.2 运行时。部署顺序如下，均以 root 执行；脚本适用于本项目现有 Ubuntu 服务布局，不应直接用于其他服务器：
+对外使用 Nginx 的 HTTPS 443；8790 仅监听回环，不开放公网。云防火墙还需放行 TCP 443。
 
-1. `bash auth-server/deploy/prepare-runtime.sh`：校验官方 SHA256 后安装运行时。
-2. 将源码及测试文件放到独立的 `/var/tmp/kua-yipu-security-qa-*` 目录，再在该目录运行 `PATH=/opt/kua-yipu-runtime/node-v22.23.2-linux-x64/bin:$PATH bash auth-server/deploy/security-qa.sh`：新建隔离 PostgreSQL 测试库，验证后自动删除，不对生产库运行攻击测试。每次使用新的暂存目录。
-3. `bash auth-server/deploy/enable-runtime.sh isolated-tests-passed`：隔离测试通过后，备份并切换服务运行时。
-4. `bash auth-server/deploy/update-service.sh`：备份代码和完整数据库、执行增量迁移、部署并检查健康状态；失败回滚代码，保留兼容的新增字段。
-5. `bash auth-server/deploy/enable-compatible-https.sh`：备份并更新当前 Nginx 配置，验证新旧连接，失败回滚。
+当前服务器使用 `deploy/nginx-compatible-https.conf` 兼容旧客户端，配置包含当前 IP 与证书路径。新服务器应先按域名/IP、证书路径审阅并修改配置，执行 `nginx -t` 后再 reload，不能原样套用旧证书。
 
-迁移新增 `licenses.credential_*` 和 `admin_sessions`。不要仅复制 `index.js`：`security.js`、`http-security.js`、`policy.js` 与管理界面也需要同步。环境文件和服务器私钥必须留在服务器，不能放进部署包或 Git。
+现有生产部署脚本：
 
-SSH 已改为密钥登录，禁止 root 和密码登录。后续运维必须使用已授权私钥；添加其他管理员时先验证新密钥能登录，再调整访问配置。系统启用了安全源自动更新，但不自动重启。内核及部分系统组件更新后需要安排维护重启。具体检查结果、备份目录及安装包见 `../docs/security-1.4.6.md`。
+- `prepare-runtime.sh`：安装固定 Node.js 运行时并核验下载哈希。
+- `security-qa.sh`：在隔离 PostgreSQL 测试库运行安全测试，不使用生产库。
+- `enable-runtime.sh isolated-tests-passed`：仅在隔离测试通过后切换运行时。
+- `update-service.sh`：备份源码和数据库、增量迁移、更新代码、健康检查，失败回滚代码。
+- `enable-compatible-https.sh`：更新本项目现有布局的 Nginx 兼容配置。
+- `harden-host.sh`、`enable-security-updates.sh`：主机与更新策略；先审阅，避免影响 SSH 运维访问。
 
-## 1.4 升级
+升级服务应先将 Stable 源码放在独立暂存目录，验证后以 root 运行该目录内的 `auth-server/deploy/update-service.sh`。不要从旧数据备份直接覆盖整个系统，不要只同步 `index.js` 而遗漏模块、SQL 和后台资源。
 
-升级前备份数据库和服务目录。用数据库所有者执行 `schema.sql`，这是可重复执行的增量迁移；如果迁移使用 `postgres`，需给运行服务的数据库角色授予新建 `announcements` 表的 SELECT、INSERT、UPDATE、DELETE 权限。同步部署 `index.js`、`policy.js`、`admin.html`、`admin.js`、`admin.css`，保留原环境变量和签名密钥，再重启服务。检查 `/health`、账号列表和 `/api/announcements`。
+## 日常命令
 
-原有和新增账号默认允许多端登录。关闭单个账号的多端开关后保留最近设备，之后另一台设备登录会替换原会话。过期、暂停、注销仍会阻止所有设备；续期不会改变多端设置。
+```bash
+sudo systemctl status kua-yipu-auth --no-pager
+sudo systemctl restart kua-yipu-auth
+sudo journalctl -u kua-yipu-auth -n 100 --no-pager
+curl --fail http://127.0.0.1:8790/health
+sudo nginx -t
+sudo systemctl reload nginx
+```
 
-后台账号和公告列表支持分页。公告可保存草稿、发布或撤回，类型为普通公告或弹窗公告。用户的公告入口显示未读红点，弹窗只在未读时出现；修改已发布公告会生成新版本并重新提醒。已读记录按账号保存在每台电脑本地，不随清理商品或图片而删除。公开接口仅返回已发布公告，请勿发布包含密码等私密信息的公告。
+数据库备份到权限受控的目录：
 
-`node auth-server/dev.js` 提供本地 JSON 数据预览，接口与生产后台一致；它使用独立的 `.data/auth-dev.json`，不能用于正式部署。
+```bash
+sudo install -d -m 700 /var/backups/kua-yipu
+sudo sh -c 'umask 077; runuser -u postgres -- pg_dump -Fc kua_yipu > /var/backups/kua-yipu/database.dump'
+sudo pg_restore --list /var/backups/kua-yipu/database.dump
+```
 
-## 1.4.2 升级
+完整数据加密备份和恢复见 [stable-backup.md](../docs/stable-backup.md)。新增 SQL 迁移一般可重复执行，但回滚旧版本仍需核对结构兼容性并保留升级前备份。
 
-停止旧服务后，在事务中执行 `schema.sql`，再启动新版服务。此次迁移增加删除时间，并将账号唯一约束改为仅约束未删除的授权，迁移后不能直接启动旧版服务。回滚应使用升级前的数据库及服务目录备份。
+## Docker
 
-授权支持减少天数，以原到期时间扣减，保留停用或注销状态；减少到当前时间之前立即成为过期授权。操作历史保存调整前后时间。删除账号后授权失效、设备记录清除，默认列表不显示，保留在“已删除”分类用于核查。重新添加同名账号会生成新的授权 ID，旧会话不能恢复。
+从仓库根目录构建，使用根目录锁文件：
 
-统计分类可点击，状态支持多选（状态之间取并集），账号/备注、活动时间、多端策略与状态之间取交集。分页应用于筛选后的结果。“全部账号”不包含已删除记录。
+```bash
+docker build -f auth-server/Dockerfile -t kua-yipu-auth:1.4.17 .
+docker run -d --name kua-yipu-auth --restart unless-stopped \
+  --env-file /private/auth.env -e BIND_HOST=0.0.0.0 \
+  -p 127.0.0.1:8790:8790 kua-yipu-auth:1.4.17
+```
 
-普通和弹窗公告均支持永久删除。客户端登录、进入公告页或手动刷新时同步公告，在线客户端每分钟同步；被删除的公告和已读标记会移除。新版客户端每分钟检查授权，旧客户端仍按其原检查周期退出。
+容器内 `BIND_HOST=0.0.0.0`；数据库地址使用容器可达地址，不是容器自身 `127.0.0.1`。发布到宿主机端口仅绑定回环，Nginx 再代理 HTTPS。先单独执行结构迁移和管理员初始化，镜像不会自动创建数据库。
 
-验证命令：`node --test test/auth-dev.test.js test/announcement-sync.test.js`；`node tools/admin-qa.mjs` 检查后台及客户端公告，并将截图写入系统临时目录；`node tools/desktop-package-qa.mjs <安装包输出目录>` 校验打包源码、版本和登录窗口。PostgreSQL 集成测试可设置 `AUTH_TEST_DATABASE_URL`，仅允许名称以 `auth_qa_` 开头的独立空测试数据库，先执行迁移并创建测试管理员 `test`（密码 `local-test-password`），不要连接生产数据库。
+## 本机预览与测试
+
+在开发终端设置自己的临时管理员密码和随机签名密钥，再启动：
+
+```powershell
+$env:KUA_YIPU_ADMIN_USERNAME='admin'
+$env:KUA_YIPU_ADMIN_PASSWORD='replace-with-a-local-test-password'
+$env:KUA_YIPU_AUTH_SECRET='replace-with-a-random-local-secret-at-least-32-characters'
+node auth-server/dev.js
+```
+
+另开终端启动开发桌面：
+
+```powershell
+$env:KUA_YIPU_AUTH_URL='http://127.0.0.1:8790'
+npm run desktop
+```
+
+开发预览数据默认 `.data/auth-dev.json`，不连接生产 PostgreSQL。正式打包桌面忽略该地址覆盖，生产入口修改方法见根目录 README。
+
+```powershell
+node --test test/auth-dev.test.js test/auth-security.test.js test/announcement-sync.test.js
+node tools/admin-qa.mjs
+```
+
+PostgreSQL 集成测试仅允许 `AUTH_TEST_DATABASE_URL` 指向名称以 `auth_qa_` 开头的独立测试数据库。不要把生产连接串传给测试。
