@@ -161,6 +161,7 @@ try {
       inputs: [...node.querySelectorAll('input,select,textarea')].map((item) => ({ type: item.type, value: item.value, checked: item.checked })),
       html: node.outerHTML.slice(0, 18000)
     }))).catch(() => []);
+    report.skuTables = await page.locator('table').evaluateAll((tables) => tables.filter((table) => /Commodity code|商品编码|Available quantity|可售数量/i.test(table.innerText)).map((table) => table.outerHTML.slice(0, 60000))).catch(() => []);
     report.attributeRows = await page.locator('label').evaluateAll((nodes) => nodes
       .filter((node) => /电池容量|手机中央处理器|蜂窝|操作系统|屏幕/.test(node.textContent))
       .map((node) => ({ label: node.textContent, html: node.parentElement?.parentElement?.outerHTML.slice(0, 14000) }))).catch(() => []);

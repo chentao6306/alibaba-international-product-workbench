@@ -442,6 +442,8 @@ async function handleAlibabaHumanVerification(url, options = {}) {
     url, partition: `persist:kua-yipu-${username}`, icon: appIcon,
     shouldStop: () => shutdownStarted || !currentSession?.verified || options.shouldStop?.(),
     onWaiting: options.onWaiting,
+    userAgent: options.userAgent,
+    requestCookies: options.requestCookies,
     saveSession: saveAlibabaSession
   });
 }

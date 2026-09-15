@@ -73,7 +73,9 @@ export function productCategory(product = {}) {
   // unambiguous case so existing workspaces recover without manual edits.
   const sourcePath = normalizedCategoryPath(product.sourceCategoryPath);
   const phoneTitle = /\b(?:smartphone|mobile\s+phone|cell\s+phone|iphone|android\s+phone|phone\s+1[0-9])\b/i.test(String(product.title || ''));
-  if (international && phoneTitle && categoryLeafKey(path) === 'drones accessories'
+  const explicitReference = product.categoryReference && product.categoryReference.categoryId === product.categoryId
+    && categoryPathKey(product.categoryReference.categoryPath) === categoryPathKey(path);
+  if (!explicitReference && international && phoneTitle && categoryLeafKey(path) === 'drones accessories'
     && categoryLeafKey(sourcePath) && categoryLeafKey(sourcePath) !== 'drones accessories') {
     path = sourcePath;
     id = normalizeCategoryId(product.sourceCategoryId || snapshot.sourceCategoryId);

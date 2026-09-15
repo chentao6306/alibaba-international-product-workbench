@@ -28,7 +28,9 @@ export class JsonStore {
 
   revision() {
     const stat = fs.statSync(this.filePath, { bigint: true });
-    return `${stat.mtimeNs}:${stat.ctimeNs}:${stat.size}`;
+    // Atomic replacement can have identical timestamps and byte length on
+    // Windows. Include file identity so pause/control changes invalidate caches.
+    return `${stat.dev}:${stat.ino}:${stat.mtimeNs}:${stat.ctimeNs}:${stat.size}`;
   }
 
   snapshot() {

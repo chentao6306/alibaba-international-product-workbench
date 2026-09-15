@@ -27,7 +27,18 @@ export const REQUIRED_ATTRIBUTE_ALIASES = [
   ['颜色', 'color', 'colour'],
   ['型号', 'model number', 'model'],
   ['省份', 'province'],
-  ['私模', 'private mold']
+  ['私模', 'private mold'],
+  ['无人机类型', 'drone type', 'drone types'],
+  ['图传距离', 'image transmission distance', 'max transmission distance'],
+  ['最大飞行时间', 'max flight time', 'maximum flight time'],
+  ['最大起飞重量', 'max takeoff weight', 'maximum takeoff weight'],
+  ['控制类型', 'control type', 'controller type'],
+  ['最大抗风能力', 'max wind resistance', 'maximum wind resistance'],
+  ['操作人员技能水平', 'operator skill level', 'operator skill level required'],
+  ['视频采集分辨率', 'video capture resolution'],
+  ['运行内存', 'ram'],
+  ['存储容量', 'storage capacity', 'rom'],
+  ['插头', 'plug', 'plug type']
 ];
 
 const normalize = (value) => String(value || '').toLowerCase().replace(/[\s_\-/]+/g, ' ').trim();
@@ -42,7 +53,8 @@ const protectedField = /商品名称|产品名称|标题|价格|起订量|库存
 const successful = (result) => ['published', 'submitted', 'success'].includes(String(result?.status || '').toLowerCase());
 
 export function createRequiredFieldRepair(target, reference, fields = []) {
-  const wanted = new Set(fields.filter((name) => !protectedField.test(name)).map(requiredAttributeKey));
+  const wanted = new Set(fields.filter((name) => !protectedField.test(name)
+    || REQUIRED_ATTRIBUTE_ALIASES.some((aliases) => aliases[0] === requiredAttributeKey(name))).map(requiredAttributeKey));
   // Screen dimensions are category attributes; generic packaging dimensions
   // and commercial/media fields must never be borrowed by this repair.
   for (const name of fields) if (requiredAttributeKey(name) === '屏幕') wanted.add('屏幕');
@@ -72,7 +84,7 @@ export function createRequiredFieldRepair(target, reference, fields = []) {
   }
   if (!repaired.length) return null;
   const patch = { attributes };
-  const topLevel = { 产地: 'origin', 省份: 'province', 品牌名称: 'brand', 型号: 'model', 适用型号: 'compatibleModel', 类型: 'productType' };
+  const topLevel = { 产地: 'origin', 省份: 'province', 品牌名称: 'brand', 型号: 'model', 适用型号: 'compatibleModel', 类型: 'productType', 材质: 'material', 私模: 'privateMold' };
   for (const key of repaired) {
     const field = topLevel[key];
     if (field && Object.hasOwn(target, field)) patch[field] = structuredClone(values.get(key));
@@ -86,7 +98,24 @@ export function createPublishedReferenceTemplate(candidate, snapshot) {
     ...(snapshot.categoryId ? { categoryId: snapshot.categoryId, targetCategoryId: snapshot.categoryId } : {}) } : { ...candidate };
   const requiredAttributes = (snapshot?.result || candidate.publishResult)?.requiredAttributes || [];
   const repair = createRequiredFieldRepair(reference, { requiredAttributes }, requiredAttributes.map((item) => item.name));
-  return { ...reference, ...repair?.patch, requiredAttributes };
+  const template = { ...reference, ...repair?.patch, requiredAttributes };
+  // Successful form values also belong to specification groups. Leaving the
+  // old group options alongside repaired attributes makes the publisher select
+  // the rejected options again on the next product.
+  template.variantGroups = structuredClone(template.variantGroups || []);
+  template.skus = structuredClone(template.skus || []);
+  for (const item of requiredAttributes) {
+    const group = template.variantGroups.find((group) => requiredAttributeKey(group.name) === requiredAttributeKey(item.name));
+    if (!group || group.options?.length !== 1 || !item.value) continue;
+    const value = Array.isArray(item.value) ? item.value : [item.value];
+    if (value.length !== 1) continue;
+    const old = group.options[0];
+    group.options = structuredClone(value);
+    if (old !== value[0]) group.optionIds = {};
+    if (group.optionImages?.[old] && !group.optionImages[value[0]]) group.optionImages[value[0]] = group.optionImages[old];
+    for (const sku of template.skus) if (sku.attributes?.[group.name] === old) sku.attributes[group.name] = value[0];
+  }
+  return template;
 }
 
 export function findPublishedReferenceRepair(target, products, fields, attemptedIds = []) {

@@ -126,6 +126,47 @@ export function copyMissingProductData(target, reference) {
 // fields stay attached to the target product so quoting a template cannot
 // silently change what the customer collected or priced.
 export function applyPublishedProductReference(target, reference, options = {}) {
+  if (options.fullTemplate) {
+    const patch = applyPublishedProductReference(target, reference);
+    const missing = copyMissingProductData(target, reference);
+    for (const field of ['packaging', 'services', 'certificates', 'deliveryTime', 'salesUnit']) {
+      delete patch[field];
+      if (missing[field] != null) patch[field] = missing[field];
+    }
+    // Explicit reference replaces the selected template sections, including
+    // empty sections, so stale options from the former category cannot survive.
+    for (const field of ['customAttributes', 'variantGroups', 'modelImages', 'colorImages', 'specifications',
+      'platformAttributes', 'internationalAttributes', 'targetAttributes']) {
+      patch[field] = clone(patch[field] ?? reference[field] ?? (field.endsWith('Images') ? {} : []));
+    }
+    for (const field of ['origin', 'province', 'brand', 'brandName', 'compatibleBrand', 'compatibleBrands',
+      'privateMold', 'model', 'compatibleModel', 'compatibleModels', 'productType', 'type', 'color', 'material']) {
+      patch[field] = clone(reference[field] ?? '');
+    }
+    patch.attributes = clone(patch.attributes || []);
+    const referenceSkus = clone(reference.skus || []);
+    if (!referenceSkus.length && patch.variantGroups.length) {
+      let combinations = [{}];
+      for (const group of patch.variantGroups) {
+        if (!group.options?.length) continue;
+        if (combinations.length * group.options.length > 5000) throw new Error('引用商品规格组合超过 5000 行，请先精简规格');
+        combinations = combinations.flatMap((row) => group.options.map((value) => ({ ...row, [group.name]: value })));
+      }
+      for (const attributes of combinations) referenceSkus.push({ attributes, derived: true, source: 'reference', stock: target.stock ?? 100 });
+    }
+    const key = (sku) => JSON.stringify(Object.entries(sku.attributes || {}).map(([name, value]) => [requiredAttributeKey(name), value]).sort());
+    const prices = new Map(list(target.skus).map((sku) => [key(sku), sku.price]));
+    patch.skus = referenceSkus.map((sku, index) => ({ ...sku,
+      id: `${target.sourceId || target.id || 'reference'}-sku-${index + 1}`,
+      price: !isBlank(prices.get(key(sku))) ? prices.get(key(sku)) : !isBlank(target.price) ? target.price : '',
+      image: sku.image || patch.variantGroups.map((group) => group.optionImages?.[sku.attributes?.[group.name]]).find(Boolean) || '',
+    }));
+    const categoryId = reference.categoryId || reference.sourceCategoryId || '';
+    const categoryPath = clone(reference.categoryPath?.length ? reference.categoryPath : reference.sourceCategoryPath || []);
+    Object.assign(patch, { categoryId, categoryPath, targetCategoryId: categoryId, targetCategoryPath: categoryPath,
+      categoryReference: { referenceId: reference.id || '', categoryId, categoryPath } });
+    return patch;
+  }
   const patch = {};
   const fieldNames = { origin: 'origin', province: 'province', brand: 'brand', brandName: 'brand', compatibleBrand: 'compatible brand', compatibleBrands: 'compatible brand', privateMold: 'private mold', model: 'model', compatibleModel: 'compatible model', compatibleModels: 'compatible model', productType: 'type', type: 'type', color: 'color' };
   const existingValues = new Set([
@@ -269,6 +310,9 @@ export function applyPublishedProductReference(target, reference, options = {}) 
 
 function snapshotFields(product) {
   return structuredClone({
+    ...Object.fromEntries(['province', 'brandName', 'compatibleBrand', 'compatibleBrands', 'privateMold', 'compatibleModel',
+      'compatibleModels', 'material', 'type', 'color', 'colorImages', 'modelImages', 'specifications', 'platformAttributes',
+      'internationalAttributes', 'targetAttributes', 'categoryReference'].filter((key) => Object.hasOwn(product, key)).map((key) => [key, product[key]])),
     sourceId: product.sourceId || '', sourceUrl: product.sourceUrl || '', sourceTitle: product.sourceTitle || '',
     sourceOriginalTitle: product.sourceOriginalTitle || '', sourceLanguage: product.sourceLanguage || '',
     sourceCaptureLocale: product.sourceCaptureLocale || '', sourceLanguageEvidence: product.sourceLanguageEvidence || null,

@@ -72,8 +72,11 @@ test('verification resumes at the healthy destination and bounds ineffective ses
         ? '<main data-module-name="module_description">Real product</main>'
         : '<div class="nc-container">请拖动下方滑块完成验证</div>' }));
     let calls = 0;
-    globalThis.__KUA_YIPU_SELLER_BRIDGE = { humanVerification: async () => {
+    await context.addCookies([{ name: 'qa-challenge', value: 'current', domain: '.alibaba.com', path: '/' }]);
+    globalThis.__KUA_YIPU_SELLER_BRIDGE = { humanVerification: async (_url, options) => {
       calls++;
+      assert.ok(options.userAgent);
+      assert.ok(options.requestCookies.some((cookie) => cookie.name === 'qa-challenge' && cookie.value === 'current'));
       return { verified: true, url: 'https://www.alibaba.com/product-detail/verified.html' };
     } };
     await page.goto('https://www.alibaba.com/punish');
@@ -84,7 +87,7 @@ test('verification resumes at the healthy destination and bounds ineffective ses
     globalThis.__KUA_YIPU_SELLER_BRIDGE.humanVerification = async () => { calls++; return true; };
     await page.goto('https://www.alibaba.com/punish');
     await assert.rejects(waitForHumanVerification(page, { shouldStop: () => calls >= 3 }),
-      (error) => error.code === 'COLLECT_PAUSED' && /同步/.test(error.message));
+      (error) => error.code === 'HUMAN_VERIFICATION_REQUIRED' && /同步/.test(error.message));
     assert.equal(calls, 2, 'Healthy desktop probes must not loop forever when the collector remains blocked');
   } finally {
     globalThis.__KUA_YIPU_SELLER_BRIDGE = previousBridge;

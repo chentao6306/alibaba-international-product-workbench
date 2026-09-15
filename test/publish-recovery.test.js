@@ -7,7 +7,11 @@ import { chromium } from 'playwright-core';
 import { findChromium } from '../server/browser-runtime.js';
 import { userFacingError } from '../server/browser-error.js';
 import { dismissPostingOverlays, enableImageBackedVariantSpecs, enableSpecImageUpload, ensureColorSpecImageSwitch, fillVariantSpecs, forceClearLogisticsSection, recoverRequiredAttributes, setImageUploadFiles, waitForActionResult } from '../server/publisher.js';
-import { submitWithRepairs } from '../server/publish-recovery.js';
+import { submitWithRepairs, publishRepairPlan } from '../server/publish-recovery.js';
+
+test('English logistics validation receives the same complete-section repair as Chinese validation', () => {
+  assert.deepEqual(publishRepairPlan(new Error('Logistics attribute: Please fill in completely, or please remove all the weight, volume and logistics attributes')), ['logistics']);
+});
 
 test('reports platform policy warnings before stale logistics errors and never confirms or retries them', { skip: !findChromium() }, async () => {
   const browser = await chromium.launch({ executablePath: findChromium(), headless: true });

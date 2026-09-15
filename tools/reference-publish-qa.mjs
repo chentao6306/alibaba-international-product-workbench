@@ -62,7 +62,7 @@ try {
         }
         const snapshot = (reference.publishHistory || []).find((entry) => ['published', 'submitted', 'success'].includes(entry.result?.status) && entry.data);
         const template = createPublishedReferenceTemplate(reference, snapshot);
-        const patch = applyPublishedProductReference(product, template, { preserveCategory: Boolean(product.categoryId), onlyMissing: true });
+        const patch = applyPublishedProductReference(product, template, { fullTemplate: true });
         recordProductMutation(product, { ...patch, status: 'ready' }, { actor: 'user', action: 'reference-published-product' });
         item.reference = { id: reference.id, title: reference.title, receipt: reference.publishResult?.url, fields: Object.keys(patch) };
         item.product = product;
@@ -80,7 +80,7 @@ try {
       const reference = state.products.find((candidate) => candidate.id === item.reference?.id);
       assert.ok(reference && reference.status === 'published');
       const snapshot = (reference.publishHistory || []).find((entry) => ['published', 'submitted', 'success'].includes(entry.result?.status) && entry.data);
-      const patch = applyPublishedProductReference(product, createPublishedReferenceTemplate(reference, snapshot), { preserveCategory: Boolean(product.categoryId), onlyMissing: true });
+      const patch = applyPublishedProductReference(product, createPublishedReferenceTemplate(reference, snapshot), { fullTemplate: true });
       recordProductMutation(product, { ...patch, status: 'ready' }, { actor: 'user', action: 'reference-published-product' });
       if (item.draft) (item.draftHistory ||= []).push(item.draft);
       delete item.draft;

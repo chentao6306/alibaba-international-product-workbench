@@ -21,6 +21,7 @@ import { createPublishedReferenceTemplate, findPublishedReferenceRepair } from '
 import { userFacingError } from './browser-error.js';
 import { runWithProgressTimeout } from './progress-timeout.js';
 import { withVerificationContext } from './human-verification.js';
+import { CollectionCheckpoint, collectionResumeMessage } from './collection-checkpoint.js';
 import { collectionUrls, convertProductPrices, crossPlatformPublishErrors, parseCollectionUrl, sourcePlatform } from './source-platform.js';
 import { cleanupWorkspace } from './storage-cleanup.js';
 import { AnnouncementInbox } from './announcements.js';
@@ -276,6 +277,7 @@ function deleteEntities(selection) {
     const now = new Date().toISOString();
     const cancelledJobs = findWorkspaceJobs(state, deleted, ['paused']);
     for (const job of cancelledJobs) {
+      if (job.type === 'collect') new CollectionCheckpoint(dataDir, job.id).clear();
       Object.assign(job, {
         status: 'cancelled',
         message: '关联店铺或分组已删除，暂停任务已取消',
@@ -391,15 +393,18 @@ async function startCollectJob(jobId) {
       const target = draft.groups.find((item) => item.id === group.id);
       if (target) Object.assign(target, { status: 'ready', collectedCount: count, activeJobId: '' });
       const pausedJob = draft.jobs.find((item) => item.id === jobId);
-      if (pausedJob) Object.assign(pausedJob, { progress: count, message: `已暂停，已保存 ${count} 件商品，可继续采集`, updatedAt: new Date().toISOString() });
+      if (pausedJob) Object.assign(pausedJob, { message: `已暂停，已保存 ${count} 件商品，可继续采集`, updatedAt: new Date().toISOString() });
     });
     return;
   }
   const options = { ...(job.metadata?.options || {}), shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status)) };
+  const checkpoint = new CollectionCheckpoint(dataDir, jobId);
+  options.onCheckpoint = (value) => { checkpoint.write(value); options.checkpoint = value; };
   options.onWaiting = (message) => { if (!options.shouldStop()) store.patchJob(jobId, { message }); };
-  store.patchJob(jobId, { status: 'running', message: `开始采集“${group.name}”，已保存的商品会保留` });
   const savedProducts = new Set();
   try {
+    options.checkpoint = checkpoint.read();
+    store.patchJob(jobId, { status: 'running', message: collectionResumeMessage(options.checkpoint, `开始采集“${group.name}”，已保存的商品会保留`) });
     const products = await withVerificationContext(options, () => collector.collectGroup(group.url, (progress) => {
       if (progress.product) {
         saveCollectedProduct(group.id, progress.product, options);
@@ -425,19 +430,21 @@ async function startCollectJob(jobId) {
     }
     if (store.read().jobs.find((item) => item.id === jobId)?.status === 'cancelled') return;
     const count = store.read().products.filter(inJobFolder).length;
-    const warningCount = products.filter((item) => item?.collectWarning).length;
+    const warningCount = store.read((state) => state.products.filter(inJobFolder).filter((item) => item.collectWarning).length);
+    const completedTotal = options.checkpoint?.products.length ?? products.length;
     store.update((draft) => {
       const target = draft.groups.find((item) => item.id === group.id);
       if (target) Object.assign(target, { status: 'done', collectedCount: count, lastCollectedAt: new Date().toISOString(), activeJobId: '' });
       const completeJob = draft.jobs.find((item) => item.id === jobId);
       if (completeJob) Object.assign(completeJob, {
         status: 'completed',
-        progress: products.length,
-        total: products.length,
+        progress: completedTotal,
+        total: completedTotal,
         message: `${collectionPageRange(options).allPages ? '全部页读取完成' : `第 ${options.startPage}-${options.endPage} 页读取完成`}，共保存 ${count} 件${warningCount ? `，其中 ${warningCount} 件详情待补全` : ''}`,
         updatedAt: new Date().toISOString()
       });
     });
+    checkpoint.clear();
   } catch (error) {
     const currentStatus = store.read().jobs.find((item) => item.id === jobId)?.status;
     if (currentStatus === 'cancelled') {
@@ -448,7 +455,7 @@ async function startCollectJob(jobId) {
       });
       return;
     }
-    const paused = error.code === 'COLLECT_PAUSED' || ['pause_requested', 'paused'].includes(currentStatus);
+    const paused = error.code === 'COLLECT_PAUSED' || ['pause_requested', 'paused'].includes(currentStatus) || Boolean(options.checkpoint);
     if (paused) {
       const count = store.read().products.filter(inJobFolder).length;
       store.update((draft) => {
@@ -456,8 +463,8 @@ async function startCollectJob(jobId) {
         if (target) Object.assign(target, { status: 'ready', collectedCount: count, activeJobId: '' });
         const pausedJob = draft.jobs.find((item) => item.id === jobId);
         if (pausedJob) Object.assign(pausedJob, {
-          status: 'paused', progress: count,
-          message: error.message && error.message !== 'COLLECT_PAUSED' ? error.message : `已暂停，已保存 ${count} 件商品，可继续采集`,
+          status: 'paused',
+          message: `${error.message && error.message !== 'COLLECT_PAUSED' ? `${userFacingError(error)}；` : ''}已暂停，${collectionResumeMessage(options.checkpoint, `已保存 ${count} 件商品，可继续采集`)}`,
           updatedAt: new Date().toISOString()
         });
       });
@@ -1085,7 +1092,8 @@ app.post('/api/jobs/:id/resume', (request, response, next) => {
     return next(Object.assign(new Error('当前任务不能继续'), { status: 409 }));
   }
   if (job.type === 'publish' && readingSellerGroups) return next(Object.assign(new Error('正在读取国际站分组，请稍后继续任务'), { status: 409 }));
-  const updated = store.patchJob(job.id, { status: 'queued', message: `等待继续，已处理 ${job.progress}/${job.total} 件` });
+  const updated = store.patchJob(job.id, { status: 'queued', message: job.type === 'collect' && job.collectionStage === 'listing'
+    ? `等待从断点继续，已发现 ${job.discovered || 0} 件` : `等待继续，已处理 ${job.progress}/${job.total} 件` });
   response.json(updated);
   setImmediate(() => job.type === 'collect' ? queueCollection(job.id) : runPublishJob(job.id));
 });
@@ -1102,6 +1110,7 @@ app.post('/api/jobs/:id/cancel', (request, response, next) => {
     message: `任务已取消，已完成 ${job.progress}/${job.total || 0} 件，已保存数据不受影响`
   });
   if (job.type === 'collect') {
+    new CollectionCheckpoint(dataDir, job.id).clear();
     store.update((draft) => {
       const group = draft.groups.find((item) => item.id === job.metadata?.groupId);
       if (group?.activeJobId === job.id || group?.status === 'collecting') {
@@ -1175,7 +1184,7 @@ app.post('/api/products/reference', (request, response, next) => {
       const changed = [];
       for (const product of state.products) {
         if (!ids.has(product.id) || product.id === reference.id || product.status === 'published') continue;
-        const patch = applyPublishedProductReference(product, referenceTemplate, { preserveCategory: Boolean(product.categoryId), onlyMissing: true });
+        const patch = applyPublishedProductReference(product, referenceTemplate, { fullTemplate: true });
         if (!Object.keys(patch).length) continue;
         // A template reference is an explicit recovery action for a failed
         // listing. Reset the working status and remove the stale failure

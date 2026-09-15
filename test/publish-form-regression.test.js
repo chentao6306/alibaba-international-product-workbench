@@ -8,6 +8,49 @@ import { findChromium } from '../server/browser-runtime.js';
 import { SellerPublisher, fillAndVerify, dismissPostingOverlays, emptyRequiredSpecificationLabels, enableImageBackedVariantSpecs, recoverRequiredAttributes, specImageIsUploaded, visibleFeedback, fillModelNumber, fillColorSpec, ensureColorSpecificationReady, alibabaKeywordText } from '../server/publisher.js';
 import { createPublishedReferenceTemplate } from '../server/publish-reference.js';
 import { applyPublishedProductReference } from '../server/product-model.js';
+import { captureCategoryAttributes, inferRequiredAttributeValue, fillChoice } from '../server/publisher.js';
+
+test('English Add Color creates every referenced color and material checkboxes keep every selected value', { skip: !findChromium() }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<div id="struct-specification"><div id="p-191288010"><label>color</label>
+      <div class="posting-feild-color-item"><input role="colorCombobox"></div><span class="add-color-btn" role="btn-add">+ Add Color</span></div></div>
+      <div class="sell-catProp-item"><div class="label">Material</div><label><input type="checkbox">Aluminum Alloy</label><label><input type="checkbox">Rubber</label><label><input type="checkbox">Plastic</label></div>
+      <script>document.querySelector('.add-color-btn').onclick=()=>{const row=document.createElement('div');row.className='posting-feild-color-item';row.innerHTML='<input role="colorCombobox">';document.querySelector('.add-color-btn').before(row);};</script>`);
+    assert.equal(await fillColorSpec(page, ['Black', 'Blue', 'Gold']), true);
+    assert.deepEqual(await page.locator('input[role="colorCombobox"]').evaluateAll((nodes) => nodes.map((node) => node.value)), ['Black', 'Blue', 'Gold']);
+    assert.equal(await fillChoice(page, page.locator('input[type=checkbox]').first(), ['Aluminum Alloy', 'Rubber']), true);
+    assert.deepEqual(await page.locator('input[type=checkbox]').evaluateAll((nodes) => nodes.map((node) => node.checked)), [true, true, false]);
+  } finally { await browser.close(); }
+});
+
+test('successful form capture preserves selected labels, multiple attributes and reference specification values', { skip: !findChromium() }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<div class="sell-catProp-item"><div class="label">* 最大起飞重量：</div><select><option value="2">25kg</option></select></div>
+      <div class="sell-catProp-item"><div class="label">材质</div><label><input type="checkbox" checked>Aluminum Alloy</label><label><input type="checkbox" checked>Rubber</label><label><input type="checkbox">Plastic</label></div>
+      <div class="sell-catProp-item"><div class="label">最大飞行时间</div><input value="30 minutes"></div>
+      <div id="struct-specification"><div id="p-1"><label>类型</label><em class="next-tag-body">Drone motor</em><input type="search" value="Old type"></div></div>`);
+    const requiredAttributes = await captureCategoryAttributes(page);
+    assert.deepEqual(requiredAttributes, [{ name: '最大起飞重量', value: '25kg' }, { name: '材质', value: ['Aluminum Alloy', 'Rubber'] }, { name: '最大飞行时间', value: '30 minutes' }, { name: '类型', value: 'Drone motor' }]);
+    const reference = { categoryId: '201346401', attributes: [{ name: 'Max Takeoff Weight', value: 'stale' }], variantGroups: [{ name: 'Type', options: ['Old type'], optionImages: { 'Old type': 'motor.jpg' } }], skus: [{ attributes: { Type: 'Old type' }, stock: 7 }] };
+    const before = structuredClone(reference);
+    const template = createPublishedReferenceTemplate(reference, { data: reference, result: { status: 'published', requiredAttributes } });
+    const target = { id: 'target', categoryId: '11111', price: 12, attributes: [{ name: 'Battery', value: 'old category' }], modelImages: { old: 'wrong.jpg' }, variantGroups: [{ name: 'RAM', options: ['8GB'] }] };
+    const copied = { ...target, ...applyPublishedProductReference(target, template, { fullTemplate: true }) };
+    assert.equal(inferRequiredAttributeValue(copied, 'Maximum Takeoff Weight'), '25kg');
+    assert.equal(inferRequiredAttributeValue(copied, 'Max Flight Time'), '30 minutes');
+    assert.deepEqual(inferRequiredAttributeValue(copied, 'Material'), ['Aluminum Alloy', 'Rubber']);
+    assert.deepEqual(copied.variantGroups[0].options, ['Drone motor']);
+    assert.equal(copied.skus[0].attributes.Type, 'Drone motor');
+    assert.equal(copied.skus[0].image, 'motor.jpg');
+    assert.deepEqual(copied.modelImages, {});
+    assert.equal(copied.attributes.some((row) => row.name === 'Battery'), false);
+    assert.deepEqual(reference, before);
+  } finally { await browser.close(); }
+});
 
 test('accepts exact titles containing commas and still validates formatted numeric inputs', { skip: !findChromium() }, async () => {
   const browser = await chromium.launch({ executablePath: findChromium(), headless: true });

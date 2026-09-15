@@ -27,7 +27,7 @@ for (const folder of ['server', 'electron']) {
 }
 assert.ok(fs.statSync(path.join(applicationDirectory, 'resources/chromium/chrome.exe')).size > 1000000);
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-package-qa-'));
-const executable = fs.readdirSync(path.join(release, 'win-unpacked')).find((name) => name.endsWith('.exe'));
+const executable = fs.readdirSync(applicationDirectory).find((name) => name.endsWith('.exe'));
 const executablePath = path.join(applicationDirectory, executable);
 const fuses = await getCurrentFuseWire(executablePath);
 for (const name of ['RunAsNode', 'EnableNodeOptionsEnvironmentVariable', 'EnableNodeCliInspectArguments']) assert.equal(fuses[FuseV1Options[name]], 48, name);

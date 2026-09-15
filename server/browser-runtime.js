@@ -6,6 +6,7 @@ import { readPrivateSession } from './private-session-storage.js';
 import { inspectVerificationDocument, verificationOptions, verificationPaused, waitForVerification } from './human-verification.js';
 
 const contextModes = new WeakMap();
+const importedSessions = new WeakMap();
 
 function cookieFile() {
   return process.env.KUA_YIPU_ALIBABA_COOKIES_FILE || '';
@@ -41,12 +42,26 @@ function readAlibabaCookies() {
 }
 
 export async function syncAlibabaCookies(context) {
+  let imported = importedSessions.get(context);
+  if (!imported) { imported = { cookies: new Map(), storage: '' }; importedSessions.set(context, imported); }
   const cookies = readAlibabaCookies();
-  if (cookies.length) await context.addCookies(cookies).catch(() => {});
+  const key = (cookie) => `${cookie.domain}\n${cookie.path}\n${cookie.name}`;
+  // A source browser can receive newer verification cookies itself. Import
+  // only values actually changed by desktop login/verification, otherwise each
+  // new product request would overwrite the user's just-completed challenge.
+  const changed = cookies.filter((cookie) => imported.cookies.get(key(cookie)) !== JSON.stringify(cookie));
+  if (changed.length) {
+    try {
+      await context.addCookies(changed);
+      for (const cookie of changed) imported.cookies.set(key(cookie), JSON.stringify(cookie));
+    } catch {}
+  }
   const file = storageFile();
   if (!file || !fs.existsSync(file)) return;
   let storage = {};
   try { storage = readPrivateSession(file); } catch { return; }
+  const storageKey = JSON.stringify(storage);
+  if (imported.storage === storageKey) return;
   await context.addInitScript((entries) => {
     try {
       if (!/(^|\.)alibaba\.com$/i.test(location.hostname)) return;
@@ -54,7 +69,7 @@ export async function syncAlibabaCookies(context) {
       if (!values || typeof values !== 'object') return;
       for (const [key, value] of Object.entries(values)) localStorage.setItem(key, String(value));
     } catch {}
-  }, storage).catch(() => {});
+  }, storage).then(() => { imported.storage = storageKey; }).catch(() => {});
 }
 
 function existing(paths) {
@@ -261,7 +276,9 @@ export async function waitForHumanVerification(page, options = {}) {
       for (let attempt = 0; attempt < 2; attempt++) {
         if (shouldStop()) throw verificationPaused();
         onWaiting('等待人工验证，已保存的采集进度保留');
-        const handled = await bridge.humanVerification(verificationUrl, { shouldStop, onWaiting });
+        const userAgent = await page.evaluate(() => navigator.userAgent).catch(() => '');
+        const requestCookies = await page.context().cookies();
+        const handled = await bridge.humanVerification(verificationUrl, { shouldStop, onWaiting, userAgent, requestCookies });
         if (!handled) break;
         if (shouldStop()) throw verificationPaused();
         await syncAlibabaCookies(page.context());
@@ -292,7 +309,9 @@ export async function waitForHumanVerification(page, options = {}) {
           if (error.code !== 'VERIFICATION_RECHECK_REQUIRED') throw error;
         }
       }
-      throw Object.assign(verificationPaused(), { message: '验证会话未能同步到采集页面，任务已暂停并保留进度，请稍后继续采集' });
+      throw Object.assign(new Error('验证会话未能同步，正在恢复原采集浏览器'), {
+        code: 'HUMAN_VERIFICATION_REQUIRED', verificationUrl,
+      });
     }
     const error = new Error('需要人工验证');
     error.code = 'HUMAN_VERIFICATION_REQUIRED';

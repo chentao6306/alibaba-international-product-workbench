@@ -3,6 +3,53 @@ import test from 'node:test';
 import { ShopCollector, collectionPageRange, readInternationalModules } from '../server/collector.js';
 import { chromium } from 'playwright-core';
 import { findChromium } from '../server/browser-runtime.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { CollectionCheckpoint } from '../server/collection-checkpoint.js';
+
+test('resumes listing pages and detail items from disk after pause, restart and browser recovery', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'collection-resume-'));
+  const disk = new CollectionCheckpoint(directory, 'task');
+  let checkpoint;
+  const visits = [];
+  const details = [];
+  const makeCollector = () => {
+    const collector = new ShopCollector(directory, async (products, progress) => {
+      const result = [];
+      for (const product of products) {
+        details.push(product.sourceId); result.push(product);
+        if (progress(result.length, products.length, product) === false) throw Object.assign(new Error('Paused'), { code: 'COLLECT_PAUSED' });
+      }
+      return result;
+    });
+    let current;
+    const page = { isClosed: () => false, evaluate: async () => false, waitForTimeout: async () => {}, waitForLoadState: async () => {},
+      url: () => `https://fixture.en.alibaba.com/productlist-${current}.html`,
+      goto: async (url) => { current = Number(url.match(/productlist-(\d+)/)?.[1] || 1); visits.push(current); },
+      locator: () => ({ evaluateAll: async () => ({ pageNav: { currentPage: current, totalLines: 6, pageLines: 2,
+        formatString: 'https://fixture.en.alibaba.com/productlist-{0}.html' }, products: [1, 2].map((i) => ({
+          id: String((current - 1) * 2 + i), subject: 'Product', url: `https://www.alibaba.com/product-detail/item_${current}${i}.html` })) }) }) };
+    collector.withPage = (callback) => callback(page);
+    return collector;
+  };
+  const options = () => ({ allPages: true, checkpoint: new CollectionCheckpoint(directory, 'task').read(), onCheckpoint: (value) => { disk.write(value); checkpoint = value; } });
+  try {
+    const url = 'https://fixture.en.alibaba.com/productlist.html';
+    await assert.rejects(makeCollector().collectGroup(url, (event) => event.stage !== 'listing' || event.page !== 2, options()), { code: 'COLLECT_PAUSED' });
+    assert.deepEqual(visits, [1, 2]); assert.equal(checkpoint.page, 2); assert.equal(checkpoint.products.length, 4);
+    visits.length = 0;
+    await assert.rejects(makeCollector().collectGroup(url, (event) => !event.product || event.current !== 2, options()), { code: 'COLLECT_PAUSED' });
+    assert.deepEqual(visits, [3]); assert.deepEqual(details, ['1', '2']); assert.deepEqual(checkpoint.completedIds, ['1', '2']);
+    visits.length = 0;
+    const events = [];
+    await makeCollector().collectGroup(url, (event) => events.push(event), options());
+    assert.deepEqual(visits, [], 'Resuming details must not reread any listing page');
+    assert.deepEqual(details, ['1', '2', '3', '4', '5', '6']);
+    assert.equal(events[0].current, 2); assert.equal(events.at(-1).current, 6);
+    assert.equal(new CollectionCheckpoint(directory, 'task').read().completedIds.length, 6);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
 
 test('all-pages collection reads past ten pages and respects explicit ranges without repeating a redirected page', async () => {
   const collector = new ShopCollector('.', async (products) => products);

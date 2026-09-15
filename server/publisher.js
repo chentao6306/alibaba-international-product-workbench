@@ -7,13 +7,14 @@ import { hasExplicitHumanChallenge, hidePage, launchPersistent, revealPage, sett
 import { extractAlibabaDescription, extractAlibabaSourceData, parseAlibabaDetailDataScript } from './alibaba-source-data.js';
 import { SOURCE_LANGUAGE_HEADERS, withSourceLocale } from './source-locale.js';
 import { buildAlibabaPublishUrl, categoryIdFromUrl, normalizeCategoryId } from './category-routing.js';
-import { REQUIRED_ATTRIBUTE_ALIASES } from './publish-reference.js';
+import { REQUIRED_ATTRIBUTE_ALIASES, requiredAttributeKey } from './publish-reference.js';
 import { sourcePlatform, crossPlatformPublishErrors } from './source-platform.js';
 import { submitWithRepairs } from './publish-recovery.js';
 import { readSellerGroups, applySellerGroup } from './seller-groups.js';
 import { ImageDownloadQueue } from './image-download-queue.js';
 import { originCountry, isOriginRegionAttribute } from './origin-country.js';
 import { uploadEditorDetailImages } from './description-image-upload.js';
+import { fillReferencedSkuRows } from './sku-reference.js';
 
 const WORKBENCH_URL = 'https://i.alibaba.com/';
 const SOURCE_DESCRIPTION_SELECTOR = '[data-module-name="module_description"], [data-testid="module-description"], [data-module-name="module_structure_description"], [data-testid="module-details-structure-description"]';
@@ -313,7 +314,7 @@ const SUBMIT_SUCCESS_TEXT = /(?:发布成功|提交成功|已提交发布|审核
 const DRAFT_SUCCESS_TEXT = /(?:保存成功|草稿.*成功|已保存|successfully\s+saved|saved successfully)/i;
 const ACCOUNT_LIMIT_TEXT = /(?:产品|商品)(?:总量|数量).{0,20}(?:超出|超过|上限)|product.{0,30}(?:quota|limit).{0,20}(?:exceed|reach)/i;
 const POLICY_WARNING_TEXT = /疑似涉及禁限售|涉嫌侵权|疑似侵权|(?:产品|商品).{0,40}(?:违反禁限售|涉及违禁)|(?:suspected|potential).{0,40}(?:restricted|prohibited|infringement)/i;
-const BLOCKING_FEEDBACK_TEXT = /(?:报错反馈|错误项|必填项.*不能为空|无效起订量|物流属性.*(?:请填写完整|不能为空)|重量、体积.*(?:请填写完整|不能为空)|请上传相关产品图片|请不要输入如下(?:非英文)?字符|required|invalid)/i;
+const BLOCKING_FEEDBACK_TEXT = /(?:报错反馈|错误项|必填项.*不能为空|无效起订量|物流属性.*(?:请填写完整|不能为空)|重量、体积.*(?:请填写完整|不能为空)|logistics attribute.*(?:fill in completely|remove all)|请上传相关产品图片|请不要输入如下(?:非英文)?字符|required|invalid)/i;
 
 function requireNoPolicyWarning(feedback) {
   const warnings = feedback.filter((text) => POLICY_WARNING_TEXT.test(text));
@@ -656,19 +657,23 @@ async function currentFormDiagnostics(page) {
   return main;
 }
 
-async function captureCategoryAttributes(page) {
+export async function captureCategoryAttributes(page) {
   return page.locator('.sell-catProp-item, #struct-specification [id^="p-"]').evaluateAll((rows) => rows
     .filter((row) => row.offsetWidth || row.offsetHeight)
     .map((row) => {
-      const name = String(row.querySelector('.label, label')?.textContent || '').replace(/^[*＊]\s*/, '').replace(/添加规格图.*$/, '').trim();
+      const label = row.querySelector('.label, label')?.cloneNode(true);
+      label?.querySelectorAll('.upload-image-switch, .next-icon, button').forEach((node) => node.remove());
+      const name = String(label?.textContent || '').replace(/^[*＊]\s*/, '').replace(/(?:添加规格图|Add Specification).*$/i, '').replace(/[：:]\s*$/, '').trim();
       const selected = [...row.querySelectorAll('.next-select-values em, .next-tag-body')]
         .map((node) => node.textContent?.trim()).filter(Boolean);
       const inputs = [...row.querySelectorAll('input:not([type="hidden"]), textarea, select')]
-        .filter((node) => node.type !== 'file')
+        .filter((node) => !['file', 'button', 'submit', 'search'].includes(node.type))
         .filter((node) => !['checkbox', 'radio'].includes(node.type) || node.checked)
-        .map((node) => ['checkbox', 'radio'].includes(node.type) ? node.closest('label')?.textContent?.trim() : node.value)
+        .flatMap((node) => node.tagName === 'SELECT' ? [...node.selectedOptions].filter((option) => option.value).map((option) => option.textContent.trim())
+          : ['checkbox', 'radio'].includes(node.type) ? node.closest('label')?.textContent?.trim() : node.value)
         .filter(Boolean);
-      return { name, value: [...new Set(selected.length ? selected : inputs)].join(', ') };
+      const values = [...new Set(selected.length ? selected : inputs)];
+      return { name, value: values.length > 1 ? values : values[0] || '' };
     }).filter((item) => item.name && item.value)).catch(() => []);
 }
 
@@ -917,7 +922,7 @@ function attributeValue(product, ...names) {
   const normalize = (name) => String(name || '').toLowerCase().replace(/[\s_\-/]+/g, ' ').trim();
   const canonical = (name) => {
     const value = normalize(name);
-    return ({
+    return requiredAttributeKey(({
       screen: 'screen size', display: 'screen size', 'screen size': 'screen size',
       屏幕: 'screen size', 屏幕尺寸: 'screen size',
       battery: 'battery capacity', 'battery capacity': 'battery capacity', 电池: 'battery capacity', 电池容量: 'battery capacity',
@@ -925,7 +930,7 @@ function attributeValue(product, ...names) {
       'processor brand': 'processor brand', 处理器品牌: 'processor brand',
       'compatible model': 'compatible model', 适用型号: 'compatible model',
       type: 'type', 'product type': 'type', 类型: 'type', 产品类型: 'type'
-    })[value] || value;
+    })[value] || value);
   };
   const wanted = new Set(names.map(canonical));
   const direct = [...(product.attributes || []), ...(product.customAttributes || [])]
@@ -935,7 +940,7 @@ function attributeValue(product, ...names) {
     && Array.isArray(item.options) && item.options.length);
   // Older collectors set productType to the category leaf. A concrete sale
   // specification must take precedence over that generic classification.
-  if (wanted.has('type') && group?.options?.length) return group.options[0];
+  if (wanted.has(canonical('type')) && group?.options?.length) return group.options[0];
   const topLevel = [
     ['screen size', product.screenSize || product.screen],
     ['battery capacity', product.batteryCapacity || product.battery],
@@ -1007,7 +1012,7 @@ export function validateProductData(product) {
     && numericValue(sourceRange.maxPrice) >= numericValue(sourceRange.minPrice);
   if ((product.skus || []).some((sku) => sku.price != null && sku.price !== '' && numericValue(sku.price) <= 0)) errors.push('SKU 价格无效');
   if ((product.skus || []).some((sku) => sku.stock != null && numericValue(sku.stock) < 0)) errors.push('SKU 库存无效');
-  if ((product.variantGroups || []).length && (product.skus || []).some((sku) => numericValue(sku.stock) <= 0)) errors.push('SKU 库存必须大于 0');
+  if ((product.variantGroups || []).length && (product.skus || []).some((sku) => sku.enabled !== false && numericValue(sku.stock) <= 0)) errors.push('启用的 SKU 库存必须大于 0');
   if (!hasSourceRange && (product.skus || []).some((sku) => sku.price == null || sku.price === '')) errors.push('SKU 缺少价格');
   if (!String(product.description || product.descriptionHtml || '').trim()) errors.push('缺少商品详情');
   const tiers = canonicalizePriceTiers(product.priceTiers || []);
@@ -1042,8 +1047,9 @@ export function preparePublishProduct(product) {
     next.skus = product.skus.map((sku, index) => ({
       ...sku,
       price: numericValue(sku.price) > 0 ? Number(sku.price).toFixed(2) : fallbackPrice.toFixed(2),
-      stock: numericValue(sku.stock) > 0 ? Number(sku.stock) : fallbackStock,
-      code: String(sku.code || sku.skuCode || `${product.sourceId || product.id || 'SKU'}-${index + 1}`).trim()
+      stock: product.categoryReference && sku.stock != null && sku.stock !== '' ? Number(sku.stock)
+        : numericValue(sku.stock) > 0 ? Number(sku.stock) : fallbackStock,
+      code: String(sku.code || sku.skuCode || (product.categoryReference ? '' : `${product.sourceId || product.id || 'SKU'}-${index + 1}`)).trim()
     }));
   }
   next.priceTiers = canonicalizePriceTiers(product.priceTiers || []);
@@ -1738,6 +1744,12 @@ export async function fillChoice(page, locator, value) {
   if (!kind) return false;
   if (kind.tag === 'SELECT') return locator.selectOption({ label: expected }, { timeout: 4000 }).then(() => true).catch(() => false);
   if (['checkbox', 'radio'].includes(kind.type)) {
+    const values = Array.isArray(value) ? value : expected.split(/\s*[,;，；]\s*/).filter(Boolean);
+    if (values.length > 1) {
+      let filled = true;
+      for (const item of values) filled = await fillChoice(page, locator, item) && filled;
+      return filled;
+    }
     const row = locator.locator('xpath=ancestor::*[starts-with(@id,"p-") or contains(concat(" ", normalize-space(@class), " "), " sell-catProp-item ")][1]');
     const labels = row.locator('label').filter({ has: page.locator('input[type="checkbox"], input[type="radio"]') });
     const findOption = async () => {
@@ -1940,7 +1952,8 @@ export async function fillColorSpec(page, values) {
       await activeInput.dispatchEvent('blur').catch(() => {});
       await page.waitForTimeout(250);
     }
-    const controls = row.getByText(/^\+?\s*添加$/, { exact: true });
+    const controls = row.locator('[role="btn-add"], .add-color-btn')
+      .or(row.getByText(/^\+?\s*(?:添加(?:颜色)?|Add(?: Color)?)$/i, { exact: true }));
     for (let index = await controls.count().catch(() => 0) - 1; index >= 0; index -= 1) {
       const control = controls.nth(index);
       if (!await control.isVisible().catch(() => false)) continue;
@@ -3310,7 +3323,8 @@ export class SellerPublisher {
           'Accept-Language': 'en-US,en;q=0.9'
         }
       });
-      this.sourceContext.on('close', () => { this.sourceContext = null; });
+      const openedContext = this.sourceContext;
+      openedContext.on('close', () => { if (this.sourceContext === openedContext) this.sourceContext = null; });
     }
     await globalThis.__KUA_YIPU_SELLER_BRIDGE?.sync?.().catch(() => false);
     await syncAlibabaCookies(this.sourceContext);
@@ -3326,17 +3340,24 @@ export class SellerPublisher {
       locale: 'en-US',
       extraHTTPHeaders: { 'Accept-Language': 'en-US,en;q=0.9' }
     });
-    const page = context.pages()[0] || await context.newPage();
+    this.sourceContext = context;
+    context.on('close', () => { if (this.sourceContext === context) this.sourceContext = null; });
+    const page = await context.newPage();
     try {
       await page.setExtraHTTPHeaders(SOURCE_LANGUAGE_HEADERS);
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
       // Keep the headed fallback off-screen unless a real challenge is
-      // visible. This path is only used outside the Electron bridge.
-      if (!await hasExplicitHumanChallenge(page)) return;
-      await revealPage(page);
-      await waitForHumanVerification(page);
-    } finally {
+      // visible. Reuse this verified browser if a cross-engine handoff failed.
+      if (await hasExplicitHumanChallenge(page)) {
+        await revealPage(page);
+        await waitForHumanVerification(page);
+      }
+      await hidePage(page);
+    } catch (error) {
       await context.close().catch(() => {});
+      throw error;
+    } finally {
+      await page.close().catch(() => {});
     }
   }
 
@@ -3708,8 +3729,9 @@ export class SellerPublisher {
           enrichedProduct = await withSourceLocale(context, () => this.readSourceProduct(page, products[index]), options);
         } catch (error) {
           if (error?.code === 'HUMAN_VERIFICATION_REQUIRED') {
+            if (Number(options.verificationRecoveries || 0) >= 2) throw Object.assign(new Error('验证后页面仍未恢复，任务已暂停并保留断点，请稍后继续'), { code: 'COLLECT_PAUSED' });
             await this.completeSourceVerification(error.verificationUrl || products[index].sourceUrl);
-            return this.enrichSourceProducts(products.slice(index), onProgress, options)
+            return this.enrichSourceProducts(products.slice(index), onProgress, { ...options, verificationRecoveries: Number(options.verificationRecoveries || 0) + 1 })
               .then((remaining) => [...enriched, ...remaining]);
           }
           if (error?.code === 'COLLECT_PAUSED') throw error;
@@ -4565,9 +4587,10 @@ export class SellerPublisher {
     const categoryPath = sanitizeCategoryPath(product.categoryPath || product.sourceCategoryPath);
     const productTypeCandidate = [product.productType, ...categoryPath.slice().reverse()].find((value) => value && !isPromotionalText(value));
     const productType = englishSpecText(productTypeCandidate, 'Other');
-    const normalizedName = (value) => String(value || '').trim().toLowerCase();
-    const attributeItems = [...(product.attributes || []), ...(product.customAttributes || [])]
-      .filter((item) => item?.name && item?.value && normalizedName(item.name) !== normalizedName(item.value));
+    const normalizedName = requiredAttributeKey;
+    const attributeItems = [...new Map([...(product.attributes || []), ...(product.customAttributes || [])]
+      .filter((item) => item?.name && item?.value && normalizedName(item.name) !== normalizedName(item.value))
+      .map((item) => [normalizedName(item.name), item])).values()];
     // Some detail pages expose required category values only inside the SKU
     // matrix (for example compatible model/type). Keep the matrix intact, but
     // expose its first value to the corresponding required attribute control.
@@ -4622,7 +4645,8 @@ export class SellerPublisher {
 
     const productTypeField = await fieldByAnyLabel(page, ['产品类型', '类型', 'Product Type', 'Type']);
     let productTypeFilled = false;
-    const explicitType = attributeValue(product, '产品类型', '类型', 'product type', 'type');
+    const explicitTypes = attributeValue(product, '产品类型', '类型', 'product type', 'type');
+    const explicitType = Array.isArray(explicitTypes) ? explicitTypes[0] : explicitTypes;
     const productTypeCandidates = [...new Set([
       explicitType || productType,
       (explicitType || productType).replace(/ies$/i, 'y').replace(/s$/i, '')
@@ -5555,6 +5579,7 @@ export class SellerPublisher {
     await fillLogisticsFields(page, product.packaging || {});
     reportStage('复核价格阶梯');
     await this.fillPriceFields(page, product);
+    await fillReferencedSkuRows(page, product, fillAndVerify, reportStage);
 
     // A specification or uploader rerender may replace the image component.
     // Reconcile against the real preview state immediately before submission.

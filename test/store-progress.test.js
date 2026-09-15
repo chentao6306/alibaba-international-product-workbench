@@ -29,5 +29,11 @@ test('stage updates avoid disk rewrites while item checkpoints persist and indep
     assert.deepEqual(publishCounts(other.read((state) => state.jobs[0])), { success: 2, failed: 0, skipped: 0, remaining: 1 });
     other.patchJob(job.id, { status: 'paused' });
     assert.equal(store.read((state) => state.jobs[0].status), 'paused');
+    // Same-size writes can occur in the same clock tick on Windows.
+    const fixed = new Date(1700000000000);
+    for (const status of ['queued', 'paused', 'queued', 'paused']) {
+      other.patchJob(job.id, { status }); fs.utimesSync(file, fixed, fixed);
+      assert.equal(store.read((state) => state.jobs[0].status), status);
+    }
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });

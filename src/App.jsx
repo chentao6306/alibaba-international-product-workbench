@@ -14,6 +14,7 @@ import CollectionTasks from './CollectionTasks.jsx';
 import OriginCountrySelect from './OriginCountrySelect.jsx';
 import AuthorizationConnection from './AuthorizationConnection.jsx';
 import { publishCounts } from '../server/publish-progress.js';
+import { createPublishedReferenceTemplate } from '../server/publish-reference.js';
 
 const EMPTY = { shops: [], groups: [], collectionFolders: [], products: [], jobs: [], settings: {}, browser: {}, collectorBrowser: {} };
 
@@ -399,7 +400,7 @@ function ProductsView({ state, refresh, notify, onMenu, platform, setPlatform, n
       ? '已勾选商品均已上架成功，无需引用'
       : !publishedReferenceProducts.length
         ? '当前没有上架成功的商品可供引用'
-        : '引用成功商品补全缺失的产地、包装和属性';
+        : '引用成功商品的类目、商品属性、规格及 SKU 信息';
 
   useEffect(() => { setPage(1); setMoveFolderId(''); setEditing(null); setBatchEditing(false); setFindReplaceOpen(false); setReferenceOpen(false); }, [folderId]);
   useEffect(() => { setPage(1); }, [query, filter, pageSize, platform]);
@@ -478,7 +479,7 @@ function ProductsView({ state, refresh, notify, onMenu, platform, setPlatform, n
     {editing && <ProductEditor product={editing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); await refresh(); notify('商品修改已保存'); }} notify={notify} />}
       {batchEditing && <BatchEditor products={selectedProducts} references={publishedReferenceProducts} onClose={() => setBatchEditing(false)} onSaved={async (result) => { setBatchEditing(false); await refresh(); notify(result?.categoryBindingReset ? '批量修改已应用，请重新绑定修改后类目的国际站发布表单' : '批量修改已应用'); }} notify={notify} />}
     {findReplaceOpen && <FindReplaceDialog products={selectedProducts.length ? selectedProducts : platformProducts} onClose={() => setFindReplaceOpen(false)} onSaved={async (result) => { setFindReplaceOpen(false); await refresh(); notify(`已替换 ${result.changedProducts} 件商品，共 ${result.total} 处`); }} notify={notify} />}
-    {referenceOpen && <ReferenceDialog products={referenceEligibleProducts} references={publishedReferenceProducts} onClose={() => setReferenceOpen(false)} onSaved={async (result) => { setReferenceOpen(false); await refresh(); notify(`已补全成功商品资料，更新 ${result.changed.length} 件商品`); }} notify={notify} />}
+    {referenceOpen && <ReferenceDialog products={referenceEligibleProducts} references={publishedReferenceProducts} onClose={() => setReferenceOpen(false)} onSaved={async (result) => { setReferenceOpen(false); await refresh(); notify(`已引用类目、属性和规格，更新 ${result.changed.length} 件商品`); }} notify={notify} />}
   </>;
 }
 
@@ -507,13 +508,23 @@ function FindReplaceDialog({ products, onClose, onSaved, notify }) {
 function ReferenceDialog({ products, references, onClose, onSaved, notify }) {
   const [referenceId, setReferenceId] = useState(references[0]?.id || '');
   const [busy, setBusy] = useState(false);
+  const reference = references.find((item) => item.id === referenceId);
+  const snapshot = reference?.publishHistory?.find((entry) => ['published', 'submitted', 'success'].includes(entry.result?.status || entry.status) && entry.data);
+  const template = reference ? createPublishedReferenceTemplate(reference, snapshot) : null;
   async function apply() {
     if (!referenceId) return notify('请选择已成功上架的引用商品', 'error');
     setBusy(true);
     try { onSaved(await api('/api/products/reference', { method: 'POST', body: JSON.stringify({ ids: products.map((item) => item.id), referenceId }) })); }
     catch (error) { notify(error.message, 'error'); setBusy(false); }
   }
-  return <div className="drawer-backdrop"><aside className="drawer batch-drawer"><div className="drawer-header"><div><span>引用成功商品资料</span><h2>补全 {products.length} 件商品资料</h2></div><button className="icon-button" onClick={onClose} title="关闭"><X size={20} /></button></div><div className="reference-help">允许跨类目引用。仅补缺失的类目、产地、包装重量、尺寸和属性；已有类目、标题、价格、库存、SKU、主图和详情保持不变。请核对引用值与实物一致。</div><label className="batch-field"><span>选择已成功上架的商品</span><select value={referenceId} onChange={(event) => setReferenceId(event.target.value)}><option value="">请选择引用商品</option>{references.map((item) => <option key={item.id} value={item.id}>{item.title || item.id}（{item.sourceId}）</option>)}</select></label><div className="reference-list">{products.map((item) => <div key={item.id}><strong>{item.title || item.id}</strong><small>{item.status === 'publish_failed' ? '上次上架失败，补全资料后可重试' : productCompleteness(item).missing.join('、') || '将补全缺失的发布资料'}</small></div>)}</div><div className="drawer-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="button" className="primary-button" disabled={busy || !referenceId} onClick={apply}><ClipboardList size={17} />补全并保存</button></div></aside></div>;
+  return <div className="drawer-backdrop"><aside className="drawer batch-drawer">
+    <div className="drawer-header"><div><span>引用成功商品资料</span><h2>为 {products.length} 件商品引用资料</h2></div><button className="icon-button" onClick={onClose} title="关闭"><X size={20} /></button></div>
+    <div className="reference-help">用所选成功商品替换类目、产地、品牌、材质、私模、商品属性、规格选项及规格图片、SKU 编码、可售数量和启用状态，并补充缺失的包装与发货资料。保留待上架商品的标题、售价、主图和详情。请核对引用内容与实际商品一致。</div>
+    <label className="batch-field"><span>选择已成功上架的商品</span><select value={referenceId} onChange={(event) => setReferenceId(event.target.value)}><option value="">请选择引用商品</option>{references.map((item) => <option key={item.id} value={item.id}>{item.title || item.id}（{item.sourceId}）</option>)}</select></label>
+    {template && <div className="reference-list"><div><strong>引用类目</strong><small>{(template.categoryPath || template.sourceCategoryPath || []).join(' > ') || '未记录类目路径'} · {template.categoryId}</small></div><div><strong>商品属性 · {(template.attributes || []).length} 项</strong><small>{(template.attributes || []).map((item) => `${item.name}：${Array.isArray(item.value) ? item.value.join('、') : item.value}`).join('；')}</small></div><div><strong>规格与 SKU · {(template.skus || []).length} 行</strong><small>{(template.variantGroups || []).map((group) => `${group.name}：${(group.options || []).join('、')}`).join('；') || '该商品未设置规格'}</small></div></div>}
+    <div className="reference-list">{products.map((item) => <div key={item.id}><strong>{item.title || item.id}</strong><small>当前类目：{(item.categoryPath || []).join(' > ') || '未设置'}</small></div>)}</div>
+    <div className="drawer-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="button" className="primary-button" disabled={busy || !referenceId} onClick={apply}><ClipboardList size={17} />引用并保存</button></div>
+  </aside></div>;
 }
 
 function BatchEditor({ products, references, onClose, onSaved, notify }) {
@@ -621,7 +632,7 @@ function BatchEditor({ products, references, onClose, onSaved, notify }) {
     <div className="batch-body">
       {tab === 'trade' && products.some((product) => product.currencySymbol !== '$') && <label className="batch-field"><span>换算汇率（1 原币 = 多少美元）</span><input type="number" min="0.000001" step="any" value={usdRate} onChange={(event) => setUsdRate(event.target.value)} />{usdRate && <small>仅换算尚未转为美元的商品</small>}</label>}
       {tab === 'basic' && <>{field('标题前缀', 'titlePrefix')}{field('标题后缀', 'titleSuffix')}{field('统一副标题', 'subtitle')}{field('关键词（逗号或换行分隔）', 'keywords', 'text', true)}<label className="batch-field"><span>产地（国家）</span><OriginCountrySelect value={form.origin} emptyLabel="保持原产地" onChange={(origin) => setForm((current) => ({ ...current, origin }))} /></label>{field('品牌', 'brand')}{field('产品类型', 'productType')}</>}
-      {tab === 'category' && <><label className="batch-field"><span>选择新产品类目</span><CategorySelect path={form.category} includeId onChange={(option) => setForm((v) => ({ ...v, category: option.path, categoryId: option.id || '' }))} /></label><label className="batch-field"><span>类目 ID（由选择或发布页绑定生成）</span><input value={form.categoryId} readOnly placeholder="选择类目后自动填充" /></label><div className="batch-actions"><button type="button" className="secondary-button" disabled={!references.length} onClick={() => setReferenceOpen(true)}><ClipboardList size={16} />引用成功商品资料</button><small className="batch-help">选择成功商品，补全缺失的产地、包装和属性。</small></div></>}
+      {tab === 'category' && <><label className="batch-field"><span>选择新产品类目</span><CategorySelect path={form.category} includeId onChange={(option) => setForm((v) => ({ ...v, category: option.path, categoryId: option.id || '' }))} /></label><label className="batch-field"><span>类目 ID（由选择或发布页绑定生成）</span><input value={form.categoryId} readOnly placeholder="选择类目后自动填充" /></label><div className="batch-actions"><button type="button" className="secondary-button" disabled={!references.length} onClick={() => setReferenceOpen(true)}><ClipboardList size={16} />引用成功商品资料</button><small className="batch-help">选择成功商品，引用其类目、商品属性和完整规格。</small></div></>}
       {tab === 'trade' && <><label className="batch-field"><span>定价模式</span><select value={form.priceMode || ''} onChange={update('priceMode')}><option value="">保持原模式</option><option value="fob-range">FOB区间价格</option><option value="fob-tier">FOB阶梯价格</option><option value="quantity-tier">数量阶梯价格</option><option value="sku">SKU定价</option></select></label>{field('价格调整比例（%）', 'pricePercent', 'number')}{field('统一加减金额', 'priceFixed', 'number')}{field('统一库存', 'stock', 'number')}{field('统一起订量', 'moq', 'number')}{field('统一交期（天）', 'deliveryDays', 'number')}<div className="form-grid">{field('FOB最低价', 'fobMinPrice', 'number')}{field('FOB最高价', 'fobMaxPrice', 'number')}</div>{field('SKU统一价格', 'skuPrice', 'number')}{field('SKU统一库存', 'skuStock', 'number')}<div className="batch-actions"><button type="button" className="secondary-button" onClick={exportSku}>导出 SKU Excel</button><label className="file-button secondary-button">导入 SKU Excel<input type="file" accept=".xlsx,.xls,.csv,.txt" onChange={importSku} /></label></div></>}
       {tab === 'logistics' && <>{field('毛重（kg）', 'weight', 'number')}{field('包装长（cm）', 'length', 'number')}{field('包装宽（cm）', 'width', 'number')}{field('包装高（cm）', 'height', 'number')}</>}
       {(tab === 'description' || tab === 'detail' || tab === 'service') && field('批量追加内容', 'description', 'text', true)}

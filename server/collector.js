@@ -122,7 +122,8 @@ export class ShopCollector {
     // never creates a desktop window or taskbar icon.
     await globalThis.__KUA_YIPU_SELLER_BRIDGE?.sync?.().catch(() => false);
     this.context = await launchPersistent(this.profileDir, { headless: true });
-    this.context.on('close', () => { this.context = null; this.verificationPage = null; });
+    const openedContext = this.context;
+    openedContext.on('close', () => { if (this.context === openedContext) { this.context = null; this.verificationPage = null; } });
     this.context.on('page', (page) => {
       if (!this.visible) hidePage(page).catch(() => {});
     });
@@ -142,20 +143,28 @@ export class ShopCollector {
     this.context = context;
     this.visible = true;
     context.on('close', () => {
-      if (this.context === context) this.context = null;
-      this.verificationPage = null;
-      this.visible = false;
+      if (this.context === context) {
+        this.context = null;
+        this.verificationPage = null;
+        this.visible = false;
+      }
     });
-    const page = context.pages()[0] || await context.newPage();
+    const page = await context.newPage();
     this.verificationPage = page;
     try {
       await page.setExtraHTTPHeaders(SOURCE_LANGUAGE_HEADERS);
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
-      if (!await hasExplicitHumanChallenge(page)) return;
-      await revealPage(page);
-      await waitForHumanVerification(page);
-    } finally {
+      if (await hasExplicitHumanChallenge(page)) {
+        await revealPage(page);
+        await waitForHumanVerification(page);
+      }
+      await hidePage(page);
+    } catch (error) {
       await this.resetContext();
+      throw error;
+    } finally {
+      await page.close().catch(() => {});
+      this.verificationPage = null;
       this.visible = false;
     }
   }
@@ -304,17 +313,25 @@ export class ShopCollector {
   }
 
   async collectGroup(groupUrl, onProgress = () => {}, options = {}) {
+    const range = collectionPageRange(options);
+    const scope = JSON.stringify({ groupUrl, ...range, sort: options.sort || 'default', destinationCountry: options.destinationCountry || '' });
+    let checkpoint = options.checkpoint?.scope === scope ? structuredClone(options.checkpoint) : null;
+    const persist = (value) => { options.onCheckpoint?.(value); checkpoint = structuredClone(value); };
     return this.withPage(async (page) => {
-      const items = new Map();
-      let nextUrl = groupUrl;
-      let pageNumber = 0;
-      const { startPage, endPage, allPages } = collectionPageRange(options);
-      const visited = new Set();
+      const items = new Map((checkpoint?.products || []).map((product) => [product.sourceId, product]));
+      let nextUrl = checkpoint ? checkpoint.nextUrl : groupUrl;
+      let pageNumber = checkpoint?.page || 0;
+      const { startPage, endPage, allPages } = range;
+      const visited = new Set(checkpoint?.visited || []);
+      const completedIds = new Set(checkpoint?.completedIds || []);
       const delaySeconds = Math.max(0, Number(options.delaySeconds || 0));
       const international = isInternationalShopUrl(groupUrl);
-      let needsPager = international && /\/product(?:group)?list(?:[-./]|$)/i.test(new URL(groupUrl).pathname);
+      let needsPager = checkpoint?.needsPager || (international && /\/product(?:group)?list(?:[-./]|$)/i.test(new URL(groupUrl).pathname));
       const shouldStop = () => typeof options.shouldStop === 'function' && options.shouldStop();
-      while (nextUrl && (allPages || pageNumber < endPage)) {
+      const paused = () => Object.assign(new Error('COLLECT_PAUSED'), { code: 'COLLECT_PAUSED' });
+      const save = (stage) => persist({ version: 1, scope, stage, nextUrl, page: pageNumber,
+        visited: [...visited], needsPager, products: [...items.values()], completedIds: [...completedIds] });
+      while (checkpoint?.stage !== 'detail' && nextUrl && (allPages || pageNumber < endPage)) {
         if (visited.has(nextUrl)) throw new Error(`店铺翻页重复，已读取 ${pageNumber} 页，采集未完成`);
         visited.add(nextUrl);
         if (shouldStop()) { const error = new Error('COLLECT_PAUSED'); error.code = 'COLLECT_PAUSED'; throw error; }
@@ -383,7 +400,6 @@ export class ShopCollector {
             stock: 100, description: '', attributes: [], skus: []
           });
         }
-        onProgress({ stage: 'listing', page: pageNumber, found: items.size, startPage, endPage, allPages, storeTotal: Number(internationalData?.pageNav?.totalLines || 0), destinationCountry: options.destinationCountry || '' });
         let next = '';
         if (international && internationalData?.pageNav) {
           const nav = internationalData.pageNav;
@@ -400,31 +416,43 @@ export class ShopCollector {
             return candidate?.href || '';
           });
         }
-        if (!next) break;
         if (next === nextUrl) throw new Error(`店铺翻页未前进，已读取 ${pageNumber} 页，采集未完成`);
-        nextUrl = next;
+        nextUrl = next && (allPages || pageNumber < endPage) ? next : '';
+        save(nextUrl ? 'listing' : 'detail');
+        const keepGoing = onProgress({ stage: 'listing', page: pageNumber, found: items.size, startPage, endPage, allPages, storeTotal: Number(internationalData?.pageNav?.totalLines || 0), destinationCountry: options.destinationCountry || '' });
+        if (keepGoing === false || shouldStop()) throw paused();
+        if (!nextUrl) break;
         if ((allPages || pageNumber < endPage) && delaySeconds) await page.waitForTimeout(delaySeconds * 1000);
       }
 
       const products = [...items.values()];
       if (options.sort === 'priceAsc') products.sort((a, b) => Number(a.price || 0) - Number(b.price || 0));
       if (options.sort === 'priceDesc') products.sort((a, b) => Number(b.price || 0) - Number(a.price || 0));
-      if (onProgress({ stage: 'detail', current: 0, total: products.length, found: products.length }) === false || shouldStop()) {
+      if (onProgress({ stage: 'detail', current: completedIds.size, total: products.length, found: products.length }) === false || shouldStop()) {
         throw Object.assign(new Error('COLLECT_PAUSED'), { code: 'COLLECT_PAUSED' });
       }
+      const remaining = products.filter((product) => !completedIds.has(product.sourceId));
+      const reportProduct = (product) => {
+        const current = completedIds.size + 1;
+        // Persist the product through the caller before advancing the cursor.
+        const keepGoing = onProgress({ stage: 'detail', current, total: products.length, found: products.length, product });
+        completedIds.add(product.sourceId);
+        save('detail');
+        return keepGoing !== false && !shouldStop();
+      };
       if (international && this.detailReader) {
-        return this.detailReader(products, (current, total, product) => {
-          return onProgress({ stage: 'detail', current, total, found: products.length, product });
+        return this.detailReader(remaining, (_current, _total, product) => {
+          return reportProduct(product);
         }, options);
       }
-      for (let index = 0; index < products.length; index += 1) {
+      for (let index = 0; index < remaining.length; index += 1) {
         if (shouldStop()) { const error = new Error('COLLECT_PAUSED'); error.code = 'COLLECT_PAUSED'; throw error; }
-        products[index] = await this.readProductDetail(page, products[index]);
-        const keepGoing = onProgress({ stage: 'detail', current: index + 1, total: products.length, found: products.length, product: products[index] });
+        remaining[index] = await this.readProductDetail(page, remaining[index]);
+        const keepGoing = reportProduct(remaining[index]);
         if (keepGoing === false) { const error = new Error('COLLECT_PAUSED'); error.code = 'COLLECT_PAUSED'; throw error; }
-        if (index + 1 < products.length && delaySeconds) await page.waitForTimeout(delaySeconds * 1000);
+        if (index + 1 < remaining.length && delaySeconds) await page.waitForTimeout(delaySeconds * 1000);
       }
-      return products;
+      return remaining;
     });
   }
 
@@ -563,7 +591,8 @@ export class ShopCollector {
     if (!['1688', 'aliexpress'].includes(platform)) throw new Error('不支持该平台');
     await this.resetContext();
     this.context = await launchPersistent(this.profileDir, { headless: false });
-    this.context.on('close', () => { this.context = null; this.verificationPage = null; this.visible = false; });
+    const openedContext = this.context;
+    openedContext.on('close', () => { if (this.context === openedContext) { this.context = null; this.verificationPage = null; this.visible = false; } });
     this.visible = true;
     this.verificationPage = this.context.pages()[0] || await this.context.newPage();
     await this.verificationPage.goto(platform === '1688' ? 'https://www.1688.com/' : 'https://www.aliexpress.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });

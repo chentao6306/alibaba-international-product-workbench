@@ -22,7 +22,7 @@ ipcMain.handle('verification:pause', (event) => {
 });
 
 export async function showHumanVerification({ url, partition, icon, shouldStop = () => false,
-  onWaiting = () => {}, saveSession = async () => {}, onCreated = () => {} }) {
+  onWaiting = () => {}, saveSession = async () => {}, onCreated = () => {}, userAgent = '', requestCookies = [] }) {
   if (!allowedUrl(url)) throw new Error('验证页面地址不受支持');
   const window = new BrowserWindow({ width: 1280, height: 920, minWidth: 640, minHeight: 480,
     show: false, skipTaskbar: true, title: '抄得快 - 人工验证', icon, autoHideMenuBar: true,
@@ -31,6 +31,9 @@ export async function showHumanVerification({ url, partition, icon, shouldStop =
   const view = new WebContentsView({ webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false } });
   window.contentView.addChildView(view);
   const contents = view.webContents;
+  // Verification and the requesting browser must identify the same client;
+  // otherwise a healthy Electron page may not restore the collector session.
+  if (userAgent) contents.setUserAgent(userAgent);
   const resize = () => { const [width, height] = window.getContentSize(); view.setBounds({ x: 0, y: 64, width, height: Math.max(1, height - 64) }); };
   window.on('resize', resize);
   resize();
@@ -94,6 +97,23 @@ export async function showHumanVerification({ url, partition, icon, shouldStop =
     return { ...state, ready: state.ready && version === navigation && documentCommitted, url: `${state.url}#navigation-${navigation}` };
   };
   try {
+    // The challenge belongs to the requesting browser's current cookie state.
+    // An older seller-session copy can load a different (healthy) page while
+    // leaving the actual collector challenge unresolved.
+    for (const cookie of requestCookies) {
+      const domain = String(cookie.domain || '').replace(/^\./, '');
+      if (!/(^|\.)(?:alibaba\.com|1688\.com|aliexpress\.com|alicdn\.com)$/.test(domain)) continue;
+      const nextCookie = { url: `https://${domain}${cookie.path || '/'}`,
+        name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path || '/',
+        secure: cookie.secure, httpOnly: cookie.httpOnly,
+        ...(cookie.expires > 0 ? { expirationDate: cookie.expires } : {}),
+        sameSite: ({ None: 'no_restriction', Lax: 'lax', Strict: 'strict' })[cookie.sameSite] || 'unspecified',
+      };
+      await contents.session.cookies.set(nextCookie).catch(async (error) => {
+        if (!/EXCLUDE_OVERWRITE_HTTP_ONLY/.test(error.message)) throw error;
+        await contents.session.cookies.set({ ...nextCookie, httpOnly: true });
+      });
+    }
     await window.loadFile(path.join(directory, 'verification.html'));
     onCreated({ window, contents, refresh, inspect });
     // The authenticated partition may already show a healthy product even
