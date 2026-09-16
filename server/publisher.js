@@ -3354,6 +3354,7 @@ export class SellerPublisher {
     this.sourceContext = null;
     this.page = null;
     this.visible = false;
+    this.publishingVisible = false;
     this.publishStops = new Map();
     this.imageDownloads = new ImageDownloadQueue(browserResourcePolicy().imageConcurrency);
   }
@@ -3427,12 +3428,16 @@ export class SellerPublisher {
       if (error.code === 'PUBLISH_PAUSED') throw error;
       progress('卖家窗口同步暂不可用，使用已保存会话连接');
     });
+    if (options.showPublishing && !this.publishingVisible) {
+      const previous = this.context;
+      this.context = null;
+      this.page = null;
+      await step('切换到可见发布浏览器', () => previous?.close());
+      this.publishingVisible = true;
+    }
     if (!this.context) {
-      // Keep normal publishing completely out of the desktop and taskbar.
-      // The shared Electron bridge reveals a real window only if Alibaba
-      // presents a CAPTCHA or login challenge.
       const opened = await step('启动内置发布浏览器', () => launchPersistent(this.profileDir, {
-        headless: true, timeout: resources.navigationTimeoutMs
+        headless: !this.publishingVisible, visible: this.publishingVisible, timeout: resources.navigationTimeoutMs
       }), resources.navigationTimeoutMs + 5000, (context) => context?.close());
       this.context = opened;
       opened.on('close', () => { if (this.context === opened) { this.context = null; this.page = null; } });
@@ -3445,11 +3450,9 @@ export class SellerPublisher {
       await step('打开国际站卖家页面', () => gotoWithRetry(this.page, options.startUrl || WORKBENCH_URL,
         { timeout: resources.navigationTimeoutMs, attempts: 1 }), resources.navigationTimeoutMs + 1000);
     }
-    if (options.reveal) {
-      // My Alibaba is an explicit user action: always restore and maximize the
-      // seller browser so the user can choose the posting form visibly.
-      await revealPage(this.page);
-      await this.page.bringToFront().catch(() => {});
+    if (options.reveal || this.publishingVisible) {
+      const shown = await step('显示并最大化发布浏览器', () => revealPage(this.page));
+      if (this.publishingVisible && !shown) throw Object.assign(new Error('未能显示发布浏览器，已保留当前商品和任务进度'), { code: 'PUBLISH_BROWSER_NOT_READY' });
       this.visible = true;
     }
     else { await step('准备发布页面', () => hidePage(this.page)); this.visible = false; }
@@ -3474,6 +3477,7 @@ export class SellerPublisher {
     this.sourceContext = null;
     this.page = null;
     this.visible = false;
+    this.publishingVisible = false;
     await Promise.allSettled(contexts.map((context) => context.close()));
   }
 
@@ -3499,11 +3503,14 @@ export class SellerPublisher {
         await this.open({ ...options, ...(startUrl ? { startUrl } : {}) });
         const pages = this.context.pages();
         const current = [...pages].reverse().find((item) => !item.isClosed() && isAlibabaInternationalUrl(item.url()));
-        if (current) this.page = current;
+        if (current && current !== this.page) {
+          this.page = current;
+          if (this.publishingVisible) await browserStep(() => revealPage(current), { signal: options.signal, label: '显示发布页面' });
+        }
         return this.page;
       } catch (error) {
         const message = String(error?.message || '');
-        const closed = /browser.*退出|browser has been closed|target page, context or browser has been closed|采集浏览器已关闭/i.test(message);
+        const closed = /browser.*退出|browser has been closed|target page, context or browser has been closed|Failed to open a new tab|采集浏览器已关闭/i.test(message);
         if (!closed || attempt > 0) {
           if (error.code === 'PUBLISH_PAUSED') throw error;
           const unavailable = this.context;
@@ -4842,7 +4849,7 @@ export class SellerPublisher {
     };
   }
 
-  async fillPriceFields(page, product) {
+  async fillPriceFields(page, product, { timeoutMs = browserResourcePolicy().constrained ? 20000 : 10000, onProgress = () => {} } = {}) {
     const fob = product.fobPrice && typeof product.fobPrice === 'object' ? product.fobPrice : {};
     const sourceTiers = product.priceMode === 'fob-tier' && Array.isArray(fob.tiers) ? fob.tiers : (product.priceTiers || []);
     const validTiers = sourceTiers
@@ -4859,53 +4866,73 @@ export class SellerPublisher {
       }))
       .filter((tier) => tier.price > 0 && tier.minQuantity > 0);
     if (!tiers.length) throw new Error('缺少有效的价格和起订量');
-    let priceInputs = page.locator('[role="input-price"]:visible');
-    let quantityInputs = page.locator('[role="input-quantity"]:visible');
-
-    while (Math.min(await priceInputs.count().catch(() => 0), await quantityInputs.count().catch(() => 0)) < tiers.length) {
-      const previousCount = await priceInputs.count();
-      const add = page.getByText(/新增价格区间|添加价格区间|Add price range/i).last();
-      if (!await add.isVisible().catch(() => false)) break;
-      await add.click({ force: true });
-      await page.waitForTimeout(350);
-      priceInputs = page.locator('[role="input-price"]:visible');
-      quantityInputs = page.locator('[role="input-quantity"]:visible');
-      if (await priceInputs.count() <= previousCount) break;
-    }
-
-    const rowCount = Math.min(
-      tiers.length,
-      await priceInputs.count().catch(() => 0),
-      await quantityInputs.count().catch(() => 0)
-    );
-    if (!rowCount) {
-      await fillFirst(page, ['input[placeholder*="价格"]', 'input[placeholder*="price" i]'], product.price);
-      await fillFirst(page, ['input[placeholder*="起订"]', 'input[placeholder*="quantity" i]'], tiers[0].minQuantity);
-      return;
-    }
-    for (let index = 0; index < rowCount; index += 1) {
-      // Each change can rebuild the ladder row. Resolve the visible inputs
-      // again before every write so subsequent operations do not target a
-      // detached clone left behind by Alibaba's controlled form component.
-      quantityInputs = page.locator('[role="input-quantity"]:visible');
-      await fillAndVerify(quantityInputs.nth(index), tiers[index].minQuantity, `第 ${index + 1} 档起订量`);
-      priceInputs = page.locator('[role="input-price"]:visible');
-      await fillAndVerify(priceInputs.nth(index), tiers[index].price, `第 ${index + 1} 档价格`);
-    }
-    // The international form can retain a blank trailing range after adding
-    // rows. Alibaba validates that row too, so remove empty ranges before the
-    // submit/save action instead of letting it surface as a misleading MOQ
-    // error.
-    const rows = page.locator('tr[role="row"]:has([role="input-quantity"]):has([role="input-price"])');
-    for (let index = (await rows.count().catch(() => 0)) - 1; index >= tiers.length; index -= 1) {
-      const row = rows.nth(index);
-      const remove = row.locator('[role="remove"], button').last();
-      if (await remove.isVisible().catch(() => false) && !await remove.isDisabled().catch(() => true)) {
-        await remove.click({ force: true }).catch(() => {});
-        await page.waitForTimeout(200);
+    const priceSelector = '[role="input-price"]:visible';
+    const quantitySelector = '[role="input-quantity"]:visible';
+    const ladders = page.locator('.posting-field-ladder:visible').filter({ has: page.locator('[role="input-price"]') });
+    const root = await ladders.count() ? ladders.first() : page;
+    const priceInputs = root.locator(priceSelector);
+    const quantityInputs = root.locator(quantitySelector);
+    const rowCount = async () => Math.min(await priceInputs.count(), await quantityInputs.count());
+    const notReady = async (reason) => {
+      const observedTiers = await rowCount();
+      return Object.assign(new Error(`国际站价格阶梯未就绪：${reason}（当前 ${observedTiers} 档，需要 ${tiers.length} 档）；已保留商品和任务进度，未提交当前商品`),
+        { code: 'PUBLISH_FIELD_NOT_READY', fieldName: '价格阶梯', diagnostics: { requestedTiers: tiers.length, observedTiers } });
+    };
+    const waitUntil = async (ready, reason) => {
+      const deadline = performance.now() + timeoutMs;
+      while (!await ready()) {
+        if (performance.now() >= deadline) throw await notReady(reason);
+        await page.waitForTimeout(150);
+      }
+    };
+    if (!await rowCount() && tiers.length === 1) {
+      const price = page.locator('input[placeholder*="价格"], input[placeholder*="price" i]').filter({ visible: true }).first();
+      const quantity = page.locator('input[placeholder*="起订"], input[placeholder*="quantity" i]').filter({ visible: true }).first();
+      if (await price.isEditable().catch(() => false) && await quantity.isEditable().catch(() => false)) {
+        await fillAndVerify(quantity, tiers[0].minQuantity, '起订量');
+        await fillAndVerify(price, tiers[0].price, '商品价格');
+        return;
       }
     }
-    if (rowCount < tiers.length) throw new Error(`国际站价格表仅识别到 ${rowCount} 档，商品需要 ${tiers.length} 档`);
+    await waitUntil(async () => await rowCount() > 0, '尚未找到完整的价格和起订量输入框');
+    const commitRow = async (index) => {
+      for (const [inputs, expected, label] of [[quantityInputs, tiers[index].minQuantity, '起订量'], [priceInputs, tiers[index].price, '价格']]) {
+        const input = inputs.nth(index);
+        if (numericValue(await input.inputValue().catch(() => '')) !== expected) {
+          await fillAndVerify(input, expected, `第 ${index + 1} 档${label}`);
+        }
+      }
+    };
+    for (let index = 0; index < tiers.length; index++) {
+      onProgress(`填写价格阶梯 ${index + 1}/${tiers.length}`);
+      if (await rowCount() <= index) {
+        // A new row can be gated on existing values and can rebuild previous
+        // inputs. Commit the rows first, then wait for the actual next row.
+        for (let previous = 0; previous < index; previous++) await commitRow(previous);
+        const namedAdd = root.locator('button, a, [role="button"]').filter({ hasText: /新增价格区间|添加价格区间|Add (?:a |another |new )?price (?:range|tier)/i }).filter({ visible: true });
+        const add = root !== page && await root.locator('[role="btn-add"]:visible').count()
+          ? root.locator('[role="btn-add"]:visible').first() : namedAdd.first();
+        await waitUntil(async () => await add.isVisible().catch(() => false) && await add.isEnabled().catch(() => false), '新增价格区间按钮暂不可用');
+        await add.click({ timeout: timeoutMs }).catch(async () => { throw await notReady('未能新增价格区间'); });
+        await waitUntil(async () => await rowCount() > index, '新增价格区间后尚未生成完整输入行');
+      }
+      await commitRow(index);
+    }
+    const rows = root.locator('tr[role="row"]:visible:has([role="input-quantity"]):has([role="input-price"])');
+    while (await rowCount() > tiers.length) {
+      const previousCount = await rowCount();
+      const remove = rows.last().locator('[role="remove"], button').filter({ visible: true }).last();
+      await waitUntil(async () => await remove.isVisible().catch(() => false) && await remove.isEnabled().catch(() => false), '多余价格区间暂无法移除');
+      await remove.click({ timeout: timeoutMs }).catch(async () => { throw await notReady('未能移除多余价格区间'); });
+      await waitUntil(async () => await rowCount() < previousCount, '多余价格区间尚未移除');
+    }
+    for (let index = 0; index < tiers.length; index++) await commitRow(index);
+    const quantities = await quantityInputs.evaluateAll(nodes => nodes.map(node => node.value));
+    const prices = await priceInputs.evaluateAll(nodes => nodes.map(node => node.value));
+    if (prices.length !== tiers.length || quantities.length !== tiers.length
+      || tiers.some((tier, index) => numericValue(prices[index]) !== tier.price || numericValue(quantities[index]) !== tier.minQuantity)) {
+      throw await notReady('数量或价格在页面刷新后未完整保留');
+    }
   }
 
   async fillLegacyDescription(page, product, onProgress = () => {}) {
@@ -5426,18 +5453,14 @@ export class SellerPublisher {
       page?.close().catch(() => {});
     });
     reportStage(resources.constrained ? '连接国际站发布浏览器（已自动降低图片处理并发，延长页面等待）' : '连接国际站发布浏览器');
-    page = await this.currentSellerPage(publishPageUrl, { skipNavigation: true, signal: connection.signal, onProgress: reportStage });
+    page = await this.currentSellerPage(publishPageUrl, { skipNavigation: true, showPublishing: true, signal: connection.signal, onProgress: reportStage });
     if (connection.signal.aborted) {
       page.close().catch(() => {});
       throw Object.assign(new Error('已暂停当前商品操作'), { code: 'PUBLISH_PAUSED' });
     }
     page.setDefaultTimeout(5000);
-    // Normal publishing is headless and must not appear in the Windows taskbar.
-    // waitForHumanVerification raises a typed error for a real challenge; the
-    // caller can then use the headed verification flow without exposing every
-    // upload and form interaction.
-    await hidePage(page);
-    this.visible = false;
+    // Keep the actual automation page on-screen, including while readiness
+    // checks wait or pause, so the user can inspect the blocked step.
     const publishNavigation = { timeout: resources.navigationTimeoutMs, attempts: 2 };
     reportStage('打开目标类目发布页');
     await gotoWithRetry(page, publishPageUrl, publishNavigation);
@@ -5502,7 +5525,7 @@ export class SellerPublisher {
     reportStage('填写并复核商品关键词');
     await fillProductKeywords(page, product);
 
-    await this.fillPriceFields(page, product);
+    await this.fillPriceFields(page, product, { onProgress: reportStage });
     await fillFirst(page, [
       'input[placeholder="输入数量"]',
       'input[placeholder*="库存"]', 'input[placeholder*="stock" i]', 'input[placeholder*="quantity" i]', 'input[name*="stock" i]',
@@ -5594,7 +5617,7 @@ export class SellerPublisher {
     reportStage('复核物流和必填资料');
     await fillLogisticsFields(page, product.packaging || {});
     reportStage('复核价格阶梯');
-    await this.fillPriceFields(page, product);
+    await this.fillPriceFields(page, product, { onProgress: reportStage });
     await fillReferencedSkuRows(page, product, fillAndVerify, reportStage);
 
     // A specification or uploader rerender may replace the image component.

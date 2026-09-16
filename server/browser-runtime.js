@@ -127,6 +127,7 @@ export function findChromium() {
 }
 
 export async function launchPersistent(profileDir, options = {}) {
+  const { visible = false, ...browserOptions } = options;
   const executablePath = findChromium();
   if (!executablePath) {
     if (process.env.KUA_YIPU_REQUIRE_BUNDLED_BROWSER === '1') {
@@ -136,7 +137,7 @@ export async function launchPersistent(profileDir, options = {}) {
   }
   fs.mkdirSync(profileDir, { recursive: true });
   const headless = options.headless === true;
-  const hiddenWindowArgs = headless ? [] : [
+  const hiddenWindowArgs = headless ? [] : visible ? ['--start-maximized'] : [
     '--window-position=-32000,-32000',
     // Keep a real viewport during hidden automation. A 1x1/minimized window
     // makes Playwright reject otherwise valid interactions as outside the
@@ -148,9 +149,8 @@ export async function launchPersistent(profileDir, options = {}) {
     headless,
     viewport: null,
     locale: options.locale || 'zh-CN',
-    // Keep the headed browser completely off-screen during automation. A
-    // headed context is still required because Alibaba may request a human
-    // verification; revealPage() moves it back on-screen only then.
+    // Collection verification windows stay off-screen until needed; the
+    // publishing context explicitly requests an on-screen window.
     args: [
       '--disable-blink-features=AutomationControlled',
       ...hiddenWindowArgs,
@@ -158,7 +158,7 @@ export async function launchPersistent(profileDir, options = {}) {
       '--no-default-browser-check',
       '--disable-session-crashed-bubble'
     ],
-    ...options,
+    ...browserOptions,
     headless,
     viewport: null,
     args: [...new Set([
@@ -172,7 +172,7 @@ export async function launchPersistent(profileDir, options = {}) {
   };
   try {
     const context = await chromium.launchPersistentContext(profileDir, launchOptions);
-    contextModes.set(context, { headless });
+    contextModes.set(context, { headless, visible });
     try { await browserStep(() => syncAlibabaCookies(context), { timeoutMs: 15000, label: '初始化浏览器会话' }); }
     catch (error) { context.close().catch(() => {}); throw error; }
     return context;
@@ -183,7 +183,7 @@ export async function launchPersistent(profileDir, options = {}) {
       fs.mkdirSync(recoveryDir, { recursive: true });
       try {
         const context = await chromium.launchPersistentContext(recoveryDir, launchOptions);
-        contextModes.set(context, { headless });
+        contextModes.set(context, { headless, visible });
         try { await browserStep(() => syncAlibabaCookies(context), { timeoutMs: 15000, label: '初始化恢复浏览器会话' }); }
         catch (error) { context.close().catch(() => {}); throw error; }
         return context;
@@ -211,8 +211,7 @@ async function setWindowState(page, windowState, bounds = {}) {
 }
 
 export async function revealPage(page) {
-  // Verification is the only time the automation window is user-visible.
-  // Maximize it so the challenge cannot be hidden behind the workbench.
+  // Used for both publishing inspection and human verification.
   const changed = await setWindowState(page, 'maximized');
   if (changed) await page.bringToFront().catch(() => {});
   return changed;
@@ -344,7 +343,7 @@ export async function waitForHumanVerification(page, options = {}) {
       }, shouldStop, isClosed: () => page.isClosed(), onWaiting
     });
     await page.evaluate(() => document.getElementById('workbench-human-actions')?.remove()).catch(() => {});
-    await hidePage(page);
+    if (!contextModes.get(page.context())?.visible) await hidePage(page);
     return true;
   } catch (error) {
     if (shouldStop()) throw verificationPaused();

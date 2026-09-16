@@ -1,4 +1,5 @@
 import { requiredAttributeKey } from './publish-reference.js';
+import { browserResourcePolicy } from './browser-resource-policy.js';
 
 const valueKey = (value) => String(value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
 const skuKey = (attributes) => JSON.stringify(Object.entries(attributes || {}).map(([name, value]) => [requiredAttributeKey(name), valueKey(value)]).sort());
@@ -6,14 +7,25 @@ const skuKey = (attributes) => JSON.stringify(Object.entries(attributes || {}).m
 // Alibaba virtualizes the SKU body and merges repeating property cells. Its
 // header records the complete ordered options and data-row gives the absolute
 // combination index, so neither scrolling nor merged cells can shift a SKU.
-export async function fillReferencedSkuRows(page, product, fill, onProgress = () => {}) {
+export async function fillReferencedSkuRows(page, product, fill, onProgress = () => {}, { timeoutMs = browserResourcePolicy().constrained ? 20000 : 10000 } = {}) {
   if (!product.categoryReference || !product.skus?.length || !product.variantGroups?.some((group) => group.options?.length)) return { filled: 0 };
   const root = page.locator('#sku');
-  if (!await root.isVisible().catch(() => false)) throw new Error('引用规格表未加载，无法核对商品编码和可售数量');
-  const groups = await root.locator('.sku-header th').evaluateAll((nodes) => nodes.map((node) => ({
+  const notReady = () => Object.assign(new Error('国际站引用规格表尚未完成加载，已保留商品和任务进度，未提交当前商品'), { code: 'PUBLISH_FIELD_NOT_READY', fieldName: '引用规格表' });
+  onProgress('等待并核对引用规格表');
+  await root.waitFor({ state: 'visible', timeout: timeoutMs }).catch(() => { throw notReady(); });
+  // Alibaba defers its virtualized SKU headers until the section is on-screen.
+  await root.scrollIntoViewIfNeeded({ timeout: timeoutMs }).catch(() => { throw notReady(); });
+  const readGroups = () => root.locator('.sku-header th').evaluateAll((nodes) => nodes.map((node) => ({
     name: node.querySelector('.th-saleProps-label > span')?.textContent?.trim(),
     options: [...node.querySelectorAll('.checkSelectBabel .labelText')].map((option) => option.textContent.trim()),
   })).filter((group) => group.name && group.options.length));
+  const deadline = performance.now() + timeoutMs;
+  let groups = await readGroups();
+  while (!groups.length) {
+    if (performance.now() >= deadline) throw notReady();
+    await page.waitForTimeout(150);
+    groups = await readGroups();
+  }
   const total = groups.reduce((count, group) => count * group.options.length, groups.length ? 1 : 0);
   if (!total || total > 5000) throw new Error('引用规格表结构无法识别或组合超过 5000 行');
   const expected = new Map(product.skus.map((sku) => [skuKey(sku.attributes), sku]));

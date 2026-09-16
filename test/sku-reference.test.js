@@ -39,3 +39,20 @@ test('writes reference codes and quantities by SKU identity across virtual pages
     assert.deepEqual(await fillReferencedSkuRows(page, { ...product, variantGroups: [] }, fillAndVerify), { filled: 0 });
   } finally { await browser.close(); }
 });
+
+test('initializes an offscreen lazy SKU table before reading references and pauses if headers never load', { skip: !findChromium() }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<div style="height:3000px">Earlier fields</div><div id="sku" style="min-height:200px"></div>
+      <script>const observer=new IntersectionObserver(entries=>{if(!entries.some(e=>e.isIntersecting))return;observer.disconnect();
+      setTimeout(()=>{document.querySelector('#sku').innerHTML='<table class="sku-header"><tr><th><div class="th-saleProps-label"><span>Color</span></div><div class="checkSelectBabel"><span class="labelText">Black</span></div></th></tr></table><div class="virtualized-table-scroll-wrapper"><table><tr><td data-name="skuOuterId" data-row="0"><input></td><td data-name="skuStock"><input></td></tr></table></div>';},700);
+      });observer.observe(document.querySelector('#sku'));</script>`);
+    const product = { categoryReference: {}, variantGroups: [{ name: 'Color', options: ['Black'] }], skus: [{ attributes: { Color: 'Black' }, code: 'B-1', stock: 5 }] };
+    assert.deepEqual(await fillReferencedSkuRows(page, product, fillAndVerify, () => {}, { timeoutMs: 3000 }), { filled: 1 });
+    assert.equal(await page.locator('[data-name=skuOuterId] input').inputValue(), 'B-1');
+    assert.equal(await page.locator('[data-name=skuStock] input').inputValue(), '5');
+    await page.setContent('<div id="sku" style="height:200px"></div>');
+    await assert.rejects(fillReferencedSkuRows(page, product, fillAndVerify, () => {}, { timeoutMs: 300 }), { code: 'PUBLISH_FIELD_NOT_READY' });
+  } finally { await browser.close(); }
+});
