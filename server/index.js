@@ -981,7 +981,7 @@ async function runPublishJob(jobId) {
         }
         const message = userFacingError(error);
         const requiresHuman = error.code === 'LOGIN_REQUIRED' || /captcha|verify|人机验证|安全验证|滑块|登录(?:状态)?(?:已)?失效|人工验证/i.test(message);
-        const environmentNotReady = ['PUBLISH_EDITOR_NOT_READY', 'PUBLISH_FORM_NOT_READY', 'PUBLISH_ACCOUNT_LIMIT', 'PUBLISH_CATEGORY_INVALID'].includes(error.code);
+        const environmentNotReady = ['PUBLISH_EDITOR_NOT_READY', 'PUBLISH_FORM_NOT_READY', 'PUBLISH_FIELD_NOT_READY', 'PUBLISH_BROWSER_NOT_READY', 'PUBLISH_ACCOUNT_LIMIT', 'PUBLISH_CATEGORY_INVALID'].includes(error.code);
         const currentJobStatus = store.read((state) => state.jobs.find((item) => item.id === jobId)?.status);
         if (currentJobStatus === 'cancelled') return;
         const pauseRequested = ['pause_requested', 'paused'].includes(currentJobStatus) || ['PUBLISH_PAUSED', 'COLLECT_PAUSED'].includes(error.code);
@@ -1038,6 +1038,7 @@ async function runPublishJob(jobId) {
         if (requiresHuman || environmentNotReady) {
           store.patchJob(jobId, {
             status: 'paused', progress: index, total,
+            ...(error.diagnostics ? { diagnostics: { stage: error.code, ...error.diagnostics } } : {}),
             message: `已暂停：${product.title} - ${message}。处理后可继续`
           });
           return;

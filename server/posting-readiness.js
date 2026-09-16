@@ -80,6 +80,20 @@ export async function findDescriptionEditor(page) {
   return null;
 }
 
+export async function descriptionEditorState(page) {
+  return page.evaluate(() => {
+    const visible = (node) => Boolean(node?.getClientRects().length);
+    const mode = [...document.querySelectorAll('label, [role=tab], button, .item-label')]
+      .filter((node) => visible(node) && /^(?:普通编辑|普通编辑器|Normal edit(?:or|ing)?|Regular edit(?:or|ing)?|Basic edit(?:or|ing)?|Standard edit(?:or|ing)?)$/i.test(node.textContent?.trim()))[0];
+    const radio = (mode?.closest('.icbuRadio-item') || mode)?.querySelector('input[type=radio]');
+    const frames = [...document.querySelectorAll('iframe')].filter((node) => /(?:_ifr$|description|editor)/i.test(node.id)
+      || node.closest('.mce-edit-area'));
+    return { modeControl: Boolean(mode), normalSelected: radio ? radio.checked : null,
+      editorFrames: frames.length, visibleEditorFrames: frames.filter(visible).length,
+      editorScriptLoaded: Boolean(window.tinymce || window.tinyMCE), documentState: document.readyState };
+  }).catch(() => ({ documentState: 'unavailable' }));
+}
+
 export async function waitForDescriptionEditor(page, { switchMode, verify, onProgress = () => {}, timeoutMs = browserResourcePolicy().readinessTimeoutMs } = {}) {
   const pollIntervalMs = browserResourcePolicy().pollIntervalMs;
   let deadline = performance.now() + timeoutMs;
@@ -107,5 +121,10 @@ export async function waitForDescriptionEditor(page, { switchMode, verify, onPro
   await requirePostingPageAvailable(page);
   const found = await findDescriptionEditor(page);
   if (found) return found;
-  throw Object.assign(new Error(`国际站详情编辑器等待 ${Math.ceil(timeoutMs / 1000)} 秒后仍未就绪；请检查国际站页面和网络，已保留商品及任务进度，可继续重试`), { code: 'PUBLISH_EDITOR_NOT_READY' });
+  const diagnostics = await descriptionEditorState(page);
+  const reason = diagnostics.normalSelected === false ? '普通编辑模式未成功选中'
+    : diagnostics.editorFrames ? '编辑器框架已出现，但编辑区域仍不可用'
+      : diagnostics.modeControl ? '详情区已展开，但国际站仍未创建编辑器' : '未找到普通编辑入口或详情编辑器';
+  throw Object.assign(new Error(`${reason}（已等待 ${Math.ceil(timeoutMs / 1000)} 秒）；已保留商品及任务进度，未提交当前商品`),
+    { code: 'PUBLISH_EDITOR_NOT_READY', diagnostics });
 }

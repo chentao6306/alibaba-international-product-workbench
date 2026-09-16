@@ -42,7 +42,7 @@ test('login and unavailable forms pause at the same product without counting fai
   };
   try {
     const task = await api('/api/publish', { ids: ['1', '2', '3'], collectionFolderId: 'folder', mode: 'draft' });
-    for (const code of ['LOGIN_REQUIRED', 'PUBLISH_EDITOR_NOT_READY', 'PUBLISH_FORM_NOT_READY']) {
+    for (const code of ['LOGIN_REQUIRED', 'PUBLISH_EDITOR_NOT_READY', 'PUBLISH_FORM_NOT_READY', 'PUBLISH_FIELD_NOT_READY', 'PUBLISH_BROWSER_NOT_READY']) {
       blockingCode = code;
       if (code !== 'LOGIN_REQUIRED') await api(`/api/jobs/${task.id}/resume`, {});
       await until(() => store.read().jobs[0].status === 'paused');
@@ -63,7 +63,7 @@ test('login and unavailable forms pause at the same product without counting fai
     await api(`/api/jobs/${task.id}/resume`, {});
     await until(() => store.read().jobs[0].status === 'completed');
     const state = store.read();
-    assert.deepEqual(attempts, ['1', '1', '1', '1', '2', '2', '3']);
+    assert.deepEqual(attempts, ['1', '1', '1', '1', '1', '1', '2', '2', '3']);
     assert.equal(state.products[0].publishHistory.length, 1);
     assert.equal(state.products[0].status, 'drafted');
     assert.equal(state.products[1].status, 'drafted');

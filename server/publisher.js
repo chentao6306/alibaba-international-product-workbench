@@ -18,6 +18,8 @@ import { fillReferencedSkuRows } from './sku-reference.js';
 import { findPostingTitle, requirePostingPageAvailable, waitForDescriptionEditor, waitForPostingTitle } from './posting-readiness.js';
 import { readSourceDescriptionFrame } from './source-description-frame.js';
 import { browserResourcePolicy } from './browser-resource-policy.js';
+import { browserStep } from './browser-step.js';
+import { userFacingError } from './browser-error.js';
 
 const WORKBENCH_URL = 'https://i.alibaba.com/';
 const SOURCE_DESCRIPTION_SELECTOR = '[data-module-name="module_description"], [data-testid="module-description"], [data-module-name="module_structure_description"], [data-testid="module-details-structure-description"]';
@@ -221,11 +223,24 @@ export async function fillAndVerify(locator, value, fieldName) {
       node.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: nextValue }));
       node.dispatchEvent(new Event('change', { bubbles: true }));
       node.blur();
-    }, expected);
+    }, expected).catch(() => {});
     await locator.page().waitForTimeout(150);
     actual = (await locator.inputValue().catch(() => '')).trim();
   }
-  if (!matches(actual)) throw new Error(`${fieldName}写入失败，国际站输入框未保留内容`);
+  if (!matches(actual)) throw Object.assign(new Error(`${fieldName}写入后未能确认保留，输入框可能正在刷新；已保留当前商品，可继续重试`),
+    { code: 'PUBLISH_FIELD_NOT_READY', fieldName });
+}
+
+export async function fillProductKeywords(page, product) {
+  const selector = '.posting-field-keywords textarea, #struct-keywords textarea, '
+    + 'textarea[placeholder*="修饰词+产品中心词"], textarea[placeholder*="keyword" i], '
+    + 'textarea[name="keywords" i], input[name="keywords" i]';
+  // Filter before first(): React can remove hidden clones while committing a
+  // value. A stored nth(1) then points to nothing even though the field exists.
+  const editable = page.locator(selector.split(',').map((part) => `${part.trim()}:not([disabled]):not([readonly])`).join(',')).filter({ visible: true }).first();
+  if (!await page.locator(selector).count()) return false;
+  await fillAndVerify(editable, alibabaKeywordText(product), '商品关键词');
+  return true;
 }
 
 async function gotoWithRetry(page, url, options = {}) {
@@ -3287,17 +3302,24 @@ async function activateEditorControl(page, control, key) {
   const previous = state.get(key);
   // Re-clicking a slow editor tab can restart its iframe initialization forever.
   // Retain element identity, so a genuinely rebuilt page can be activated again.
-  if (previous && await control.evaluate((node, old) => node === old, previous).catch(() => false)) return false;
-  const selected = await control.evaluate((node) => node.getAttribute('aria-selected') === 'true'
-    || node.getAttribute('aria-pressed') === 'true').catch(() => false);
-  if (selected) return false;
+  const sameControl = previous && await control.evaluate((node, old) => node === old, previous.handle).catch(() => false);
+  const selected = await control.evaluate((node) => {
+    const radio = (node.closest('.icbuRadio-item') || node.closest('label') || node).querySelector('input[type="radio"]');
+    if (radio) return radio.checked || radio.getAttribute('aria-checked') === 'true';
+    for (const name of ['aria-selected', 'aria-pressed', 'aria-checked']) {
+      const value = node.getAttribute(name); if (value !== null) return value === 'true';
+    }
+    return null;
+  }).catch(() => null);
+  if (sameControl && (selected !== false || previous.attempts >= 2)) return false;
+  if (selected === true) return false;
   const handle = await control.elementHandle().catch(() => null);
   if (!handle) return false;
   try {
     await handle.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
     await handle.click({ force: true, timeout: 5000 });
-    await previous?.dispose().catch(() => {});
-    state.set(key, handle);
+    await previous?.handle.dispose().catch(() => {});
+    state.set(key, { handle, attempts: sameControl ? previous.attempts + 1 : 1 });
     return true;
   } catch (error) {
     await handle.dispose().catch(() => {});
@@ -3307,6 +3329,8 @@ async function activateEditorControl(page, control, key) {
 
 export async function switchToLegacyDetails(page) {
   await requireClearPostingOverlays(page);
+  const detailSection = page.getByRole('heading', { name: /^(?:商品详情|商品描述|Product description|Product details)$/i }).first();
+  if (await detailSection.isVisible().catch(() => false)) await detailSection.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => {});
   const oldMode = page.getByRole('button', { name: /^(?:返回老版|返回旧版|Switch to (?:the )?(?:old|classic|legacy) (?:version|editor)|Back to (?:the )?(?:old|classic|legacy) (?:version|editor))$/i }).first();
   if (await activateEditorControl(page, oldMode, 'legacy')) {
     await page.waitForTimeout(350);
@@ -3315,6 +3339,7 @@ export async function switchToLegacyDetails(page) {
   await activateEditorControl(page, confirm, 'confirm');
   await requireClearPostingOverlays(page);
   const normalEditor = page.getByText(/^(?:普通编辑|普通编辑器|Normal edit(?:or|ing)?|Regular edit(?:or|ing)?|Basic edit(?:or|ing)?|Standard edit(?:or|ing)?)$/i).last();
+  if (await normalEditor.isVisible().catch(() => false)) await normalEditor.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => {});
   if (await activateEditorControl(page, normalEditor, 'normal')) await page.waitForTimeout(600);
 }
 
@@ -3392,19 +3417,33 @@ export class SellerPublisher {
     if (options.reveal && globalThis.__KUA_YIPU_SELLER_BRIDGE?.open) {
       return globalThis.__KUA_YIPU_SELLER_BRIDGE.open();
     }
-    await globalThis.__KUA_YIPU_SELLER_BRIDGE?.sync?.().catch(() => false);
+    const progress = options.onProgress || (() => {});
+    const step = (label, action, timeoutMs = 15000, onLateResolve) => {
+      progress(label);
+      return browserStep(action, { label, timeoutMs, signal: options.signal, onLateResolve });
+    };
+    const resources = browserResourcePolicy();
+    await step('同步卖家登录状态', () => globalThis.__KUA_YIPU_SELLER_BRIDGE?.sync?.(), 10000).catch((error) => {
+      if (error.code === 'PUBLISH_PAUSED') throw error;
+      progress('卖家窗口同步暂不可用，使用已保存会话连接');
+    });
     if (!this.context) {
       // Keep normal publishing completely out of the desktop and taskbar.
       // The shared Electron bridge reveals a real window only if Alibaba
       // presents a CAPTCHA or login challenge.
-      this.context = await launchPersistent(this.profileDir, { headless: true });
-      this.context.on('close', () => { this.context = null; this.page = null; });
+      const opened = await step('启动内置发布浏览器', () => launchPersistent(this.profileDir, {
+        headless: true, timeout: resources.navigationTimeoutMs
+      }), resources.navigationTimeoutMs + 5000, (context) => context?.close());
+      this.context = opened;
+      opened.on('close', () => { if (this.context === opened) { this.context = null; this.page = null; } });
     }
-    await syncAlibabaCookies(this.context);
+    await step('导入已保存的卖家会话', () => syncAlibabaCookies(this.context));
     const pages = this.context.pages();
-    this.page = pages.find((item) => isAlibabaInternationalUrl(item.url())) || pages[0] || await this.context.newPage();
-    if (this.page.url() === 'about:blank' || !isAlibabaInternationalUrl(this.page.url())) {
-      await gotoWithRetry(this.page, options.startUrl || WORKBENCH_URL, { timeout: 60000 });
+    this.page = pages.find((item) => !item.isClosed() && isAlibabaInternationalUrl(item.url())) || pages.find((item) => !item.isClosed())
+      || await step('创建商品发布页面', () => this.context.newPage(), 15000, (page) => page?.close());
+    if (!options.skipNavigation && (this.page.url() === 'about:blank' || !isAlibabaInternationalUrl(this.page.url()))) {
+      await step('打开国际站卖家页面', () => gotoWithRetry(this.page, options.startUrl || WORKBENCH_URL,
+        { timeout: resources.navigationTimeoutMs, attempts: 1 }), resources.navigationTimeoutMs + 1000);
     }
     if (options.reveal) {
       // My Alibaba is an explicit user action: always restore and maximize the
@@ -3413,7 +3452,7 @@ export class SellerPublisher {
       await this.page.bringToFront().catch(() => {});
       this.visible = true;
     }
-    else { await hidePage(this.page); this.visible = false; }
+    else { await step('准备发布页面', () => hidePage(this.page)); this.visible = false; }
     return this.status();
   }
 
@@ -3454,19 +3493,27 @@ export class SellerPublisher {
     this.visible = false;
   }
 
-  async currentSellerPage(startUrl = '') {
+  async currentSellerPage(startUrl = '', options = {}) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        await this.open(startUrl ? { startUrl } : {});
+        await this.open({ ...options, ...(startUrl ? { startUrl } : {}) });
         const pages = this.context.pages();
-        const current = [...pages].reverse().find((item) => isAlibabaInternationalUrl(item.url()));
+        const current = [...pages].reverse().find((item) => !item.isClosed() && isAlibabaInternationalUrl(item.url()));
         if (current) this.page = current;
         return this.page;
       } catch (error) {
         const message = String(error?.message || '');
         const closed = /browser.*退出|browser has been closed|target page, context or browser has been closed|采集浏览器已关闭/i.test(message);
-        if (!closed || attempt > 0) throw error;
-        await this.context?.close().catch(() => {});
+        if (!closed || attempt > 0) {
+          if (error.code === 'PUBLISH_PAUSED') throw error;
+          const unavailable = this.context;
+          this.context = null;
+          this.page = null;
+          await browserStep(() => unavailable?.close(), { timeoutMs: 5000 }).catch(() => {});
+          if (error.code === 'PUBLISH_BROWSER_NOT_READY') throw error;
+          throw Object.assign(new Error(`连接国际站发布浏览器未完成：${userFacingError(error)}；已保留当前商品，请稍后继续`), { code: 'PUBLISH_BROWSER_NOT_READY' });
+        }
+        await browserStep(() => this.context?.close(), { timeoutMs: 5000, signal: options.signal }).catch(() => {});
         this.context = null;
         this.page = null;
         await new Promise((resolve) => setTimeout(resolve, 500));
@@ -5362,7 +5409,7 @@ export class SellerPublisher {
         } catch (error) {
           // These typed errors only originate while preparing the form, before
           // any save/submit. Never replay a submission with an unknown receipt.
-          if (attempt || !['PUBLISH_EDITOR_NOT_READY', 'PUBLISH_FORM_NOT_READY'].includes(error.code)) throw error;
+          if (attempt || error.code !== 'PUBLISH_FORM_NOT_READY') throw error;
           reportStage('发布页加载不完整，重新加载后重试一次');
         }
       }
@@ -5371,11 +5418,20 @@ export class SellerPublisher {
 
   async publishPreparedProduct(product, publishPageUrl, mode, publishCategory, jobId, reportStage, options) {
     const resources = browserResourcePolicy();
-    reportStage(resources.constrained ? '连接国际站发布浏览器（已自动降低图片处理并发，延长页面等待）' : '连接国际站发布浏览器');
-    const page = await this.currentSellerPage(publishPageUrl);
-    page.setDefaultTimeout(5000);
+    const connection = new AbortController();
     const stopKey = String(jobId || '');
-    if (stopKey) this.publishStops.set(stopKey, () => { page.close().catch(() => {}); });
+    let page;
+    if (stopKey) this.publishStops.set(stopKey, () => {
+      connection.abort();
+      page?.close().catch(() => {});
+    });
+    reportStage(resources.constrained ? '连接国际站发布浏览器（已自动降低图片处理并发，延长页面等待）' : '连接国际站发布浏览器');
+    page = await this.currentSellerPage(publishPageUrl, { skipNavigation: true, signal: connection.signal, onProgress: reportStage });
+    if (connection.signal.aborted) {
+      page.close().catch(() => {});
+      throw Object.assign(new Error('已暂停当前商品操作'), { code: 'PUBLISH_PAUSED' });
+    }
+    page.setDefaultTimeout(5000);
     // Normal publishing is headless and must not appear in the Windows taskbar.
     // waitForHumanVerification raises a typed error for a real challenge; the
     // caller can then use the headed verification flow without exposing every
@@ -5443,12 +5499,8 @@ export class SellerPublisher {
       if (subtitleInput) await fillAndVerify(subtitleInput, product.subtitle, '商品副标题').catch(() => {});
     }
 
-    const keywordInput = await firstVisible(page, [
-      '.posting-field-keywords textarea', 'textarea[placeholder*="修饰词+产品中心词"]', 'textarea[role="input"]'
-    ]);
-    if (keywordInput) {
-      await fillAndVerify(keywordInput, alibabaKeywordText(product), '商品关键词');
-    }
+    reportStage('填写并复核商品关键词');
+    await fillProductKeywords(page, product);
 
     await this.fillPriceFields(page, product);
     await fillFirst(page, [

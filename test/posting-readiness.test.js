@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright-core';
 import { findChromium } from '../server/browser-runtime.js';
-import { postingPageProblem, waitForDescriptionEditor } from '../server/posting-readiness.js';
+import { postingPageProblem, waitForDescriptionEditor, descriptionEditorState } from '../server/posting-readiness.js';
 import { SellerPublisher, switchToLegacyDetails } from '../server/publisher.js';
 import { browserResourcePolicy } from '../server/browser-resource-policy.js';
 
@@ -57,6 +57,43 @@ test('distinguishes invalid category, expired login and normal posting URLs', ()
   assert.equal(postingPageProblem('https://post.alibaba.com/product/publish.htm?return=login', 'Normal editor'), null);
 });
 
+test('selected normal mode reveals a lazy detail section without toggling the editor again', { skip: !findChromium(), timeout: 15000 }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<div style="height:3000px">Main product fields</div><h2>Product description</h2>
+      <span class="icbuRadio-item"><label><input type="radio" checked><span>Normal editor</span></label></span>
+      <div id="detail"></div><script>window.clicks=0;document.querySelector('label').onclick=()=>window.clicks++;
+      const observer=new IntersectionObserver(entries=>{if(!entries.some(e=>e.isIntersecting))return;
+        observer.disconnect();document.querySelector('#detail').innerHTML='<iframe id="description_ifr" srcdoc="<body class=mce-content-body contenteditable=true>Lazy editor ready</body>"></iframe>';
+      });observer.observe(document.querySelector('h2'));</script>`);
+    assert.equal((await descriptionEditorState(page)).editorFrames, 0);
+    const result = await waitForDescriptionEditor(page, { timeoutMs: 6000, switchMode: () => switchToLegacyDetails(page) });
+    assert.equal(await result.body.innerText(), 'Lazy editor ready');
+    assert.equal(await page.evaluate(() => window.clicks), 0);
+  } finally { await browser.close(); }
+});
+
+test('mode switch retries once only when the radio explicitly remains unselected', { skip: !findChromium() }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<span class="icbuRadio-item"><label><input type="radio"><span>Normal editor</span></label></span>
+      <script>window.clicks=0;document.querySelector('input').onclick=e=>{if(++window.clicks===1)e.preventDefault();};</script>`);
+    await switchToLegacyDetails(page);
+    assert.equal(await page.locator('input').isChecked(), false);
+    await switchToLegacyDetails(page);
+    assert.equal(await page.locator('input').isChecked(), true);
+    await switchToLegacyDetails(page);
+    assert.equal(await page.evaluate(() => window.clicks), 2);
+    const state = await descriptionEditorState(page);
+    assert.equal(state.normalSelected, true);
+    assert.equal(state.editorFrames, 0);
+    await assert.rejects(waitForDescriptionEditor(page, { timeoutMs: 100 }), (error) =>
+      error.code === 'PUBLISH_EDITOR_NOT_READY' && error.diagnostics.normalSelected && /未创建编辑器/.test(error.message));
+  } finally { await browser.close(); }
+});
+
 test('waits for delayed English editor and ignores unrelated editable title controls', { skip: !findChromium(), timeout: 30000 }, async () => {
   const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
   try {
@@ -106,7 +143,7 @@ test('retries incomplete form only once before submission and never replays an u
   const url = 'https://post.alibaba.com/product/publish.htm?catId=201346401';
   let attempts = 0;
   publisher.publishPreparedProduct = async () => {
-    if (++attempts === 1) throw Object.assign(new Error('Editor loading'), { code: 'PUBLISH_EDITOR_NOT_READY' });
+    if (++attempts === 1) throw Object.assign(new Error('Form loading'), { code: 'PUBLISH_FORM_NOT_READY' });
     return { status: 'drafted' };
   };
   assert.equal((await publisher.publishProduct(product, url)).status, 'drafted');
@@ -115,6 +152,6 @@ test('retries incomplete form only once before submission and never replays an u
     attempts = 0;
     publisher.publishPreparedProduct = async () => { attempts++; throw Object.assign(new Error(code), { code }); };
     await assert.rejects(publisher.publishProduct(product, url), { code });
-    assert.equal(attempts, ['PUBLISH_EDITOR_NOT_READY', 'PUBLISH_FORM_NOT_READY'].includes(code) ? 2 : 1);
+    assert.equal(attempts, code === 'PUBLISH_FORM_NOT_READY' ? 2 : 1);
   }
 });

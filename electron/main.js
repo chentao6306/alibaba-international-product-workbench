@@ -10,6 +10,7 @@ import { readPrivateSession, writePrivateSession } from '../server/private-sessi
 import { authorizationEndpoint } from '../server/auth-endpoint.js';
 import { showHumanVerification } from './human-verification.js';
 import { saveAccountCookies } from './seller-session.js';
+import { browserStep } from '../server/browser-step.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -53,7 +54,7 @@ function alibabaCookiesFile() {
 
 async function saveAlibabaCookies(login) {
   try {
-    const cookies = await login.webContents.session.cookies.get({});
+    const cookies = await browserStep(() => login.webContents.session.cookies.get({}), { timeoutMs: 5000, label: '读取卖家登录状态' });
     writePrivateSession(alibabaCookiesFile(), cookies);
   } catch {
     // Cookie synchronization is best-effort; Alibaba may still expose public
@@ -67,8 +68,9 @@ async function saveAlibabaSession(login) {
     const url = login.webContents.getURL();
     const origin = new URL(url).origin;
     if (!/(^|\.)alibaba\.com$/i.test(new URL(url).hostname)) return;
-    const storage = login.readStorage ? await login.readStorage()
-      : await login.webContents.executeJavaScript('Object.fromEntries(Object.entries(localStorage))', true);
+    const storage = await browserStep(() => login.readStorage ? login.readStorage()
+      : login.webContents.executeJavaScript('Object.fromEntries(Object.entries(localStorage))', true),
+    { timeoutMs: 3000, label: '读取卖家页面存储' });
     const file = path.join(path.dirname(alibabaCookiesFile()), 'alibaba-storage.json');
     let all = {};
     try { all = readPrivateSession(file); } catch {}

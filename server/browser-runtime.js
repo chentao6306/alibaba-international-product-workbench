@@ -4,6 +4,7 @@ import path from 'node:path';
 import { chromium } from 'playwright-core';
 import { readPrivateSession } from './private-session-storage.js';
 import { inspectVerificationDocument, verificationOptions, verificationPaused, waitForVerification } from './human-verification.js';
+import { browserStep } from './browser-step.js';
 
 const contextModes = new WeakMap();
 const importedSessions = new WeakMap();
@@ -172,7 +173,8 @@ export async function launchPersistent(profileDir, options = {}) {
   try {
     const context = await chromium.launchPersistentContext(profileDir, launchOptions);
     contextModes.set(context, { headless });
-    await syncAlibabaCookies(context);
+    try { await browserStep(() => syncAlibabaCookies(context), { timeoutMs: 15000, label: '初始化浏览器会话' }); }
+    catch (error) { context.close().catch(() => {}); throw error; }
     return context;
   } catch (error) {
     const message = String(error?.message || '');
@@ -182,7 +184,8 @@ export async function launchPersistent(profileDir, options = {}) {
       try {
         const context = await chromium.launchPersistentContext(recoveryDir, launchOptions);
         contextModes.set(context, { headless });
-        await syncAlibabaCookies(context);
+        try { await browserStep(() => syncAlibabaCookies(context), { timeoutMs: 15000, label: '初始化恢复浏览器会话' }); }
+        catch (error) { context.close().catch(() => {}); throw error; }
         return context;
       } catch {}
     }
