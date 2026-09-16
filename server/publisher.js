@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import sharp from 'sharp';
 import { load } from 'cheerio';
 import { hasExplicitHumanChallenge, hidePage, launchPersistent, revealPage, settlePage, syncAlibabaCookies, waitForHumanVerification } from './browser-runtime.js';
-import { extractAlibabaDescription, extractAlibabaSourceData, parseAlibabaDetailDataScript } from './alibaba-source-data.js';
+import { extractAlibabaDescription, extractAlibabaSourceData, parseAlibabaDetailDataScript, readAlibabaCategoryDocument } from './alibaba-source-data.js';
 import { SOURCE_LANGUAGE_HEADERS, withSourceLocale } from './source-locale.js';
 import { buildAlibabaPublishUrl, categoryIdFromUrl, normalizeCategoryId } from './category-routing.js';
 import { REQUIRED_ATTRIBUTE_ALIASES, requiredAttributeKey } from './publish-reference.js';
@@ -15,18 +15,12 @@ import { ImageDownloadQueue } from './image-download-queue.js';
 import { originCountry, isOriginRegionAttribute } from './origin-country.js';
 import { uploadEditorDetailImages } from './description-image-upload.js';
 import { fillReferencedSkuRows } from './sku-reference.js';
-import { requirePostingPageAvailable, waitForDescriptionEditor } from './posting-readiness.js';
+import { findPostingTitle, requirePostingPageAvailable, waitForDescriptionEditor, waitForPostingTitle } from './posting-readiness.js';
+import { readSourceDescriptionFrame } from './source-description-frame.js';
+import { browserResourcePolicy } from './browser-resource-policy.js';
 
 const WORKBENCH_URL = 'https://i.alibaba.com/';
 const SOURCE_DESCRIPTION_SELECTOR = '[data-module-name="module_description"], [data-testid="module-description"], [data-module-name="module_structure_description"], [data-testid="module-details-structure-description"]';
-const TITLE_SELECTORS = [
-  'input[name="productTitle"]',
-  'input[placeholder*="商品标题"]', 'input[placeholder*="标题"]',
-  'input[placeholder*="product title" i]', 'input[placeholder*="product name" i]',
-  'input[placeholder*="enter a title" i]', 'input[name*="title" i]',
-  'textarea[placeholder*="标题"]', 'textarea[placeholder*="title" i]',
-  '[contenteditable="true"][aria-label*="title" i]', '[contenteditable="true"][data-testid*="title" i]'
-];
 
 const PROMOTIONAL_TEXT = /(?:Alibaba\s*Lens|免费比价插件|寻找价格更低|相似商品|省时又省钱|下载扩展程序|Accio\s*Work|报告可疑活动|report suspicious activity|find similar products)/i;
 
@@ -1036,10 +1030,18 @@ export function validateProductData(product) {
 // set of values to commit and verify.
 export function preparePublishProduct(product) {
   const next = { ...product };
-  next.mainImages = [...new Set((product.mainImages || product.images || []).filter((url) => /^https?:\/\//i.test(String(url))))];
+  const usable = (url) => /^https?:\/\//i.test(String(url)) || isUsableImageUrl(url);
+  next.mainImages = [...new Set((product.mainImages || product.images || []).filter(usable))];
   next.images = next.mainImages;
-  next.detailImages = [...new Set((product.detailImages || []).filter((url) => /^https?:\/\//i.test(String(url))))];
+  next.detailImages = [...new Set((product.detailImages || []).filter(usable))];
   next.descriptionHtml = sanitizeSourceDescriptionHtml(product.descriptionHtml || '');
+  if (!next.detailImages.length && next.descriptionHtml) {
+    const $ = load(next.descriptionHtml);
+    next.detailImages = [...new Set($('img').toArray().map((node) => {
+      const url = $(node).attr('data-src') || $(node).attr('data-original') || $(node).attr('src') || '';
+      return url.startsWith('//') ? `https:${url}` : url;
+    }).filter(usable))];
+  }
   if (!next.description && next.descriptionHtml) next.description = load(next.descriptionHtml).text().replace(/\s+/g, ' ').trim();
   const fallbackPrice = numericValue(product.price) || numericValue(product.sourcePriceRange?.minPrice) || 1;
   const fallbackStock = numericValue(product.stock) || 100;
@@ -3217,7 +3219,7 @@ async function requireClearPostingOverlays(page) {
   throw error;
 }
 
-async function enterPostingForm(page, publishPageUrl, expectedCategoryId = '') {
+export async function enterPostingForm(page, publishPageUrl, expectedCategoryId = '') {
   const isCategoryPage = () => /\/product\/(?:easyListing|category)\.htm/i.test(page.url());
   if (!isCategoryPage()) return true;
 
@@ -3239,7 +3241,7 @@ async function enterPostingForm(page, publishPageUrl, expectedCategoryId = '') {
       const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
       for (const select of document.querySelectorAll('select')) {
         if (!visible(select)) continue;
-        const option = [...select.options].find((item) => String(item.value || '').includes(id) || String(item.textContent || '').includes(id));
+        const option = [...select.options].find((item) => String(item.value || '') === id);
         if (!option) continue;
         const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
         setter?.call(select, option.value);
@@ -3248,20 +3250,21 @@ async function enterPostingForm(page, publishPageUrl, expectedCategoryId = '') {
         return true;
       }
       const candidate = [...document.querySelectorAll('[data-category-id], [data-cat-id], [value]')]
-        .find((node) => visible(node) && String(node.getAttribute('data-category-id') || node.getAttribute('data-cat-id') || node.getAttribute('value') || '').includes(id));
+        .find((node) => visible(node) && String(node.getAttribute('data-category-id') || node.getAttribute('data-cat-id') || node.getAttribute('value') || '') === id);
       if (candidate) { candidate.click(); return true; }
       const link = [...document.querySelectorAll('a[href*="catId"], a[href*="categoryId"]')]
-        .find((node) => visible(node) && String(node.href || '').includes(id));
+        .find((node) => { const url = new URL(node.href); return visible(node) && (url.searchParams.get('catId') || url.searchParams.get('categoryId')) === id; });
       if (link) { link.click(); return true; }
       return false;
     }, categoryId).catch(() => false);
-    if (selected) await page.waitForTimeout(600);
+    if (!selected) return false;
+    await page.waitForTimeout(600);
   }
 
   await dismissPostingOverlays(page);
   await clickFirstVisible([
-    page.getByRole('button', { name: /我已阅读.*发布|发布产品|下一步|确认发布|继续/i }).last(),
-    page.getByText(/我已阅读.*发布|发布产品|下一步|继续/i).last()
+    page.getByRole('button', { name: /^(?:我已阅读.*发布|发布产品|下一步|确认发布|继续|Next|Continue|Publish product|Post product|I have read.*(?:publish|post).*)$/i }).last(),
+    page.getByText(/^(?:我已阅读.*发布|发布产品|下一步|继续|Next|Continue|Publish product|Post product)$/i).last()
   ]);
   await page.waitForTimeout(900);
 
@@ -3275,26 +3278,44 @@ async function enterPostingForm(page, publishPageUrl, expectedCategoryId = '') {
   return !isCategoryPage();
 }
 
+const editorSwitchControls = new WeakMap();
+
+async function activateEditorControl(page, control, key) {
+  if (!await control.isVisible().catch(() => false) || await control.isDisabled().catch(() => true)) return false;
+  const state = editorSwitchControls.get(page) || new Map();
+  editorSwitchControls.set(page, state);
+  const previous = state.get(key);
+  // Re-clicking a slow editor tab can restart its iframe initialization forever.
+  // Retain element identity, so a genuinely rebuilt page can be activated again.
+  if (previous && await control.evaluate((node, old) => node === old, previous).catch(() => false)) return false;
+  const selected = await control.evaluate((node) => node.getAttribute('aria-selected') === 'true'
+    || node.getAttribute('aria-pressed') === 'true').catch(() => false);
+  if (selected) return false;
+  const handle = await control.elementHandle().catch(() => null);
+  if (!handle) return false;
+  try {
+    await handle.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+    await handle.click({ force: true, timeout: 5000 });
+    await previous?.dispose().catch(() => {});
+    state.set(key, handle);
+    return true;
+  } catch (error) {
+    await handle.dispose().catch(() => {});
+    throw error;
+  }
+}
+
 export async function switchToLegacyDetails(page) {
   await requireClearPostingOverlays(page);
   const oldMode = page.getByRole('button', { name: /^(?:返回老版|返回旧版|Switch to (?:the )?(?:old|classic|legacy) (?:version|editor)|Back to (?:the )?(?:old|classic|legacy) (?:version|editor))$/i }).first();
-  if (await oldMode.isVisible().catch(() => false)) {
-    await oldMode.click({ force: true, timeout: 5000 })
-      .catch(() => oldMode.evaluate((node) => node.click()));
+  if (await activateEditorControl(page, oldMode, 'legacy')) {
     await page.waitForTimeout(350);
-    const confirm = page.getByRole('button', { name: /^(?:继续返回旧版|确认返回旧版|Continue (?:to|with) (?:the )?(?:old|classic|legacy) (?:version|editor))$/i }).first();
-    if (await confirm.isVisible().catch(() => false)) {
-      await confirm.click({ force: true, timeout: 5000 })
-        .catch(() => confirm.evaluate((node) => node.click()));
-    }
-    await requireClearPostingOverlays(page);
   }
+  const confirm = page.getByRole('button', { name: /^(?:继续返回旧版|确认返回旧版|Continue (?:to|with) (?:the )?(?:old|classic|legacy) (?:version|editor))$/i }).first();
+  await activateEditorControl(page, confirm, 'confirm');
+  await requireClearPostingOverlays(page);
   const normalEditor = page.getByText(/^(?:普通编辑|普通编辑器|Normal edit(?:or|ing)?|Regular edit(?:or|ing)?|Basic edit(?:or|ing)?|Standard edit(?:or|ing)?)$/i).last();
-  if (await normalEditor.isVisible().catch(() => false)) {
-    await normalEditor.click({ force: true, timeout: 5000 })
-      .catch(() => normalEditor.evaluate((node) => node.click()).catch(() => {}));
-  }
-  await page.waitForTimeout(600);
+  if (await activateEditorControl(page, normalEditor, 'normal')) await page.waitForTimeout(600);
 }
 
 export class SellerPublisher {
@@ -3309,7 +3330,7 @@ export class SellerPublisher {
     this.page = null;
     this.visible = false;
     this.publishStops = new Map();
-    this.imageDownloads = new ImageDownloadQueue(3);
+    this.imageDownloads = new ImageDownloadQueue(browserResourcePolicy().imageConcurrency);
   }
 
   async sourceBrowser() {
@@ -3459,7 +3480,7 @@ export class SellerPublisher {
     const candidates = [...this.context.pages()].reverse().filter((page) => isProductPostingUrl(page.url()));
     for (const page of candidates) {
       await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
-      if (await firstVisible(page, TITLE_SELECTORS)) {
+      if (await findPostingTitle(page)) {
         this.page = page;
         return page;
       }
@@ -3483,7 +3504,7 @@ export class SellerPublisher {
         throw new Error('当前不是国际站商品发布页，请进入 Products → Post Products，选好类目并打开发布表单');
       }
       await settlePage(page);
-      const titleField = await firstVisible(page, TITLE_SELECTORS);
+      const titleField = await findPostingTitle(page);
       if (/\/product\/(?:easyListing|category)\.htm/i.test(new URL(url).pathname) && !titleField) {
         throw new Error('当前仍是商品类目选择页。请先选择完整类目并点击“我已阅读如上规则，现在发布产品”，进入商品填写表单后再绑定');
       }
@@ -3795,49 +3816,17 @@ export class SellerPublisher {
     const detailData = parseAlibabaDetailDataScript(detailDataScript);
     const structuredSource = extractAlibabaSourceData(detailData);
     const structuredDescription = extractAlibabaDescription(detailData);
-    let detailFrame = page.frames().find((frame) => /descIframe\.html/i.test(frame.url()));
-    if (detailFrame) {
-      await detailFrame.waitForFunction(() => {
-        const root = document.querySelector('#detail_decorate_root') || document.body;
-        return [...(root?.querySelectorAll('img') || [])]
-          .some((image) => /\/kf\//i.test(image.currentSrc || image.src || image.getAttribute('data-src') || ''));
-      }, null, { timeout: 8000 }).catch(() => {});
-    }
-    // Alibaba serves the rich-text description through different iframe URLs
-    // depending on the product template. If the canonical descIframe is not
-    // present, inspect loaded child frames and choose the one containing real
-    // product images/content instead of treating the detail as empty.
-    if (!detailFrame) {
-      for (const frame of page.frames()) {
-        if (frame === page.mainFrame() || /login|passport|captcha|photobank|videobank|message|onetalk/i.test(frame.url())) continue;
-        const candidate = await frame.evaluate(() => {
-          const root = document.body || document.documentElement;
-          const html = root?.innerHTML || '';
-          const images = [...(root?.querySelectorAll('img') || [])].filter((image) => /\/kf\//i.test(image.currentSrc || image.src || image.getAttribute('data-src') || '')).length;
-          return { htmlLength: html.length, images };
-        }).catch(() => null);
-        if (candidate && candidate.htmlLength > 200 && candidate.images > 0) { detailFrame = frame; break; }
-      }
-    }
-    const iframeDetail = detailFrame ? await detailFrame.evaluate(() => {
-      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-      const absolute = (value) => {
-        try { return new URL(String(value || '').startsWith('//') ? `https:${value}` : value, location.href).href; }
-        catch { return ''; }
-      };
-      const root = (document.querySelector('#detail_decorate_root') || document.body || document.documentElement).cloneNode(true);
-      root.querySelectorAll('script, style, link, noscript').forEach((node) => node.remove());
-      const images = [...root.querySelectorAll('img')].map((image) => ({
-        src: absolute(image.currentSrc || image.src || image.getAttribute('data-src') || image.getAttribute('data-original')),
-        alt: clean(image.alt || '')
-      })).filter((image) => image.src && /\/kf\//i.test(image.src));
-      return {
-        html: root?.innerHTML || '',
-        text: clean(root?.textContent || ''),
-        images
-      };
-    }).catch(() => null) : null;
-    const detail = await page.evaluate((descriptionSelector) => {
+    const frameSelector = ['iframe[src*="descIframe"]', ...SOURCE_DESCRIPTION_SELECTOR.split(',').map((selector) => `${selector.trim()} iframe`), '[data-module-name="module_product_specification"] iframe'].join(', ');
+    const inlineDetail = await page.locator(SOURCE_DESCRIPTION_SELECTOR).evaluateAll((nodes) => nodes.some((node) =>
+      node.querySelector('img') || (node.innerText || '').trim().length > 120)).catch(() => false);
+    const iframeDetail = await readSourceDescriptionFrame(page, {
+      selector: frameSelector,
+      timeoutMs: browserResourcePolicy().sourceFrameTimeoutMs,
+      waitForFrame: !inlineDetail && !structuredDescription.html && /ssr/i.test(detailData?.nodeMap?.module_description?.renderType || ''),
+      verify: () => waitForHumanVerification(page)
+    });
+    const categoryDocument = await page.evaluate(readAlibabaCategoryDocument);
+    const detail = await page.evaluate(({ descriptionSelector, categoryDocument }) => {
       const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
       const absolute = (value) => {
         if (!String(value || '').trim()) return '';
@@ -3899,7 +3888,7 @@ export class SellerPublisher {
         mainImages = [...new Set([...mainImages, ...unique(galleryImages)])].slice(0, 6);
       }
       const sourceDetailImages = unique([...(descriptionModule?.querySelectorAll('img') || [])]
-        .map((image) => image.src).filter((url) => /\/kf\//i.test(url))).slice(0, 30);
+        .map((image) => image.src).filter((url) => /\/(?:kf|ibank|img)\/|\.(?:jpe?g|png|webp)(?:[?#]|$)/i.test(url))).slice(0, 30);
       // Do not silently turn main images into detail images. A product with
       // no real detail-image module must remain incomplete so the publisher
       // can stop and ask for review instead of inventing source data.
@@ -3964,22 +3953,7 @@ export class SellerPublisher {
         productJson?.offers?.price,
         bodyText.match(/(?:¥|￥|\$)\s*[\d,.]+\s*(?:\d+\s*[-–]\s*\d+|≥\s*[\d,]+)?/g)?.join(' ')
       ].filter(Boolean).join(' '));
-      const categoryLinks = [...document.querySelectorAll('nav a, [data-testid*="breadcrumb"] a, a[href*="categoryId="], a[href*="catId="]')];
-      const categoryPath = categoryLinks
-        .map((node) => clean(node.textContent)).filter((text) => text && text.length < 80
-          && !/(?:Alibaba\s*Lens|免费比价插件|寻找价格更低|相似商品|下载扩展程序|Accio\s*Work|报告可疑活动|report suspicious activity)/i.test(text)).slice(0, 8);
-      const categoryIdCandidates = [];
-      const addCategoryId = (value) => {
-        const match = String(value || '').match(/(?:categoryId|catId|leafCategoryId)["'=:\s%]*(\d{4,})/i)
-          || String(value || '').match(/\b(\d{6,})\b/);
-        if (match?.[1] && !categoryIdCandidates.includes(match[1])) categoryIdCandidates.push(match[1]);
-      };
-      for (const link of categoryLinks) addCategoryId(link.href || link.getAttribute('href'));
-      for (const meta of document.querySelectorAll('meta[name*="category" i], meta[property*="category" i]')) addCategoryId(meta.content);
-      for (const script of document.scripts) {
-        const text = script.textContent || '';
-        if (/categoryId|catId|leafCategoryId/i.test(text)) addCategoryId(text);
-      }
+      const categoryPath = categoryDocument.path;
       const highlights = [...document.querySelectorAll('[data-module-name*="highlight"] li, [data-module-name*="highlight"] p')]
         .map((node) => clean(node.textContent)).filter(Boolean).slice(0, 12);
       const descriptionHtml = (descriptionModule?.innerHTML || '').replace(/<script[\s\S]*?<\/script>/gi, '').slice(0, 90000);
@@ -4027,7 +4001,7 @@ export class SellerPublisher {
         origin: attrMap['产地'] || attrMap['原产地'] || attrMap['place of origin'] || attrMap['country/region of manufacture'] || '',
         model: attrMap['型号'] || attrMap['model number'] || '',
         brand: attrMap['品牌名称'] || attrMap['品牌'] || attrMap['brand name'] || attrMap['brand'] || '',
-        productType: categoryPath.at(-1) || '', categoryPath, categoryId: categoryIdCandidates[0] || '', priceText, subtitle, keywords,
+        productType: categoryPath.at(-1) || '', categoryPath, categoryId: categoryDocument.id, priceText, subtitle, keywords,
         salesUnit, paymentMethod, shippingText, services: { sourceTexts: sourceServices, customizations }, certificates,
         descriptionHtml,
         description: highlights.join('\n') || clean(descriptionModule?.textContent).slice(0, 12000),
@@ -4043,7 +4017,7 @@ export class SellerPublisher {
         metaLanguage: document.querySelector('meta[http-equiv="content-language"], meta[name="language"]')?.content || '',
         renderTextSample: clean(bodyText).slice(0, 3000)
       };
-    }, SOURCE_DESCRIPTION_SELECTOR);
+    }, { descriptionSelector: SOURCE_DESCRIPTION_SELECTOR, categoryDocument });
     // Alibaba defers attributes/description until the corresponding section
     // enters the viewport. If the first snapshot contains only the gallery,
     // trigger lazy modules and retry once before persisting an incomplete
@@ -4070,7 +4044,7 @@ export class SellerPublisher {
       detail.descriptionHtml = iframeDetail.html.slice(0, 90000);
       detail.description = iframeDetail.text.slice(0, 12000);
       const iframeImages = iframeDetail.images.map((image) => image.src).filter(Boolean);
-      detail.detailImages = [...new Set([...detail.detailImages, ...iframeImages])].filter((url) => !detail.mainImages.includes(url)).slice(0, 30);
+      detail.detailImages = [...new Set([...detail.detailImages, ...iframeImages])].slice(0, 30);
       detail.dataCompleteness.detailImages = detail.detailImages.length;
       detail.dataCompleteness.sourceDetailImages = detail.detailImages.length;
       detail.dataCompleteness.detailImagesDerived = false;
@@ -5370,7 +5344,9 @@ export class SellerPublisher {
     const validationErrors = validateProductData(product);
     if (validationErrors.length) throw new Error(`商品资料未通过上架检查：${validationErrors.join('；')}`);
     // Only download the current product's media in advance. All sets share
-    // three workers; browser uploads and submission remain sequential.
+    // a bounded queue; low-memory machines use one image worker. Browser uploads
+    // and submission remain sequential.
+    this.imageDownloads.limit = browserResourcePolicy().imageConcurrency;
     const mediaReady = Promise.allSettled([
       this.downloadImageSet(product, product.mainImages?.length ? product.mainImages : [product.mainImage, ...(product.images || [])], 'main', 6),
       this.downloadImageSet(product, product.detailImages || [], 'detail', 8),
@@ -5394,7 +5370,8 @@ export class SellerPublisher {
   }
 
   async publishPreparedProduct(product, publishPageUrl, mode, publishCategory, jobId, reportStage, options) {
-    reportStage('连接国际站发布浏览器');
+    const resources = browserResourcePolicy();
+    reportStage(resources.constrained ? '连接国际站发布浏览器（已自动降低图片处理并发，延长页面等待）' : '连接国际站发布浏览器');
     const page = await this.currentSellerPage(publishPageUrl);
     page.setDefaultTimeout(5000);
     const stopKey = String(jobId || '');
@@ -5405,7 +5382,7 @@ export class SellerPublisher {
     // upload and form interaction.
     await hidePage(page);
     this.visible = false;
-    const publishNavigation = { timeout: 30000, attempts: 2 };
+    const publishNavigation = { timeout: resources.navigationTimeoutMs, attempts: 2 };
     reportStage('打开目标类目发布页');
     await gotoWithRetry(page, publishPageUrl, publishNavigation);
     await settlePage(page);
@@ -5434,29 +5411,10 @@ export class SellerPublisher {
       throw new Error(`国际站实际打开类目 ID ${actualCategoryId}，与商品目标类目 ID ${expectedCategoryId} 不一致，已停止发布`);
     }
     if (/\/product\/(?:easyListing|category)\.htm/i.test(new URL(page.url()).pathname)) {
-      throw new Error('国际站类目选择页未能自动进入发布表单，请重新打开任务重试');
+      throw Object.assign(new Error('国际站类目选择页尚未进入商品表单，请检查目标类目后继续'), { code: 'PUBLISH_FORM_NOT_READY' });
     }
 
-    let titleInput = null;
-    for (let formAttempt = 0; formAttempt < 3; formAttempt += 1) {
-      await requirePostingPageAvailable(page);
-      titleInput = await waitForFirstVisible(page, TITLE_SELECTORS, formAttempt ? 20000 : 30000);
-      if (titleInput) break;
-      if (/login|passport/i.test(page.url())) break;
-      if (/\/product\/(?:easyListing|category)\.htm/i.test(page.url())) {
-        await enterPostingForm(page, publishPageUrl, expectedCategoryId);
-      }
-      await globalThis.__KUA_YIPU_SELLER_BRIDGE?.sync?.().catch(() => false);
-      await syncAlibabaCookies(page.context());
-      await gotoWithRetry(page, publishPageUrl, publishNavigation);
-      await settlePage(page);
-      await waitForHumanVerification(page);
-    }
-    if (!titleInput) {
-      await requirePostingPageAvailable(page);
-      const shellText = compactText(await page.locator('body').innerText().catch(() => ''), 500);
-      throw Object.assign(new Error(`国际站商品表单未完成加载${shellText ? `：${shellText}` : ''}`), { code: 'PUBLISH_FORM_NOT_READY' });
-    }
+    await waitForPostingTitle(page, { verify: () => waitForHumanVerification(page), onProgress: reportStage });
     const postingText = compactText(await page.locator('body').innerText().catch(() => ''), 5000);
     const visibleCategory = postingText.match(/当前类目\s*[:：]\s*(.+?)(?=切换类目|基本信息|商品图片|$)/)?.[1]?.trim() || '';
     const categoryValidatedById = Boolean(expectedCategoryId && actualCategoryId && expectedCategoryId === actualCategoryId);
@@ -5474,6 +5432,7 @@ export class SellerPublisher {
     reportStage('填写详情并上传详情图');
     await this.fillLegacyDescription(page, product, reportStage);
     reportStage('填写标题、价格和库存');
+    const titleInput = await waitForPostingTitle(page, { verify: () => waitForHumanVerification(page), onProgress: reportStage });
     await fillAndVerify(titleInput, product.title, '商品标题');
 
     if (product.subtitle) {

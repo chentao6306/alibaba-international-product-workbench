@@ -69,26 +69,37 @@ test('reads modern and legacy detail modules without collecting recommendation i
     const gallery = Array.from({ length: 4 }, (_, index) => `<img src="https://sc04.alicdn.com/kf/main${index}.jpg_960x960.jpg">`).join('');
     let description = '';
     let privateData = {};
+    let renderType = '';
     await page.route('**/*', async (route) => {
       if (route.request().resourceType() !== 'document') return route.abort();
+      if (route.request().url().includes('/descIframe.html')) return route.fulfill({ contentType: 'text/html',
+        body: '<div id="detail_decorate_root"><p>Original product description with a picture also used in its gallery.</p><img data-src="https://sc04.alicdn.com/kf/main0.jpg_960x960.jpg"></div>' });
       return route.fulfill({ contentType: 'text/html', body: `<html lang="en"><body><h1>Sample Phone</h1>${gallery}
+        <nav class="breadcrumb"><a href="https://www.alibaba.com/parent_cid123456.html">Parent</a><a href="https://www.alibaba.com/leaf_cid234567.html">Leaf</a></nav>
         <div data-testid="module-attribute-row"><span data-testid="module-attribute-name">Place of Origin</span><span data-testid="module-attribute-value">China</span></div>
         <div data-testid="module-attribute-row"><span data-testid="module-attribute-name">Material</span><span data-testid="module-attribute-value">Plastic</span></div>
         <div data-module-name="module_recommend"><img src="https://sc04.alicdn.com/kf/unrelated.jpg_960x960.jpg"></div>
-        ${description}<script>window.detailData = ${JSON.stringify({ globalData: { product: { customPrice: { fixedDollarPrice: 23 } } }, nodeMap: { module_description: { privateData } } })};</script>
+        ${description}<script>window.detailData = ${JSON.stringify({ globalData: { product: { customPrice: { fixedDollarPrice: 23 } } }, nodeMap: { recommendations: { categoryId: 999999 }, module_description: { privateData, renderType } } })};</script>
         </body></html>` });
     });
-    for (const module of ['module_structure_description', 'module_description', 'missing', 'structured-data-only']) {
+    for (const module of ['module_structure_description', 'module_description', 'missing', 'structured-data-only', 'late-iframe']) {
       description = ['missing', 'structured-data-only'].includes(module) ? '' : `<div data-module-name="${module}">
         <div data-module-name="module_report">Report abuse</div><p>Source specification</p><img data-src="https://sc04.alicdn.com/kf/detail.jpg">
         </div>`;
       privateData = module === 'structured-data-only' ? { productDescription: { details: [{ type: 'image', url: 'https://sc04.alicdn.com/kf/structured.jpg' }] } } : {};
+      renderType = module === 'late-iframe' ? 'js_ssr' : '';
+      if (module === 'late-iframe') description = `<div data-module-name="module_description">Supplier description</div><script>
+        setTimeout(()=>{const frame=document.createElement('iframe');frame.src='https://www.alibaba.com/product-detail/description/descIframe.html';document.querySelector('[data-module-name="module_description"]').append(frame);},5000);
+      </script>`;
       const product = await publisher.readSourceProduct(page, { sourceId: '12345678901', sourceUrl: 'https://www.alibaba.com/product-detail/Sample_12345678901.html', title: 'Sample Phone' });
-      const expected = module === 'missing' ? [] : [`https://sc04.alicdn.com/kf/${module === 'structured-data-only' ? 'structured' : 'detail'}.jpg`];
+      const expected = module === 'missing' ? [] : module === 'late-iframe' ? ['https://sc04.alicdn.com/kf/main0.jpg_960x960.jpg']
+        : [`https://sc04.alicdn.com/kf/${module === 'structured-data-only' ? 'structured' : 'detail'}.jpg`];
       assert.deepEqual(product.detailImages, expected, module);
       assert.doesNotMatch(product.descriptionHtml, /Report abuse|unrelated/, module);
       assert.equal(Boolean(product.descriptionHtml), module !== 'missing', module);
       assert.equal(product.sourcePriceRange.minPrice, '23.00');
+      assert.equal(product.sourceCategoryId, '234567');
+      assert.deepEqual(product.sourceCategoryPath, ['Parent', 'Leaf']);
     }
   } finally {
     await browser.close();

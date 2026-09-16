@@ -21,10 +21,11 @@ test('login and unavailable forms pause at the same product without counting fai
   const original = SellerPublisher.prototype.publishProduct;
   const attempts = [];
   let blockingCode = 'LOGIN_REQUIRED';
+  let categoryCorrected = false;
   SellerPublisher.prototype.publishProduct = async (product) => {
     attempts.push(product.id);
     if (product.id === '1' && blockingCode) throw Object.assign(new Error(blockingCode), { code: blockingCode });
-    if (product.id === '2') throw Object.assign(new Error('当前类目不可用，请重新选择有效类目'), { code: 'PUBLISH_CATEGORY_INVALID' });
+    if (product.id === '2' && !categoryCorrected) throw Object.assign(new Error('当前类目不可用，请重新选择有效类目'), { code: 'PUBLISH_CATEGORY_INVALID' });
     return { status: 'drafted', message: 'Saved receipt', productId: product.id };
   };
   const server = await import('../server/index.js');
@@ -54,14 +55,20 @@ test('login and unavailable forms pause at the same product without counting fai
     }
     blockingCode = '';
     await api(`/api/jobs/${task.id}/resume`, {});
+    await until(() => store.read().jobs[0].status === 'paused');
+    assert.equal(store.read().jobs[0].progress, 1);
+    assert.equal(store.read().products[1].publishHistory?.length || 0, 0);
+    assert.equal(attempts.includes('3'), false);
+    categoryCorrected = true;
+    await api(`/api/jobs/${task.id}/resume`, {});
     await until(() => store.read().jobs[0].status === 'completed');
     const state = store.read();
-    assert.deepEqual(attempts, ['1', '1', '1', '1', '2', '3']);
+    assert.deepEqual(attempts, ['1', '1', '1', '1', '2', '2', '3']);
     assert.equal(state.products[0].publishHistory.length, 1);
     assert.equal(state.products[0].status, 'drafted');
-    assert.equal(state.products[1].status, 'publish_failed');
+    assert.equal(state.products[1].status, 'drafted');
     assert.equal(state.products[2].status, 'drafted');
-    assert.match(state.jobs[0].message, /成功 2 件，失败 1 件/);
+    assert.match(state.jobs[0].message, /成功 3 件，失败 0 件/);
   } finally {
     await server.shutdownServer(); SellerPublisher.prototype.publishProduct = original;
     fs.rmSync(root, { recursive: true, force: true });

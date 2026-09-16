@@ -89,6 +89,25 @@ export function buildAlibabaPublishUrl(categoryId) {
   return id ? `https://post.alibaba.com/product/publish.htm?from=common&catId=${encodeURIComponent(id)}` : '';
 }
 
+export function canRefreshSourceCategory(product) {
+  const originalId = normalizeCategoryId(product.sourceCategoryId || product.source?.snapshot?.categoryId);
+  return sourcePlatform(product) === 'alibaba.com' && Boolean(product.sourceUrl && originalId)
+    && normalizeCategoryId(product.categoryId) === originalId
+    && !product.categoryReference && !product.targetCategoryId
+    && !(product.auditTrail || []).some((entry) => entry.actor === 'user'
+      && (entry.fields || []).some((field) => ['categoryId', 'categoryPath'].includes(field)));
+}
+
+export function refreshedSourceCategoryPatch(product, fresh) {
+  if (!canRefreshSourceCategory(product)) return null;
+  const id = normalizeCategoryId(fresh?.sourceCategoryId);
+  const path = normalizedCategoryPath(fresh?.sourceCategoryPath);
+  const oldPath = normalizedCategoryPath(product.categoryPath?.length ? product.categoryPath : product.sourceCategoryPath);
+  if (!id || id === normalizeCategoryId(product.categoryId) || !path.length
+    || categoryPathKey(path) !== categoryPathKey(oldPath)) return null;
+  return { categoryId: id, categoryPath: path, sourceCategoryId: id, sourceCategoryPath: path };
+}
+
 function normalizedBinding(binding = {}) {
   const categoryId = normalizeCategoryId(binding.categoryId || categoryIdFromUrl(binding.url));
   const category = normalizedCategoryPath(binding.category || binding.categoryPath).join(' >> ');

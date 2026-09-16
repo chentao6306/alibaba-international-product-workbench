@@ -4,6 +4,50 @@ import { chromium } from 'playwright-core';
 import { findChromium } from '../server/browser-runtime.js';
 import { postingPageProblem, waitForDescriptionEditor } from '../server/posting-readiness.js';
 import { SellerPublisher, switchToLegacyDetails } from '../server/publisher.js';
+import { browserResourcePolicy } from '../server/browser-resource-policy.js';
+
+test('low-resource policy covers two-core, four-GB and low-free-memory hosts without slowing ready pages', () => {
+  const gib = 1024 ** 3;
+  const normal = { cpuCount: 8, totalBytes: 16 * gib, freeBytes: 8 * gib };
+  assert.equal(browserResourcePolicy(normal).constrained, false);
+  for (const resource of [{ cpuCount: 2 }, { totalBytes: 4 * gib }, { freeBytes: 0.5 * gib }]) {
+    const policy = browserResourcePolicy({ ...normal, ...resource });
+    assert.equal(policy.constrained, true);
+    assert.equal(policy.imageConcurrency, 1);
+    assert.ok(policy.readinessTimeoutMs >= 180000);
+    assert.ok(policy.navigationTimeoutMs >= 90000);
+  }
+});
+
+test('slow editor initializes beyond 45 seconds without repeated clicks and rebuilt controls can activate again', { skip: !findChromium(), timeout: 85000 }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 4 });
+    await page.setContent(`<button>Normal editor</button><script>
+      window.clicks=0; let timer;
+      document.querySelector('button').onclick=()=>{
+        window.clicks++; clearTimeout(timer);
+        timer=setTimeout(()=>{const frame=document.createElement('iframe');
+          frame.srcdoc='<body class="mce-content-body" contenteditable="true">Slow editor ready</body>';
+          document.body.append(frame);},52000);
+      };
+    </script>`);
+    const stages = [];
+    const policy = browserResourcePolicy({ cpuCount: 2, totalBytes: 4 * 1024 ** 3, freeBytes: 1024 ** 3 });
+    const result = await waitForDescriptionEditor(page, { timeoutMs: policy.readinessTimeoutMs,
+      switchMode: () => switchToLegacyDetails(page), onProgress: (stage) => stages.push(stage) });
+    assert.equal(await result.body.innerText(), 'Slow editor ready');
+    assert.equal(await page.evaluate(() => window.clicks), 1, 'Repeated clicks would reset the initialization timer');
+    assert.ok(stages.some((stage) => /已等待 (?:4\d|5\d) 秒/.test(stage)));
+    await page.setContent('<button onclick="window.reactivated=true">Normal editor</button>');
+    await switchToLegacyDetails(page);
+    assert.equal(await page.evaluate(() => window.reactivated), true);
+    await page.setContent('<iframe srcdoc="<body class=mce-content-body contenteditable=false>Still initializing</body>"></iframe>');
+    await assert.rejects(waitForDescriptionEditor(page, { timeoutMs: 200 }), { code: 'PUBLISH_EDITOR_NOT_READY' });
+  } finally { await browser.close(); }
+});
 
 test('distinguishes invalid category, expired login and normal posting URLs', () => {
   assert.equal(postingPageProblem('https://login.alibaba.com/', '').code, 'LOGIN_REQUIRED');

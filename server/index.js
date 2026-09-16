@@ -16,7 +16,7 @@ import {
 } from './publisher.js';
 import { applyPublishedProductReference, copyMissingProductData, createPublishSnapshot, findAndReplaceProduct, recordProductMutation, syncProductModel } from './product-model.js';
 import { publishCounts, recordPublishOutcome } from './publish-progress.js';
-import { buildAlibabaPublishUrl, createPublishPlan, normalizeCategoryId, productCategory, publishBindings, rememberPublishBinding, resolvePublishRoute } from './category-routing.js';
+import { buildAlibabaPublishUrl, canRefreshSourceCategory, createPublishPlan, normalizeCategoryId, productCategory, publishBindings, refreshedSourceCategoryPatch, rememberPublishBinding, resolvePublishRoute } from './category-routing.js';
 import { createPublishedReferenceTemplate, findPublishedReferenceRepair } from './publish-reference.js';
 import { userFacingError } from './browser-error.js';
 import { runWithProgressTimeout } from './progress-timeout.js';
@@ -947,9 +947,41 @@ async function runPublishJob(jobId) {
         publisher.clearPublishStop(jobId);
         store.patchJob(jobId, { progress: index + 1, total, message: `已处理 ${index + 1}/${total}：${product.title}` });
       } catch (error) {
+        if (error.code === 'PUBLISH_CATEGORY_INVALID' && canRefreshSourceCategory(product)
+          && !store.read((state) => state.jobs.find((item) => item.id === jobId)?.metadata?.categoryRefreshAttempts?.[product.id])) {
+          const current = store.read((state) => state.jobs.find((item) => item.id === jobId));
+          if (current?.status === 'cancelled') return;
+          if (current?.status === 'running') {
+            store.patchJob(jobId, { metadata: { ...current.metadata,
+              categoryRefreshAttempts: { ...current.metadata?.categoryRefreshAttempts, [product.id]: true } },
+            message: '当前类目已失效，正在从原商品核对最新类目' });
+            try {
+              const [fresh] = await withVerificationContext({
+                onWaiting: (message) => store.patchJob(jobId, { message }),
+                shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status))
+              }, () => collector.enrichProducts([product]));
+              const patch = refreshedSourceCategoryPatch(product, fresh);
+              if (patch && store.read((state) => state.jobs.find((item) => item.id === jobId)?.status) === 'running') {
+                const repaired = store.update((draft) => {
+                  const target = draft.products.find((item) => item.id === product.id);
+                  if (!target || target.categoryId !== product.categoryId || !canRefreshSourceCategory(target)) return false;
+                  recordProductMutation(target, patch, { actor: 'system', action: 'refresh-invalid-source-category' });
+                  return true;
+                });
+                if (repaired) {
+                  publisher.clearPublishStop(jobId);
+                  index -= 1;
+                  continue;
+                }
+              }
+            } catch (refreshError) {
+              if (refreshError.code === 'COLLECT_PAUSED' || refreshError.code === 'LOGIN_REQUIRED') error = refreshError;
+            }
+          }
+        }
         const message = userFacingError(error);
         const requiresHuman = error.code === 'LOGIN_REQUIRED' || /captcha|verify|人机验证|安全验证|滑块|登录(?:状态)?(?:已)?失效|人工验证/i.test(message);
-        const environmentNotReady = ['PUBLISH_EDITOR_NOT_READY', 'PUBLISH_FORM_NOT_READY', 'PUBLISH_ACCOUNT_LIMIT'].includes(error.code);
+        const environmentNotReady = ['PUBLISH_EDITOR_NOT_READY', 'PUBLISH_FORM_NOT_READY', 'PUBLISH_ACCOUNT_LIMIT', 'PUBLISH_CATEGORY_INVALID'].includes(error.code);
         const currentJobStatus = store.read((state) => state.jobs.find((item) => item.id === jobId)?.status);
         if (currentJobStatus === 'cancelled') return;
         const pauseRequested = ['pause_requested', 'paused'].includes(currentJobStatus) || ['PUBLISH_PAUSED', 'COLLECT_PAUSED'].includes(error.code);

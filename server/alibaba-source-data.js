@@ -5,9 +5,8 @@ const asNumber = (value) => {
 
 const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
 
-// Alibaba has used several names for the leaf category field over time.  Keep
-// the explicit product fields first, then fall back to a bounded recursive
-// search so category IDs survive minor detailData shape changes.
+// Read product taxonomy only. Recommendation modules contain other products'
+// category IDs and must never become the current product's publishing route.
 export function extractAlibabaCategoryId(detailData) {
   const product = detailData?.globalData?.product || {};
   const explicit = [
@@ -33,6 +32,10 @@ export function extractAlibabaCategoryId(detailData) {
     if (!value || typeof value !== 'object' || seen.has(value) || visited > 50000) return '';
     seen.add(value);
     visited += 1;
+    if (Array.isArray(value)) {
+      for (const child of [...value].reverse()) { const id = walk(child); if (id) return id; }
+      return '';
+    }
     for (const key of preferredKeys) {
       const id = normalize(value[key]);
       if (id) return id;
@@ -43,7 +46,37 @@ export function extractAlibabaCategoryId(detailData) {
     }
     return '';
   }
-  return walk(detailData);
+  for (const [name, value] of Object.entries(detailData?.nodeMap || {})) {
+    if (!/breadcrumb|category/i.test(name) || /recommend|related|similar|advert/i.test(name)) continue;
+    const id = walk(value);
+    if (id) return id;
+  }
+  return '';
+}
+
+export function readAlibabaCategoryDocument() {
+  const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const fromUrl = (value) => {
+    try {
+      const url = new URL(value, location.href);
+      if (!/(^|\.)alibaba\.com$/i.test(url.hostname)) return '';
+      const candidate = url.searchParams.get('categoryId') || url.searchParams.get('catId')
+        || url.pathname.match(/(?:_cid|\/cid\/|category[-/])(\d{4,})(?:[./_-]|$)/i)?.[1];
+      return /^\d{4,}$/.test(candidate || '') ? candidate : '';
+    } catch { return ''; }
+  };
+  const roots = [...document.querySelectorAll('[data-testid*="breadcrumb" i], [class*="breadcrumb" i], nav[aria-label*="breadcrumb" i], [data-module-name="module_category"]')];
+  const candidates = roots.map((root) => {
+    const links = [...root.querySelectorAll('a[href]')].filter((link) => !/^(?:home|all categories|首页)$/i.test(clean(link.textContent)));
+    const path = links.map((link) => clean(link.textContent)).filter((text) => text && text.length < 120);
+    // Breadcrumbs are ordered from parent to leaf, so the last category link wins.
+    const ids = links.map((link) => fromUrl(link.href)).filter(Boolean);
+    return { path, id: ids.at(-1) || '' };
+  }).sort((a, b) => b.path.length - a.path.length);
+  const breadcrumb = candidates[0] || { path: [], id: '' };
+  const meta = [...document.querySelectorAll('meta[name="categoryId" i], meta[name="leafCategoryId" i], meta[property="categoryId" i]')]
+    .map((node) => clean(node.content)).find((value) => /^\d{4,}$/.test(value));
+  return { path: breadcrumb.path, id: meta || breadcrumb.id };
 }
 
 function findAssignedObject(scriptText, assignmentName) {
