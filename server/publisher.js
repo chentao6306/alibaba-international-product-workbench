@@ -15,7 +15,7 @@ import { ImageDownloadQueue } from './image-download-queue.js';
 import { originCountry, isOriginRegionAttribute } from './origin-country.js';
 import { uploadEditorDetailImages } from './description-image-upload.js';
 import { fillReferencedSkuRows } from './sku-reference.js';
-import { findPostingTitle, requirePostingPageAvailable, waitForDescriptionEditor, waitForPostingTitle } from './posting-readiness.js';
+import { findNormalDescriptionControl, findPostingTitle, requirePostingPageAvailable, revealDescriptionSection, waitForDescriptionEditor, waitForPostingTitle } from './posting-readiness.js';
 import { readSourceDescriptionFrame } from './source-description-frame.js';
 import { browserResourcePolicy } from './browser-resource-policy.js';
 import { browserStep } from './browser-step.js';
@@ -3329,8 +3329,7 @@ async function activateEditorControl(page, control, key) {
 
 export async function switchToLegacyDetails(page) {
   await requireClearPostingOverlays(page);
-  const detailSection = page.getByRole('heading', { name: /^(?:商品详情|商品描述|Product description|Product details)$/i }).first();
-  if (await detailSection.isVisible().catch(() => false)) await detailSection.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => {});
+  const sectionRevealed = await revealDescriptionSection(page);
   const oldMode = page.getByRole('button', { name: /^(?:返回老版|返回旧版|Switch to (?:the )?(?:old|classic|legacy) (?:version|editor)|Back to (?:the )?(?:old|classic|legacy) (?:version|editor))$/i }).first();
   if (await activateEditorControl(page, oldMode, 'legacy')) {
     await page.waitForTimeout(350);
@@ -3338,9 +3337,10 @@ export async function switchToLegacyDetails(page) {
   const confirm = page.getByRole('button', { name: /^(?:继续返回旧版|确认返回旧版|Continue (?:to|with) (?:the )?(?:old|classic|legacy) (?:version|editor))$/i }).first();
   await activateEditorControl(page, confirm, 'confirm');
   await requireClearPostingOverlays(page);
-  const normalEditor = page.getByText(/^(?:普通编辑|普通编辑器|Normal edit(?:or|ing)?|Regular edit(?:or|ing)?|Basic edit(?:or|ing)?|Standard edit(?:or|ing)?)$/i).last();
-  if (await normalEditor.isVisible().catch(() => false)) await normalEditor.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => {});
-  if (await activateEditorControl(page, normalEditor, 'normal')) await page.waitForTimeout(600);
+  const normalEditor = await findNormalDescriptionControl(page);
+  if (normalEditor && !sectionRevealed) await normalEditor.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => {});
+  if (normalEditor && await activateEditorControl(page, normalEditor, 'normal')) await page.waitForTimeout(600);
+  await revealDescriptionSection(page);
 }
 
 export class SellerPublisher {

@@ -1,5 +1,43 @@
 import { browserResourcePolicy } from './browser-resource-policy.js';
 
+const DESCRIPTION_HEADING = /^\*?\s*(?:商品详情|商品描述|(?:Product|Commodity)\s*(?:description|details))\s*\*?$/i;
+const NORMAL_DESCRIPTION_MODE = /^(?:普通编辑|普通编辑器|(?:Normal|Ordinary|Regular|Basic|Standard)\s*edit(?:or|ing)?)$/i;
+const DESCRIPTION_ANCHORS = [
+  '.posting-field-supertext .supertext-header',
+  '#desc-card-title',
+  '#struct-productDescType',
+  '#struct-superText',
+  '#struct-desc-card',
+];
+
+async function visibleDescriptionControl(candidates) {
+  for (const candidate of candidates) {
+    for (let index = 0, count = await candidate.count(); index < count; index++) {
+      const control = candidate.nth(index);
+      if (await control.isVisible().catch(() => false)) return control;
+    }
+  }
+  return null;
+}
+
+export async function revealDescriptionSection(page) {
+  // Alibaba initializes this editor only near the viewport. Its English
+  // heading is "Commodity Details", and controls may not exist until scrolling.
+  const section = await visibleDescriptionControl([
+    ...DESCRIPTION_ANCHORS.map(selector => page.locator(selector)),
+    page.getByRole('heading', { name: DESCRIPTION_HEADING }),
+  ]);
+  if (!section) return false;
+  return section.scrollIntoViewIfNeeded({ timeout: 1500 }).then(() => true).catch(() => false);
+}
+
+export async function findNormalDescriptionControl(page) {
+  return visibleDescriptionControl([
+    page.locator('#struct-productDescType').getByText(NORMAL_DESCRIPTION_MODE),
+    page.getByText(NORMAL_DESCRIPTION_MODE),
+  ]);
+}
+
 export async function findPostingTitle(page) {
   const selectors = [
     'input[name="productTitle" i], textarea[name="productTitle" i]',
@@ -81,17 +119,28 @@ export async function findDescriptionEditor(page) {
 }
 
 export async function descriptionEditorState(page) {
-  return page.evaluate(() => {
-    const visible = (node) => Boolean(node?.getClientRects().length);
-    const mode = [...document.querySelectorAll('label, [role=tab], button, .item-label')]
-      .filter((node) => visible(node) && /^(?:普通编辑|普通编辑器|Normal edit(?:or|ing)?|Regular edit(?:or|ing)?|Basic edit(?:or|ing)?|Standard edit(?:or|ing)?)$/i.test(node.textContent?.trim()))[0];
+  return page.evaluate(({ anchors, headingPattern, modePattern }) => {
+    const visible = (node) => {
+      const rect = node?.getBoundingClientRect();
+      return Boolean(rect?.width && rect?.height && getComputedStyle(node).visibility !== 'hidden');
+    };
+    const modeRegex = new RegExp(modePattern, 'i');
+    const headingRegex = new RegExp(headingPattern, 'i');
+    const modes = [...document.querySelectorAll('label, [role=tab], button, .item-label')]
+      .filter((node) => visible(node) && modeRegex.test(node.textContent?.trim()));
+    const mode = modes.find(node => node.closest('#struct-productDescType')) || modes[0];
+    const section = anchors.flatMap(selector => [...document.querySelectorAll(selector)]).find(visible)
+      || [...document.querySelectorAll('h1,h2,h3,h4,[role=heading]')].find(node => visible(node) && headingRegex.test(node.textContent?.trim()));
+    const rect = section?.getBoundingClientRect();
     const radio = (mode?.closest('.icbuRadio-item') || mode)?.querySelector('input[type=radio]');
     const frames = [...document.querySelectorAll('iframe')].filter((node) => /(?:_ifr$|description|editor)/i.test(node.id)
       || node.closest('.mce-edit-area'));
-    return { modeControl: Boolean(mode), normalSelected: radio ? radio.checked : null,
+    return { detailSectionFound: Boolean(section), detailSectionInView: Boolean(rect && rect.bottom > 0 && rect.top < innerHeight),
+      modeControl: Boolean(mode), normalSelected: radio ? radio.checked : null,
       editorFrames: frames.length, visibleEditorFrames: frames.filter(visible).length,
       editorScriptLoaded: Boolean(window.tinymce || window.tinyMCE), documentState: document.readyState };
-  }).catch(() => ({ documentState: 'unavailable' }));
+  }, { anchors: DESCRIPTION_ANCHORS, headingPattern: DESCRIPTION_HEADING.source, modePattern: NORMAL_DESCRIPTION_MODE.source })
+    .catch(() => ({ documentState: 'unavailable' }));
 }
 
 export async function waitForDescriptionEditor(page, { switchMode, verify, onProgress = () => {}, timeoutMs = browserResourcePolicy().readinessTimeoutMs } = {}) {
@@ -113,7 +162,11 @@ export async function waitForDescriptionEditor(page, { switchMode, verify, onPro
       nextSwitch = performance.now() + 4000;
     }
     if (performance.now() >= nextReport) {
-      onProgress(`等待国际站详情编辑器加载（已等待 ${Math.max(0, Math.floor((timeoutMs - deadline + performance.now()) / 1000))} 秒，加载完成后自动继续）`);
+      const state = await descriptionEditorState(page);
+      const stage = state.editorFrames ? '等待国际站详情编辑区域就绪'
+        : state.detailSectionFound ? '详情区已定位，等待国际站编辑器初始化'
+          : state.modeControl ? '等待国际站详情编辑器加载' : '正在定位国际站详情区';
+      onProgress(`${stage}（已等待 ${Math.max(0, Math.floor((timeoutMs - deadline + performance.now()) / 1000))} 秒）`);
       nextReport = performance.now() + 8000;
     }
     await page.waitForTimeout(pollIntervalMs);
@@ -124,7 +177,9 @@ export async function waitForDescriptionEditor(page, { switchMode, verify, onPro
   const diagnostics = await descriptionEditorState(page);
   const reason = diagnostics.normalSelected === false ? '普通编辑模式未成功选中'
     : diagnostics.editorFrames ? '编辑器框架已出现，但编辑区域仍不可用'
-      : diagnostics.modeControl ? '详情区已展开，但国际站仍未创建编辑器' : '未找到普通编辑入口或详情编辑器';
+      : diagnostics.modeControl ? '详情区已展开，但国际站仍未创建编辑器'
+        : diagnostics.detailSectionFound ? '详情区已定位，但国际站仍未创建编辑器，请检查发布页面的加载状态'
+          : '未找到详情区或普通编辑入口，请检查当前发布页面';
   throw Object.assign(new Error(`${reason}（已等待 ${Math.ceil(timeoutMs / 1000)} 秒）；已保留商品及任务进度，未提交当前商品`),
     { code: 'PUBLISH_EDITOR_NOT_READY', diagnostics });
 }
