@@ -3159,7 +3159,11 @@ export async function enableImageBackedVariantSpecs(page, product, groups, downl
   return true;
 }
 
-const POSTING_BLOCKERS = '.next-overlay-backdrop:visible, .next-dialog:visible, [role="dialog"]:visible, .mce-window:visible, #mce-modal-block:visible';
+// TinyMCE gives its non-modal table toolbar role="dialog". It can remain
+// visible after editing without blocking the form; actual editor windows
+// and modal backdrops must still be handled as blockers.
+const POSTING_DIALOG = '[role="dialog"]:not(.mce-tinymce-inline:not([aria-modal="true"]):has([role="toolbar"]))';
+const POSTING_BLOCKERS = `.next-overlay-backdrop:visible, .next-dialog:visible, ${POSTING_DIALOG}:visible, .mce-window:visible, #mce-modal-block:visible`;
 
 export async function dismissPostingOverlays(page) {
   requireNoPolicyWarning(await visibleFeedback(page));
@@ -3168,7 +3172,8 @@ export async function dismissPostingOverlays(page) {
     /^(?:继续返回旧版|确认返回旧版)$/i
   ];
   for (let pass = 0; pass < 4; pass += 1) {
-    const overlays = page.locator('.next-overlay-wrapper.opened, .next-dialog:visible, [role="dialog"]:visible, .mce-window:visible');
+    if (!await page.locator(POSTING_BLOCKERS).count()) return true;
+    const overlays = page.locator(`.next-overlay-wrapper.opened, .next-dialog:visible, ${POSTING_DIALOG}:visible, .mce-window:visible`);
     let acted = false;
     for (let index = (await overlays.count().catch(() => 0)) - 1; index >= 0; index -= 1) {
       const overlay = overlays.nth(index);
