@@ -265,7 +265,7 @@ function SourceView({ state, refresh, notify, onMenu, folderId }) {
     try {
       await api(`/api/jobs/${job.id}/${action}`, { method: 'POST' });
       await refresh();
-      notify(action === 'cancel' ? '采集任务已取消，已经保存的商品会保留' : action === 'pause' ? '已请求暂停采集' : '采集任务已继续');
+      notify(action === 'collect-discovered' ? '已停止继续翻页，开始采集已发现商品的详情' : action === 'cancel' ? '采集任务已取消，已经保存的商品会保留' : action === 'pause' ? '已请求暂停采集' : '采集任务已继续');
     } catch (error) { notify(error.message, 'error'); }
   }
 

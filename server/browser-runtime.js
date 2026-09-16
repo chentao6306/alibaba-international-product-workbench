@@ -41,7 +41,7 @@ function readAlibabaCookies() {
   }
 }
 
-export async function syncAlibabaCookies(context) {
+export async function syncAlibabaCookies(context, { force = false } = {}) {
   let imported = importedSessions.get(context);
   if (!imported) { imported = { cookies: new Map(), storage: '' }; importedSessions.set(context, imported); }
   const cookies = readAlibabaCookies();
@@ -49,7 +49,7 @@ export async function syncAlibabaCookies(context) {
   // A source browser can receive newer verification cookies itself. Import
   // only values actually changed by desktop login/verification, otherwise each
   // new product request would overwrite the user's just-completed challenge.
-  const changed = cookies.filter((cookie) => imported.cookies.get(key(cookie)) !== JSON.stringify(cookie));
+  const changed = cookies.filter((cookie) => force || imported.cookies.get(key(cookie)) !== JSON.stringify(cookie));
   if (changed.length) {
     try {
       await context.addCookies(changed);

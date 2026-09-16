@@ -15,6 +15,7 @@ import { ImageDownloadQueue } from './image-download-queue.js';
 import { originCountry, isOriginRegionAttribute } from './origin-country.js';
 import { uploadEditorDetailImages } from './description-image-upload.js';
 import { fillReferencedSkuRows } from './sku-reference.js';
+import { requirePostingPageAvailable, waitForDescriptionEditor } from './posting-readiness.js';
 
 const WORKBENCH_URL = 'https://i.alibaba.com/';
 const SOURCE_DESCRIPTION_SELECTOR = '[data-module-name="module_description"], [data-testid="module-description"], [data-module-name="module_structure_description"], [data-testid="module-details-structure-description"]';
@@ -3274,21 +3275,21 @@ async function enterPostingForm(page, publishPageUrl, expectedCategoryId = '') {
   return !isCategoryPage();
 }
 
-async function switchToLegacyDetails(page) {
+export async function switchToLegacyDetails(page) {
   await requireClearPostingOverlays(page);
-  const oldMode = page.getByRole('button', { name: '返回老版', exact: true }).first();
+  const oldMode = page.getByRole('button', { name: /^(?:返回老版|返回旧版|Switch to (?:the )?(?:old|classic|legacy) (?:version|editor)|Back to (?:the )?(?:old|classic|legacy) (?:version|editor))$/i }).first();
   if (await oldMode.isVisible().catch(() => false)) {
     await oldMode.click({ force: true, timeout: 5000 })
       .catch(() => oldMode.evaluate((node) => node.click()));
     await page.waitForTimeout(350);
-    const confirm = page.getByRole('button', { name: '继续返回旧版', exact: true }).first();
+    const confirm = page.getByRole('button', { name: /^(?:继续返回旧版|确认返回旧版|Continue (?:to|with) (?:the )?(?:old|classic|legacy) (?:version|editor))$/i }).first();
     if (await confirm.isVisible().catch(() => false)) {
       await confirm.click({ force: true, timeout: 5000 })
         .catch(() => confirm.evaluate((node) => node.click()));
     }
     await requireClearPostingOverlays(page);
   }
-  const normalEditor = page.getByText('普通编辑', { exact: true }).last();
+  const normalEditor = page.getByText(/^(?:普通编辑|普通编辑器|Normal edit(?:or|ing)?|Regular edit(?:or|ing)?|Basic edit(?:or|ing)?|Standard edit(?:or|ing)?)$/i).last();
   if (await normalEditor.isVisible().catch(() => false)) {
     await normalEditor.click({ force: true, timeout: 5000 })
       .catch(() => normalEditor.evaluate((node) => node.click()).catch(() => {}));
@@ -4887,57 +4888,44 @@ export class SellerPublisher {
   }
 
   async fillLegacyDescription(page, product, onProgress = () => {}) {
-    await switchToLegacyDetails(page);
+    await waitForHumanVerification(page);
+    await requireClearPostingOverlays(page);
+    const { frame, body } = await waitForDescriptionEditor(page, {
+      switchMode: () => switchToLegacyDetails(page),
+      verify: () => waitForHumanVerification(page), onProgress
+    });
     const html = buildLegacyDescriptionHtml(product);
-    const editorDeadline = Date.now() + 15000;
-    while (Date.now() < editorDeadline) {
-      for (const frame of page.frames()) {
-        const body = frame.locator('body.mce-content-body, body[contenteditable="true"]');
-        if (!await body.isVisible().catch(() => false)) continue;
-        await body.evaluate((node, value) => {
-          node.innerHTML = value;
+    await body.evaluate((node, value) => {
+      node.innerHTML = value;
+      node.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+      node.dispatchEvent(new Event('change', { bubbles: true }));
+      node.dispatchEvent(new Event('blur', { bubbles: true }));
+    }, html);
+    const synced = await page.evaluate((value) => {
+      const editors = [...(window.tinymce?.editors || []), ...(window.tinyMCE?.editors || [])];
+      const editor = editors.find((item) => item && !item.hidden);
+      if (!editor) return false;
+      editor.setContent(value);
+      editor.save();
+      editor.fire('input');
+      editor.fire('change');
+      editor.fire('blur');
+      return true;
+    }, html).catch(() => false);
+    if (!synced) {
+      const frameElement = await frame.frameElement().catch(() => null);
+      const frameId = await frameElement?.getAttribute('id').catch(() => '');
+      const editorId = String(frameId || '').replace(/_ifr$/, '');
+      if (editorId) {
+        await page.locator(`#${editorId}`).evaluate((node, value) => {
+          node.value = value;
           node.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
           node.dispatchEvent(new Event('change', { bubbles: true }));
-          node.dispatchEvent(new Event('blur', { bubbles: true }));
-        }, html);
-        const synced = await page.evaluate((value) => {
-          const editors = [...(window.tinymce?.editors || []), ...(window.tinyMCE?.editors || [])];
-          const editor = editors.find((item) => item && !item.hidden);
-          if (!editor) return false;
-          editor.setContent(value);
-          editor.save();
-          editor.fire('input');
-          editor.fire('change');
-          editor.fire('blur');
-          return true;
-        }, html).catch(() => false);
-        if (!synced) {
-          const frameElement = await frame.frameElement().catch(() => null);
-          const frameId = await frameElement?.getAttribute('id').catch(() => '');
-          const editorId = String(frameId || '').replace(/_ifr$/, '');
-          if (editorId) {
-            await page.locator(`#${editorId}`).evaluate((node, value) => {
-              node.value = value;
-              node.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
-              node.dispatchEvent(new Event('change', { bubbles: true }));
-            }, html).catch(() => {});
-          }
-        }
-        await this.uploadLegacyDetailImages(page, product, onProgress);
-        return true;
+        }, html).catch(() => {});
       }
-      await page.waitForTimeout(400);
     }
-    const editable = await firstVisible(page, ['[contenteditable="true"]']);
-    if (editable) {
-      await editable.evaluate((node, value) => {
-        node.innerHTML = value;
-        node.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
-        node.dispatchEvent(new Event('change', { bubbles: true }));
-      }, html);
-      return true;
-    }
-    throw new Error('未识别到国际站商品详情编辑器');
+    await this.uploadLegacyDetailImages(page, product, onProgress);
+    return true;
   }
 
   async uploadLegacyDetailImages(page, product, onProgress = () => {}) {
@@ -5392,7 +5380,16 @@ export class SellerPublisher {
       }),
     ]);
     try {
-      return await this.publishPreparedProduct(product, publishPageUrl, mode, publishCategory, jobId, reportStage, options);
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await this.publishPreparedProduct(product, publishPageUrl, mode, publishCategory, jobId, reportStage, options);
+        } catch (error) {
+          // These typed errors only originate while preparing the form, before
+          // any save/submit. Never replay a submission with an unknown receipt.
+          if (attempt || !['PUBLISH_EDITOR_NOT_READY', 'PUBLISH_FORM_NOT_READY'].includes(error.code)) throw error;
+          reportStage('发布页加载不完整，重新加载后重试一次');
+        }
+      }
     } finally { await mediaReady; }
   }
 
@@ -5418,12 +5415,12 @@ export class SellerPublisher {
     // publish navigation in the already-created Playwright context.
     if (/login|passport/i.test(page.url())) {
       await globalThis.__KUA_YIPU_SELLER_BRIDGE?.sync?.().catch(() => false);
-      await syncAlibabaCookies(page.context());
+      await syncAlibabaCookies(page.context(), { force: true });
       await gotoWithRetry(page, publishPageUrl, publishNavigation).catch(() => {});
       await settlePage(page);
       await waitForHumanVerification(page);
     }
-    if (/login|passport/i.test(page.url())) throw new Error('阿里巴巴国际站登录状态已失效，请重新登录');
+    await requirePostingPageAvailable(page);
     const expectedCategoryId = normalizeCategoryId(product.categoryId || product.sourceCategoryId);
     // A generated catId URL can legitimately land on Alibaba's category
     // chooser when the seller session has not used that leaf before. Complete
@@ -5431,6 +5428,7 @@ export class SellerPublisher {
     // per product or per category.
     reportStage('确认并进入目标类目表单');
     await enterPostingForm(page, publishPageUrl, expectedCategoryId);
+    await requirePostingPageAvailable(page);
     const actualCategoryId = categoryIdFromUrl(page.url()) || categoryIdFromUrl(publishPageUrl);
     if (expectedCategoryId && actualCategoryId && expectedCategoryId !== actualCategoryId) {
       throw new Error(`国际站实际打开类目 ID ${actualCategoryId}，与商品目标类目 ID ${expectedCategoryId} 不一致，已停止发布`);
@@ -5441,6 +5439,7 @@ export class SellerPublisher {
 
     let titleInput = null;
     for (let formAttempt = 0; formAttempt < 3; formAttempt += 1) {
+      await requirePostingPageAvailable(page);
       titleInput = await waitForFirstVisible(page, TITLE_SELECTORS, formAttempt ? 20000 : 30000);
       if (titleInput) break;
       if (/login|passport/i.test(page.url())) break;
@@ -5454,8 +5453,9 @@ export class SellerPublisher {
       await waitForHumanVerification(page);
     }
     if (!titleInput) {
+      await requirePostingPageAvailable(page);
       const shellText = compactText(await page.locator('body').innerText().catch(() => ''), 500);
-      throw new Error(`国际站商品表单未完成加载${shellText ? `：${shellText}` : ''}`);
+      throw Object.assign(new Error(`国际站商品表单未完成加载${shellText ? `：${shellText}` : ''}`), { code: 'PUBLISH_FORM_NOT_READY' });
     }
     const postingText = compactText(await page.locator('body').innerText().catch(() => ''), 5000);
     const visibleCategory = postingText.match(/当前类目\s*[:：]\s*(.+?)(?=切换类目|基本信息|商品图片|$)/)?.[1]?.trim() || '';

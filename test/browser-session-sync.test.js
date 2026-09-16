@@ -34,6 +34,13 @@ test('preserves verification completed in the collector while importing changed 
     assert.equal(values.get('qa-verification'), 'user-completed');
     assert.equal(imports, 2);
     assert.equal(scripts, 1);
+    values.set('qa-login', 'expired-in-publisher');
+    await syncAlibabaCookies(context, { force: true });
+    assert.equal(values.get('qa-login'), 'new-login', 'A login redirect must allow reimporting the desktop session');
+    values.set('qa-verification', 'verified-after-login');
+    await syncAlibabaCookies(context);
+    assert.equal(values.get('qa-verification'), 'verified-after-login');
+    assert.equal(imports, 3);
   } finally {
     if (previous == null) delete process.env.KUA_YIPU_ALIBABA_COOKIES_FILE;
     else process.env.KUA_YIPU_ALIBABA_COOKIES_FILE = previous;

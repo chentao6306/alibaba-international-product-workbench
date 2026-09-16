@@ -440,7 +440,7 @@ async function startCollectJob(jobId) {
         status: 'completed',
         progress: completedTotal,
         total: completedTotal,
-        message: `${collectionPageRange(options).allPages ? '全部页读取完成' : `第 ${options.startPage}-${options.endPage} 页读取完成`}，共保存 ${count} 件${warningCount ? `，其中 ${warningCount} 件详情待补全` : ''}`,
+        message: `${options.checkpoint?.discoveredOnly ? `已发现的 ${completedTotal} 件商品采集完成（列表读取至第 ${options.checkpoint.page} 页）` : collectionPageRange(options).allPages ? '全部页读取完成' : `第 ${options.startPage}-${options.endPage} 页读取完成`}，共保存 ${count} 件${warningCount ? `，其中 ${warningCount} 件详情待补全` : ''}`,
         updatedAt: new Date().toISOString()
       });
     });
@@ -948,14 +948,15 @@ async function runPublishJob(jobId) {
         store.patchJob(jobId, { progress: index + 1, total, message: `已处理 ${index + 1}/${total}：${product.title}` });
       } catch (error) {
         const message = userFacingError(error);
-        const requiresHuman = /captcha|verify|人机验证|安全验证|滑块|登录(?:状态)?(?:已)?失效|人工验证/i.test(message);
+        const requiresHuman = error.code === 'LOGIN_REQUIRED' || /captcha|verify|人机验证|安全验证|滑块|登录(?:状态)?(?:已)?失效|人工验证/i.test(message);
+        const environmentNotReady = ['PUBLISH_EDITOR_NOT_READY', 'PUBLISH_FORM_NOT_READY', 'PUBLISH_ACCOUNT_LIMIT'].includes(error.code);
         const currentJobStatus = store.read((state) => state.jobs.find((item) => item.id === jobId)?.status);
         if (currentJobStatus === 'cancelled') return;
         const pauseRequested = ['pause_requested', 'paused'].includes(currentJobStatus) || ['PUBLISH_PAUSED', 'COLLECT_PAUSED'].includes(error.code);
         // Preserve the visible publishing page on both success and failure so
         // the user can inspect Alibaba's exact validation state. It can be
         // hidden later through the normal seller-browser lifecycle.
-        if (!pauseRequested) store.update((draft) => {
+        if (!pauseRequested && !requiresHuman && !environmentNotReady) store.update((draft) => {
           const target = draft.products.find((item) => item.id === product.id);
           if (target) {
             const result = { status: 'failed', message };
@@ -977,7 +978,7 @@ async function runPublishJob(jobId) {
           ? jobState.metadata.autoReferenceRetries : {};
         const requiredFields = [...new Set([...(error.requiredFields || []), ...requiredLabelsFromError(message)])];
         const attempted = retries[product.id]?.referenceIds || (retries[product.id]?.referenceId ? [retries[product.id].referenceId] : []);
-        if (!pauseRequested && !requiresHuman && error.code !== 'PUBLISH_POLICY_REVIEW_REQUIRED' && requiredFields.length && attempted.length < 2) {
+        if (!pauseRequested && !requiresHuman && !environmentNotReady && error.code !== 'PUBLISH_POLICY_REVIEW_REQUIRED' && requiredFields.length && attempted.length < 2) {
           const repair = findPublishedReferenceRepair(product, store.read().products, requiredFields, attempted);
           if (repair) {
             store.update((draft) => {
@@ -1002,7 +1003,7 @@ async function runPublishJob(jobId) {
           store.patchJob(jobId, { status: 'paused', progress: index, total, message: `已立即暂停，当前商品未继续操作，已完成 ${index}/${total} 件` });
           return;
         }
-        if (requiresHuman || error.code === 'PUBLISH_ACCOUNT_LIMIT') {
+        if (requiresHuman || environmentNotReady) {
           store.patchJob(jobId, {
             status: 'paused', progress: index, total,
             message: `已暂停：${product.title} - ${message}。处理后可继续`
@@ -1082,6 +1083,25 @@ app.post('/api/jobs/:id/pause', (request, response, next) => {
   const updated = store.patchJob(job.id, { status, message });
   if (status === 'pause_requested' && job.type === 'publish') publisher.requestPublishStop(job.id);
   response.json(updated);
+});
+
+app.post('/api/jobs/:id/collect-discovered', (request, response, next) => {
+  try {
+    const job = store.read((state) => state.jobs.find((item) => item.id === request.params.id));
+    if (!job || job.type !== 'collect' || !job.metadata?.groupId) throw Object.assign(new Error('没有找到店铺采集任务'), { status: 404 });
+    if (job.status !== 'paused') throw Object.assign(new Error('请先暂停并等待当前页读取结束'), { status: 409 });
+    const disk = new CollectionCheckpoint(dataDir, job.id);
+    const checkpoint = disk.read();
+    if (checkpoint?.stage !== 'listing' || !checkpoint.products.length) throw Object.assign(new Error('当前没有可转为详情采集的已发现商品'), { status: 409 });
+    // Persist the stage before queueing. A restart must never resume pagination
+    // after the user explicitly chose to collect only the discovered products.
+    disk.write({ ...checkpoint, stage: 'detail', discoveredOnly: true });
+    const updated = store.patchJob(job.id, { status: 'queued', collectionStage: 'detail',
+      discovered: checkpoint.products.length, total: checkpoint.products.length, progress: checkpoint.completedIds.length,
+      message: `停止继续翻页，开始采集已发现的 ${checkpoint.products.length} 件商品` });
+    response.json(updated);
+    setImmediate(() => queueCollection(job.id));
+  } catch (error) { next(error); }
 });
 
 app.post('/api/jobs/:id/resume', (request, response, next) => {

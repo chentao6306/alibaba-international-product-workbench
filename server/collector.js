@@ -329,7 +329,7 @@ export class ShopCollector {
       let needsPager = checkpoint?.needsPager || (international && /\/product(?:group)?list(?:[-./]|$)/i.test(new URL(groupUrl).pathname));
       const shouldStop = () => typeof options.shouldStop === 'function' && options.shouldStop();
       const paused = () => Object.assign(new Error('COLLECT_PAUSED'), { code: 'COLLECT_PAUSED' });
-      const save = (stage) => persist({ version: 1, scope, stage, nextUrl, page: pageNumber,
+      const save = (stage) => persist({ version: 1, scope, stage, nextUrl, page: pageNumber, discoveredOnly: Boolean(checkpoint?.discoveredOnly),
         visited: [...visited], needsPager, products: [...items.values()], completedIds: [...completedIds] });
       while (checkpoint?.stage !== 'detail' && nextUrl && (allPages || pageNumber < endPage)) {
         if (visited.has(nextUrl)) throw new Error(`店铺翻页重复，已读取 ${pageNumber} 页，采集未完成`);

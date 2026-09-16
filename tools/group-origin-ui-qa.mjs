@@ -16,6 +16,7 @@ store.update((state) => {
   state.collectionFolders = [{ id: 'qa', name: '相机配件' }]; state.settings.activeCollectionFolderId = 'qa';
   state.products = [{ id: 'qa-product', sourceId: '123456789', sourcePlatform: 'alibaba.com', collectionFolderId: 'qa', title: 'Gimbal Camera', origin: 'Guangdong, China', price: 100, stock: 100, categoryId: '201346401', categoryPath: ['Consumer Electronics', 'Drones Accessories'], status: 'ready', selected: true }];
   state.jobs = Array.from({ length: 23 }, (_, index) => ({ id: `job-${index}`, type: 'collect', status: index === 0 ? 'running' : index < 15 ? 'paused' : 'queued', progress: index === 0 ? 4 : 0, total: 24, metadata: { collectionFolderId: 'qa', groupName: `相机配件采集分组 ${index + 1}` }, message: index === 0 ? '正在读取详情 4/24，已保存 4 件' : '等待继续' }));
+  Object.assign(state.jobs[1], { collectionStage: 'listing', discovered: 48, total: 0 });
 });
 const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
@@ -70,6 +71,17 @@ try {
     }
   }
   await page.setViewportSize({ width: 1440, height: 1000 });
+  const discoveredButton = page.getByRole('button', { name: '采集已发现的 48 件商品', exact: true });
+  await discoveredButton.waitFor();
+  let discoveryRequested = false;
+  await page.route('**/api/jobs/job-1/collect-discovered', async (route) => {
+    discoveryRequested = true;
+    store.patchJob('job-1', { status: 'running', collectionStage: 'detail', total: 48 });
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
+  });
+  await discoveredButton.click();
+  await discoveredButton.waitFor({ state: 'hidden' });
+  assert.equal(discoveryRequested, true);
   await page.locator('.sidebar nav button').filter({ hasText: '商品工作台' }).click();
   await page.getByTitle('编辑完整资料').click();
   await page.locator('.editor-tabs').getByRole('button', { name: '物流信息', exact: true }).click();

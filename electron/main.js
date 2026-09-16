@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, session } from 'electron';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -9,6 +9,7 @@ import { matchesAlibabaSession } from './alibaba-identity.js';
 import { readPrivateSession, writePrivateSession } from '../server/private-session-storage.js';
 import { authorizationEndpoint } from '../server/auth-endpoint.js';
 import { showHumanVerification } from './human-verification.js';
+import { saveAccountCookies } from './seller-session.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -915,8 +916,10 @@ globalThis.__KUA_YIPU_SELLER_BRIDGE = {
   humanVerification: handleAlibabaHumanVerification,
   sync: async () => {
     const seller = currentAlibabaWindow({ preferPosting: true });
-    if (!isWindowAlive(seller)) return false;
-    await saveAlibabaSession(seller);
+    if (isWindowAlive(seller)) await saveAlibabaSession(seller);
+    else {
+      return saveAccountCookies(currentSession?.verified && currentSession.username, session, alibabaCookiesFile());
+    }
     return true;
   },
   bind: inspectAndHideAlibabaSellerWindow,
