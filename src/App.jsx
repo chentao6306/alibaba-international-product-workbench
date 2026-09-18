@@ -12,6 +12,7 @@ import { useAnnouncements, AnnouncementPopup, AnnouncementsView } from './Announ
 import CollectionFolders from './CollectionFolders.jsx';
 import CollectionTasks from './CollectionTasks.jsx';
 import OriginCountrySelect from './OriginCountrySelect.jsx';
+import { productOrigin, synchronizeProductOrigin } from '../server/origin-country.js';
 import AuthorizationConnection from './AuthorizationConnection.jsx';
 import { publishCounts } from '../server/publish-progress.js';
 import { createPublishedReferenceTemplate } from '../server/publish-reference.js';
@@ -560,7 +561,11 @@ function BatchEditor({ products, references, onClose, onSaved, notify }) {
       if (form.skuPrice !== '' || form.skuStock !== '') patch.skuTransform = { price: form.skuPrice === '' ? null : Number(form.skuPrice), stock: form.skuStock === '' ? null : Number(form.skuStock) };
       if (form.fobMinPrice !== '' || form.fobMaxPrice !== '') patch.fobPrice = { minPrice: Number(form.fobMinPrice || 0), maxPrice: Number(form.fobMaxPrice || 0), currencySymbol: '$' };
       if (Array.isArray(form.skuRows) && form.skuRows.length) patch.skuRows = form.skuRows;
-    } else if (tab === 'logistics') patch.packaging = { weight: form.weight === '' ? null : Number(form.weight), length: form.length === '' ? null : Number(form.length), width: form.width === '' ? null : Number(form.width), height: form.height === '' ? null : Number(form.height) };
+    } else if (tab === 'logistics') {
+      const packaging = Object.fromEntries(['weight', 'length', 'width', 'height'].filter((key) => form[key] !== '').map((key) => [key, Number(form[key])]));
+      if (Object.keys(packaging).length) patch.packaging = packaging;
+      if (form.origin) patch.origin = form.origin;
+    }
     else if (tab === 'description' || tab === 'detail') patch.descriptionPrefix = form.description;
     else if (tab === 'attributes' || tab === 'custom') patch.attributeOperation = { target: tab === 'custom' ? 'customAttributes' : 'attributes', mode: form.attrMode, item: { name: form.attrName.trim(), value: form.attrValue.trim(), source: 'batch-edit' } };
     else if (tab === 'specs') patch.variantOperation = { mode: form.specMode, group: { name: form.specName.trim(), options: form.specOption.split(/[,，]/).map((v) => v.trim()).filter(Boolean), source: 'batch-edit' } };
@@ -583,11 +588,11 @@ function BatchEditor({ products, references, onClose, onSaved, notify }) {
   function previewFor(product) {
     if (tab === 'category') return { current: currentCategory(product), next: form.category || '请选择新类目' };
     if (tab === 'basic') return {
-      current: `${product.title || '未命名商品'}${form.origin ? ` · 产地：${product.origin || '未设置'}` : ''}`,
+      current: `${product.title || '未命名商品'}${form.origin ? ` · 产地：${productOrigin(product) || '未设置'}` : ''}`,
       next: `${form.titlePrefix || ''}${product.title || '未命名商品'}${form.titleSuffix || ''}${form.origin ? ` · 产地：${form.origin}` : ''}`
     };
     if (tab === 'trade') return { current: `价格 ${product.price || '-'} · 库存 ${product.stock ?? '-'} · 起订 ${product.moq || '-'}`, next: `价格 ${(Number(product.price || 0) * (1 + Number(form.pricePercent || 0) / 100) + Number(form.priceFixed || 0)).toFixed(2)} · 库存 ${form.stock || product.stock || '-'} · 起订 ${form.moq || product.moq || '-'}` };
-    if (tab === 'logistics') return { current: `重量 ${product.packaging?.weight || '-'}kg · ${product.packaging?.length || '-'}×${product.packaging?.width || '-'}×${product.packaging?.height || '-'}cm`, next: `重量 ${form.weight || product.packaging?.weight || '-'}kg · ${form.length || product.packaging?.length || '-'}×${form.width || product.packaging?.width || '-'}×${form.height || product.packaging?.height || '-'}cm` };
+    if (tab === 'logistics') return { current: `原产地 ${productOrigin(product) || '-'} · 重量 ${product.packaging?.weight || '-'}kg · ${product.packaging?.length || '-'}×${product.packaging?.width || '-'}×${product.packaging?.height || '-'}cm`, next: `原产地 ${form.origin || productOrigin(product) || '-'} · 重量 ${form.weight || product.packaging?.weight || '-'}kg · ${form.length || product.packaging?.length || '-'}×${form.width || product.packaging?.width || '-'}×${form.height || product.packaging?.height || '-'}cm` };
     if (tab === 'images') return { current: `主图 ${(product.mainImages || product.images || []).length} 张 · 详情图 ${(product.detailImages || []).length} 张`, next: form.imageAction === 'copy-detail' ? `主图 ${(product.mainImages || product.images || []).length} 张 · 详情图将复制主图` : '去重、排序并清理空地址' };
     if (tab === 'specs') return { current: (product.variantGroups || []).map((g) => `${g.name}: ${(g.options || []).join('/')}`).join('；') || '未设置规格', next: form.specName && form.specOption ? `${form.specName}: ${form.specOption}` : '等待填写新规格' };
     if (tab === 'attributes' || tab === 'custom') {
@@ -631,15 +636,15 @@ function BatchEditor({ products, references, onClose, onSaved, notify }) {
     <div className="batch-tabs">{tabs.map(([value]) => <button key={value} className={tab === value ? 'active' : ''} onClick={() => setTab(value)}>{tabLabels[value]?.[locale === 'en' ? 1 : 0] || value}</button>)}</div>
     <div className="batch-body">
       {tab === 'trade' && products.some((product) => product.currencySymbol !== '$') && <label className="batch-field"><span>换算汇率（1 原币 = 多少美元）</span><input type="number" min="0.000001" step="any" value={usdRate} onChange={(event) => setUsdRate(event.target.value)} />{usdRate && <small>仅换算尚未转为美元的商品</small>}</label>}
-      {tab === 'basic' && <>{field('标题前缀', 'titlePrefix')}{field('标题后缀', 'titleSuffix')}{field('统一副标题', 'subtitle')}{field('关键词（逗号或换行分隔）', 'keywords', 'text', true)}<label className="batch-field"><span>产地（国家）</span><OriginCountrySelect value={form.origin} emptyLabel="保持原产地" onChange={(origin) => setForm((current) => ({ ...current, origin }))} /></label>{field('品牌', 'brand')}{field('产品类型', 'productType')}</>}
+      {tab === 'basic' && <>{field('标题前缀', 'titlePrefix')}{field('标题后缀', 'titleSuffix')}{field('统一副标题', 'subtitle')}{field('关键词（逗号或换行分隔）', 'keywords', 'text', true)}<label className="batch-field"><span>原产地（国家）</span><OriginCountrySelect value={form.origin} emptyLabel="保持原产地" onChange={(origin) => setForm((current) => ({ ...current, origin }))} /></label>{field('品牌', 'brand')}{field('产品类型', 'productType')}</>}
       {tab === 'category' && <><label className="batch-field"><span>选择新产品类目</span><CategorySelect path={form.category} includeId onChange={(option) => setForm((v) => ({ ...v, category: option.path, categoryId: option.id || '' }))} /></label><label className="batch-field"><span>类目 ID（由选择或发布页绑定生成）</span><input value={form.categoryId} readOnly placeholder="选择类目后自动填充" /></label><div className="batch-actions"><button type="button" className="secondary-button" disabled={!references.length} onClick={() => setReferenceOpen(true)}><ClipboardList size={16} />引用成功商品资料</button><small className="batch-help">选择成功商品，引用其类目、商品属性和完整规格。</small></div></>}
       {tab === 'trade' && <><label className="batch-field"><span>定价模式</span><select value={form.priceMode || ''} onChange={update('priceMode')}><option value="">保持原模式</option><option value="fob-range">FOB区间价格</option><option value="fob-tier">FOB阶梯价格</option><option value="quantity-tier">数量阶梯价格</option><option value="sku">SKU定价</option></select></label>{field('价格调整比例（%）', 'pricePercent', 'number')}{field('统一加减金额', 'priceFixed', 'number')}{field('统一库存', 'stock', 'number')}{field('统一起订量', 'moq', 'number')}{field('统一交期（天）', 'deliveryDays', 'number')}<div className="form-grid">{field('FOB最低价', 'fobMinPrice', 'number')}{field('FOB最高价', 'fobMaxPrice', 'number')}</div>{field('SKU统一价格', 'skuPrice', 'number')}{field('SKU统一库存', 'skuStock', 'number')}<div className="batch-actions"><button type="button" className="secondary-button" onClick={exportSku}>导出 SKU Excel</button><label className="file-button secondary-button">导入 SKU Excel<input type="file" accept=".xlsx,.xls,.csv,.txt" onChange={importSku} /></label></div></>}
-      {tab === 'logistics' && <>{field('毛重（kg）', 'weight', 'number')}{field('包装长（cm）', 'length', 'number')}{field('包装宽（cm）', 'width', 'number')}{field('包装高（cm）', 'height', 'number')}</>}
+      {tab === 'logistics' && <><label className="batch-field"><span>原产地（国家）</span><OriginCountrySelect value={form.origin} emptyLabel="保持原产地" onChange={(origin) => setForm((current) => ({ ...current, origin }))} /></label>{field('毛重（kg）', 'weight', 'number')}{field('包装长（cm）', 'length', 'number')}{field('包装宽（cm）', 'width', 'number')}{field('包装高（cm）', 'height', 'number')}</>}
       {(tab === 'description' || tab === 'detail' || tab === 'service') && field('批量追加内容', 'description', 'text', true)}
       {(tab === 'attributes' || tab === 'custom') && <><label className="batch-field"><span>修改方式</span><select value={form.attrMode} onChange={update('attrMode')}><option value="upsert">更新同名属性，不存在则新增</option><option value="append">追加属性</option><option value="replace">清空后只保留本属性</option></select></label>{field('属性名称', 'attrName')}{field('属性值', 'attrValue')}</>}
       {tab === 'specs' && <><label className="batch-field"><span>修改方式</span><select value={form.specMode} onChange={update('specMode')}><option value="upsert">更新同名规格，不存在则新增</option><option value="append">追加规格</option><option value="replace">清空后只保留本规格</option></select></label>{field('规格名称', 'specName')}{field('规格选项（逗号分隔）', 'specOption')}</>}
       {tab === 'images' && <><p className="batch-help">会对所有已选商品的主图和详情图执行批量处理，并保留原始来源快照。</p><button className="secondary-button" onClick={() => applyImage('dedupe')}>图片去重并排序</button><button className="secondary-button" onClick={() => applyImage('copy-detail')}>主图复制为详情图</button><button className="secondary-button" onClick={() => applyImage('clean')}>清理空图片</button><button className="secondary-button danger-button" onClick={() => applyImage('clear-main')}>清空全部主图</button><div className="batch-slot-actions"><span>批量删除指定主图：</span>{[1,2,3,4,5,6].map((slot) => <button key={slot} className="secondary-button danger-button" onClick={() => applyImage(`delete-main-${slot}`)}>主图 {slot}</button>)}</div></>}
-      {tab === 'regional' && <><label className="batch-field"><span>国家/地区</span><OriginCountrySelect ariaLabel="定价国家/地区" value={form.country} onChange={(country) => setForm((current) => ({ ...current, country }))} /></label>{field('该地区价格', 'countryPrice', 'number')}</>}
+      {tab === 'regional' && <><label className="batch-field"><span>销售国家/地区</span><OriginCountrySelect ariaLabel="定价国家/地区" value={form.country} onChange={(country) => setForm((current) => ({ ...current, country }))} /></label>{field('该地区价格', 'countryPrice', 'number')}</>}
     </div>
     <div className="batch-preview"><div className="batch-preview-title"><strong>修改预览</strong><span>先确认每个商品的当前值和修改后值，再点击保存</span></div><div className="batch-preview-table"><div className="batch-preview-head"><span>商品名称</span><span>旧值-修改前</span><span>新值-修改后</span></div>{products.map((product) => { const row = previewFor(product); return <div className="batch-preview-row" key={product.id}><strong title={product.title}>{product.title || '未命名商品'}</strong><span title={row.current}>{row.current}</span><span className={row.next.includes('等待') || row.next.includes('请选择') ? 'pending' : ''} title={row.next}>{row.next}</span></div>; })}</div></div>
     <div className="drawer-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" onClick={apply}><Save size={17} />应用到 {products.length} 件商品</button></div>
@@ -662,7 +667,7 @@ function ProductEditor({ product, onClose, onSaved, notify }) {
     variantGroups: (product.variantGroups || []).map((group) => ({ ...group, options: [...(group.options || [])] })),
     skus: (product.skus || []).map((sku) => ({ ...sku, attributes: { ...(sku.attributes || {}) } })),
     priceTiers: (product.priceTiers || []).map((tier) => ({ ...tier })), packaging: { ...(product.packaging || {}) },
-    origin: product.origin || '', model: product.model || '', brand: product.brand || '', productType: product.productType || '',
+    origin: productOrigin(product) || product.origin || '', model: product.model || '', brand: product.brand || '', productType: product.productType || '',
     salesUnit: product.salesUnit || 'Piece', paymentMethod: product.paymentMethod || '', priceMode: product.priceMode || 'quantity-tier',
     videoUrl: product.videoUrl || '', deliveryDays: String(product.deliveryTime?.[1]?.[1] || '').match(/\d+/)?.[0] || '7',
     freightTemplate: product.freightTemplate || '', services: product.services || {}, certificates: (product.certificates || []).map((item) => ({ ...item })),
@@ -672,7 +677,10 @@ function ProductEditor({ product, onClose, onSaved, notify }) {
   const [saving, setSaving] = useState(false);
   const [tab, setTab] = useState('basic');
   const update = (key) => (event) => setForm((value) => ({ ...value, [key]: event.target.value }));
-  const updateArray = (key, index, value) => setForm((current) => ({ ...current, [key]: current[key].map((item, itemIndex) => itemIndex === index ? value : item) }));
+  const updateArray = (key, index, value) => setForm((current) => {
+    const patch = { [key]: current[key].map((item, itemIndex) => itemIndex === index ? value : item) };
+    return { ...current, ...(['attributes', 'customAttributes'].includes(key) ? synchronizeProductOrigin(current, patch) : patch) };
+  });
   const removeArray = (key, index) => setForm((current) => ({ ...current, [key]: current[key].filter((_, itemIndex) => itemIndex !== index) }));
   function importLocalImages(event, target = 'mainImages', max = target === 'mainImages' ? 6 : 30) {
     const files = [...(event.target.files || [])].filter((file) => /^image\//i.test(file.type));
@@ -785,7 +793,7 @@ function ProductEditor({ product, onClose, onSaved, notify }) {
       </div>
       <div className={`editor-tab-pane ${tab === 'logistics' ? '' : 'hidden'}`} data-editor-tab="logistics">
       <h3 className="edit-section-title">产品与包装</h3>
-      <div className="form-grid"><label><span>产品类型</span><input value={form.productType} onChange={update('productType')} /></label><label><span>品牌</span><input value={form.brand} onChange={update('brand')} /></label><label><span>型号</span><input value={form.model} onChange={update('model')} /></label><label><span>产地（国家）</span><OriginCountrySelect value={form.origin} onChange={(origin) => setForm((current) => ({ ...current, origin }))} /></label></div>
+      <div className="form-grid"><label><span>产品类型</span><input value={form.productType} onChange={update('productType')} /></label><label><span>品牌</span><input value={form.brand} onChange={update('brand')} /></label><label><span>型号</span><input value={form.model} onChange={update('model')} /></label><label><span>原产地（国家）</span><OriginCountrySelect value={form.origin} onChange={(origin) => setForm((current) => ({ ...current, ...synchronizeProductOrigin(current, { origin }) }))} /></label></div>
       <div className="form-grid packaging-grid">{[['length', '包装长 (cm)'], ['width', '包装宽 (cm)'], ['height', '包装高 (cm)'], ['weight', '包装重量 (kg)']].map(([key, label]) => <label key={key}><span>{label}</span><input type="number" min="0" step="any" value={form.packaging[key] || ''} onChange={(event) => setForm((value) => ({ ...value, packaging: { ...value.packaging, [key]: event.target.value } }))} /></label>)}</div>
       <label><span>运费模板</span><input value={form.freightTemplate || ''} onChange={update('freightTemplate')} /></label>
       </div>

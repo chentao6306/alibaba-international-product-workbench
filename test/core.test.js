@@ -777,7 +777,7 @@ test('does not block products when Alibaba publishes a source range but no per-S
 test('reports incomplete product data before draft or publishing', () => {
   assert.deepEqual(validateProductData({ title: '', price: 0 }), [
     '缺少商品标题', '销售价格无效', '主图不足 4 张（当前 0 张）', '缺少详情图片',
-    '商品属性不足 2 项', '缺少产地', '缺少包装重量', '缺少商品详情'
+    '缺少商品详情'
   ]);
 });
 

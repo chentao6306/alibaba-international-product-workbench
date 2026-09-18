@@ -7,7 +7,7 @@ export const REQUIRED_ATTRIBUTE_ALIASES = [
   ['蜂窝频段', 'cellular band', 'frequency band', 'network band', 'band'],
   ['操作系统', 'operating system', 'operation system', 'os'],
   ['手机中央处理器', 'cpu', 'processor', 'central processing unit'],
-  ['功能', 'function', 'feature', 'features', '功能/特性', '特性'],
+  ['功能', 'function', 'feature', 'features', '功能/特性', '特性', '特征'],
   ['端口', 'port', 'interface', '接口'],
   ['处理器品牌', 'processor brand'],
   ['处理器型号', 'processor type', 'processor model'],
@@ -21,7 +21,7 @@ export const REQUIRED_ATTRIBUTE_ALIASES = [
   ['材质', 'material', '材料'],
   ['适用型号', 'compatible model', 'model compatibility'],
   ['类型', 'type', 'product type', '产品类型'],
-  ['产地', 'place of origin', 'origin'],
+  ['产地', '原产地', 'place of origin', 'origin', 'country of origin', 'country/region of manufacture'],
   ['品牌名称', 'brand name', 'brand'],
   ['适用品牌', 'compatible brand'],
   ['颜色', 'color', 'colour'],
@@ -38,10 +38,19 @@ export const REQUIRED_ATTRIBUTE_ALIASES = [
   ['视频采集分辨率', 'video capture resolution'],
   ['运行内存', 'ram'],
   ['存储容量', 'storage capacity', 'rom'],
-  ['插头', 'plug', 'plug type']
+  ['插头', 'plug', 'plug type'],
+  ['年龄范围', '年龄段', '适用年龄', 'age range', 'age group', 'applicable age', 'recommended age'],
+  ['动物', 'animal', 'animals'],
+  ['性别', 'gender'],
+  ['是否可定制', 'is customized', 'is_customized', 'customizable', 'customised', 'customized'],
+  ['远程距离', '遥控距离', 'remote distance', 'remote control distance', 'control distance'],
+  ['套装包含', '套装包括', 'package includes', 'package included', 'set includes'],
+  ['组合产品数量', 'number of pieces', 'number of items in set', 'quantity of items in set'],
+  ['场景', '适用场景', 'scene', 'scenes', 'applicable scene', 'occasion'],
+  ['用途', 'use', 'usage', 'application']
 ];
 
-const normalize = (value) => String(value || '').toLowerCase().replace(/[\s_\-/]+/g, ' ').trim();
+const normalize = (value) => String(value || '').normalize('NFKC').toLowerCase().replace(/^[*＊]\s*|\s*[:：]$/g, '').replace(/[\s_\-/]+/g, ' ').trim();
 export function requiredAttributeKey(value) {
   const key = normalize(value);
   const group = REQUIRED_ATTRIBUTE_ALIASES.find((aliases) => aliases.some((alias) => normalize(alias) === key));

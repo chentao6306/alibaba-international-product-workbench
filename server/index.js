@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
+import { needsSourceAttributeRefresh } from './category-attributes.js';
 import { fileURLToPath } from 'node:url';
 import { deleteWorkspaceEntities, findWorkspaceJobs, JsonStore, newId } from './store.js';
 import { ShopCollector, collectionPageRange } from './collector.js';
@@ -14,7 +15,7 @@ import {
   sanitizeCollectedProduct,
   SellerPublisher
 } from './publisher.js';
-import { applyPublishedProductReference, copyMissingProductData, createPublishSnapshot, findAndReplaceProduct, recordProductMutation, syncProductModel } from './product-model.js';
+import { applyPublishedProductReference, copyMissingProductData, createPublishSnapshot, findAndReplaceProduct, mergeSourceDataForPublish, recordProductMutation, syncProductModel } from './product-model.js';
 import { publishCounts, recordPublishOutcome } from './publish-progress.js';
 import { buildAlibabaPublishUrl, canRefreshSourceCategory, createPublishPlan, normalizeCategoryId, productCategory, publishBindings, refreshedSourceCategoryPatch, rememberPublishBinding, resolvePublishRoute } from './category-routing.js';
 import { createPublishedReferenceTemplate, findPublishedReferenceRepair } from './publish-reference.js';
@@ -886,17 +887,17 @@ async function runPublishJob(jobId) {
       });
       store.patchJob(jobId, { status: 'running', progress: index, total, currentProductId: product.id, message: `正在处理 ${index + 1}/${total}：${product.title}` });
       try {
-        if (sourcePlatform(product) === 'alibaba.com' && (!hasCompleteSourceData(product) || !resolvePublishRoute(product, state.settings).url)) {
+        if (sourcePlatform(product) === 'alibaba.com' && (!hasCompleteSourceData(product) || needsSourceAttributeRefresh(product) || !resolvePublishRoute(product, state.settings).url)) {
           store.patchJob(jobId, { message: `正在补全商品资料 ${index + 1}/${total}：${product.title}` });
           const [enriched] = await withVerificationContext({
             onWaiting: (message) => store.patchJob(jobId, { message }),
             shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status))
           }, () => collector.enrichProducts([product]));
+          product = preparePublishProduct(mergeSourceDataForPublish(product, enriched));
           store.update((draft) => {
             const target = draft.products.find((item) => item.id === product.id);
-            if (target) Object.assign(target, enriched, { status: 'ready', updatedAt: new Date().toISOString() });
+            if (target) Object.assign(target, product, { status: 'ready', updatedAt: new Date().toISOString() });
           });
-          product = { ...product, ...enriched };
         }
         const settings = store.read((state) => state.settings);
         if (['pause_requested', 'paused'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status))) {
@@ -981,7 +982,7 @@ async function runPublishJob(jobId) {
         }
         const message = userFacingError(error);
         const requiresHuman = error.code === 'LOGIN_REQUIRED' || /captcha|verify|人机验证|安全验证|滑块|登录(?:状态)?(?:已)?失效|人工验证/i.test(message);
-        const environmentNotReady = ['PUBLISH_EDITOR_NOT_READY', 'PUBLISH_FORM_NOT_READY', 'PUBLISH_FIELD_NOT_READY', 'PUBLISH_BROWSER_NOT_READY', 'PUBLISH_ACCOUNT_LIMIT', 'PUBLISH_CATEGORY_INVALID'].includes(error.code);
+        const environmentNotReady = ['PUBLISH_EDITOR_NOT_READY', 'PUBLISH_FORM_NOT_READY', 'PUBLISH_FIELD_NOT_READY', 'PUBLISH_BROWSER_NOT_READY', 'PUBLISH_LANGUAGE_NOT_READY', 'PUBLISH_ACCOUNT_LIMIT', 'PUBLISH_CATEGORY_INVALID'].includes(error.code);
         const currentJobStatus = store.read((state) => state.jobs.find((item) => item.id === jobId)?.status);
         if (currentJobStatus === 'cancelled') return;
         const pauseRequested = ['pause_requested', 'paused'].includes(currentJobStatus) || ['PUBLISH_PAUSED', 'COLLECT_PAUSED'].includes(error.code);

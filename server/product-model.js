@@ -1,6 +1,8 @@
 import crypto from 'node:crypto';
 import { crossPlatformPublishErrors, sourcePlatform } from './source-platform.js';
 import { requiredAttributeKey } from './publish-reference.js';
+import { attributeId } from './category-attributes.js';
+import { synchronizeProductOrigin } from './origin-country.js';
 
 export const PRODUCT_SCHEMA_VERSION = 5;
 
@@ -69,6 +71,48 @@ export function findAndReplaceProduct(product, search, replacement, options = {}
 
 function clone(value) {
   return value == null ? value : structuredClone(value);
+}
+
+// Automatic preflight enrichment fills missing source material without
+// replacing the user's prices or the specification/category template.
+export function mergeSourceDataForPublish(target, source) {
+  if (target.sourceId && source.sourceId && String(target.sourceId) !== String(source.sourceId)) {
+    throw new Error('补全资料返回了不同的来源商品，已停止上架');
+  }
+  const next = { ...clone(source), ...clone(target) };
+  const templateFields = new Set(['categoryId', 'categoryPath', 'attributes', 'origin', 'variantGroups', 'skus']);
+  for (const field of ['sourceCategoryId', 'sourceCategoryPath', 'categoryId', 'categoryPath', 'attributes', 'origin',
+    'description', 'descriptionHtml', 'structuredDescription', 'mainImage', 'mainImages', 'images', 'detailImages',
+    'packaging', 'stock', 'price', 'variantGroups', 'skus']) {
+    if (target.categoryReference && templateFields.has(field)) continue;
+    if (isBlank(target[field]) && !isBlank(source[field])) next[field] = clone(source[field]);
+  }
+  // Recollection can add missing properties and their stable IDs. Keep
+  // existing edits; never mix original category attributes into a reference.
+  if (!target.categoryReference) {
+    next.attributes = clone(target.attributes || []);
+    for (const item of source.attributes || []) {
+      const existing = next.attributes.find((row) => attributeId(row) && attributeId(item)
+        ? attributeId(row) === attributeId(item) : requiredAttributeKey(row.name) === requiredAttributeKey(item.name));
+      if (!existing) next.attributes.push(clone(item));
+      else if (isBlank(existing.value)) Object.assign(existing, clone(item));
+      else if (JSON.stringify(existing.value) === JSON.stringify(item.value)) {
+        if (!attributeId(existing) && attributeId(item)) existing.id = attributeId(item);
+        if (!existing.valueIds && item.valueIds) existing.valueIds = clone(item.valueIds);
+      }
+    }
+    if (source.sourceAttributeSchemaVersion) next.sourceAttributeSchemaVersion = source.sourceAttributeSchemaVersion;
+  }
+  next.packaging = { ...(source.packaging || {}), ...(target.packaging || {}) };
+  for (const [field, value] of Object.entries(source.packaging || {})) {
+    if (isBlank(next.packaging[field])) next.packaging[field] = clone(value);
+  }
+  if ((target.mainImages || target.images || []).length < 4) {
+    next.mainImages = [...new Set([...(target.mainImages || target.images || []), ...(source.mainImages || source.images || [])])];
+    next.images = [...next.mainImages];
+    next.mainImage = next.mainImages[0] || next.mainImage;
+  }
+  return next;
 }
 
 export function copyMissingProductData(target, reference) {
@@ -383,8 +427,8 @@ export function auditProduct(product) {
   if (!list(product.keywords).length) add('basic.keywords.missing', 'basic', 'warning', 'keywords', '未采集商品关键词');
   if (mainImages.length < 4) add('media.main.insufficient', 'media', 'error', 'mainImages', `主图不足4张（当前${mainImages.length}张）`);
   if (!detailImages.length) add('media.detail.missing', 'media', 'error', 'detailImages', '缺少详情图片');
-  if (attributes.length < 2) add('attributes.insufficient', 'attributes', 'error', 'attributes', `商品属性不足2项（当前${attributes.length}项）`);
-  if (!text(product.origin)) add('attributes.origin.missing', 'attributes', 'error', 'origin', '缺少产地');
+  if (attributes.length < 2) add('attributes.insufficient', 'attributes', 'warning', 'attributes', `商品属性较少（当前${attributes.length}项），上架时按类目核对必填项`);
+  if (!text(product.origin)) add('attributes.origin.missing', 'attributes', 'warning', 'origin', '缺少产地，上架时按类目核对');
   if (groups.length && !skus.length) add('sku.rows.missing', 'variants', 'error', 'skus', '存在规格但缺少SKU明细');
   const expectedSkuCount = groups.reduce((count, group) => count * Math.max(1, list(group.options).length), groups.length ? 1 : 0);
   const sourceSkuCount = Number(product.sourceStructuredEvidence?.skuCount || product.dataCompleteness?.structuredSkus || 0);
@@ -416,7 +460,7 @@ export function auditProduct(product) {
   if (fobTiers.some((tier, index) => index > 0 && Number(tier.minQuantity) <= Number(fobTiers[index - 1].minQuantity))) add('trade.fob.tiers.order', 'trade', 'error', 'fobPrice', 'FOB阶梯起订量必须严格递增');
   if (tiers.some((tier, index) => index > 0 && Number(tier.minQuantity) <= Number(tiers[index - 1].minQuantity))) add('trade.tiers.order', 'trade', 'error', 'priceTiers', '阶梯价起订量必须严格递增');
   if (!text(product.salesUnit)) add('trade.unit.missing', 'trade', 'warning', 'salesUnit', '缺少计量单位');
-  if (!positive(packaging.weight)) add('logistics.weight.missing', 'logistics', 'error', 'packaging.weight', '缺少包装重量');
+  if (!positive(packaging.weight)) add('logistics.weight.missing', 'logistics', 'warning', 'packaging.weight', '缺少包装重量，按发布页要求处理');
   if (!positive(packaging.length) || !positive(packaging.width) || !positive(packaging.height)) add('logistics.size.missing', 'logistics', 'warning', 'packaging', '包装长宽高不完整');
   if (!list(product.deliveryTime).length) add('logistics.lead.missing', 'logistics', 'warning', 'deliveryTime', '缺少发货期');
   if (!text(product.description) && !text(product.descriptionHtml)) add('description.missing', 'description', 'error', 'descriptionHtml', '缺少商品详情');
@@ -472,6 +516,8 @@ export function syncProductModel(product, options = {}) {
 
 export function recordProductMutation(product, patch, context = {}) {
   const before = snapshotFields(product);
+  patch = synchronizeProductOrigin(product, patch);
+  if (patch.packaging && typeof patch.packaging === 'object') patch = { ...patch, packaging: { ...product.packaging, ...patch.packaging } };
   Object.assign(product, patch);
   product.updatedAt = nowIso();
   product.auditTrail = list(product.auditTrail);

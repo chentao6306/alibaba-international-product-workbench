@@ -15,6 +15,8 @@ const store = new JsonStore(path.join(root, 'workspace.json'));
 store.update((state) => {
   state.collectionFolders = [{ id: 'qa', name: '相机配件' }]; state.settings.activeCollectionFolderId = 'qa';
   state.products = [{ id: 'qa-product', sourceId: '123456789', sourcePlatform: 'alibaba.com', collectionFolderId: 'qa', title: 'Gimbal Camera', origin: 'Guangdong, China', price: 100, stock: 100, categoryId: '201346401', categoryPath: ['Consumer Electronics', 'Drones Accessories'], status: 'ready', selected: true }];
+  state.products[0].attributes = [{ id: '100', name: 'Place of Origin', value: 'Guangdong, China', valueIds: { 'Guangdong, China': 'CN' } }];
+  state.products[0].packaging = { weight: '1', length: '30', width: '20', height: '10' };
   state.jobs = Array.from({ length: 23 }, (_, index) => ({ id: `job-${index}`, type: 'collect', status: index === 0 ? 'running' : index < 15 ? 'paused' : 'queued', progress: index === 0 ? 4 : 0, total: 24, metadata: { collectionFolderId: 'qa', groupName: `相机配件采集分组 ${index + 1}` }, message: index === 0 ? '正在读取详情 4/24，已保存 4 件' : '等待继续' }));
   Object.assign(state.jobs[1], { collectionStage: 'listing', discovered: 48, total: 0 });
 });
@@ -89,11 +91,30 @@ try {
   await page.getByRole('button', { name: '保存修改', exact: true }).click();
   await page.getByText('商品修改已保存', { exact: true }).waitFor();
   assert.equal(store.read().products[0].origin, 'Japan');
+  assert.equal(store.read().products[0].attributes[0].value, 'Japan');
+  assert.equal(store.read().products[0].attributes[0].valueIds, undefined);
   await page.getByRole('button', { name: '批量修改 1', exact: true }).click();
   await page.getByLabel('产地国家').selectOption('United States');
   await page.getByRole('button', { name: '应用到 1 件商品', exact: true }).click();
   await page.getByText('批量修改已应用', { exact: true }).waitFor();
   assert.equal(store.read().products[0].origin, 'United States');
+  assert.equal(store.read().products[0].attributes[0].value, 'United States');
+  await page.getByRole('button', { name: '批量修改 1', exact: true }).click();
+  await page.locator('.batch-tabs').getByRole('button', { name: '物流信息', exact: true }).click();
+  await page.getByLabel('产地国家').selectOption('China');
+  await page.getByLabel('毛重（kg）', { exact: true }).fill('2');
+  for (const width of [1440, 430]) {
+    await page.setViewportSize({ width, height: 932 });
+    await page.getByLabel('产地国家').scrollIntoViewIfNeeded();
+    await page.screenshot({ path: path.join(root, `batch-origin-packaging-${width}.png`) });
+    assert.ok(await page.locator('.batch-drawer').evaluate((node) => node.scrollWidth <= node.clientWidth));
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.getByRole('button', { name: '应用到 1 件商品', exact: true }).click();
+  await page.getByText('批量修改已应用', { exact: true }).waitFor();
+  assert.equal(store.read().products[0].origin, 'China');
+  assert.equal(store.read().products[0].attributes[0].value, 'China');
+  assert.deepEqual(store.read().products[0].packaging, { weight: 2, length: '30', width: '20', height: '10' });
   await page.getByRole('button', { name: '批量修改 1', exact: true }).click();
   await page.locator('.batch-tabs').getByRole('button', { name: '国家/地区定价', exact: true }).click();
   await page.getByLabel('定价国家/地区').selectOption('Japan');
@@ -101,6 +122,8 @@ try {
   await page.getByRole('button', { name: '应用到 1 件商品', exact: true }).click();
   await page.getByText('批量修改已应用', { exact: true }).waitFor();
   assert.deepEqual(store.read().products[0].regionalPricing, { country: 'Japan', price: 120 });
+  assert.equal(store.read().products[0].origin, 'China');
+  assert.equal(store.read().products[0].attributes[0].value, 'China');
   await page.getByTitle('编辑完整资料').click();
   await page.locator('.editor-tabs').getByRole('button', { name: '物流信息', exact: true }).click();
   await page.getByLabel('产地国家').scrollIntoViewIfNeeded();

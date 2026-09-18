@@ -8,6 +8,7 @@ import { extractAlibabaDescription, extractAlibabaSourceData } from '../server/a
 import { auditProduct } from '../server/product-model.js';
 import { findChromium } from '../server/browser-runtime.js';
 import { hasCompleteSourceData, SellerPublisher } from '../server/publisher.js';
+import { SOURCE_ATTRIBUTE_SCHEMA_VERSION } from '../server/category-attributes.js';
 
 test('collects fixed USD prices without mistaking visitor currency or promotions for source prices', () => {
   const data = { globalData: { global: { productPriceCurrencySimpleName: 'CN¥' }, product: {
@@ -78,8 +79,12 @@ test('reads modern and legacy detail modules without collecting recommendation i
         <nav class="breadcrumb"><a href="https://www.alibaba.com/parent_cid123456.html">Parent</a><a href="https://www.alibaba.com/leaf_cid234567.html">Leaf</a></nav>
         <div data-testid="module-attribute-row"><span data-testid="module-attribute-name">Place of Origin</span><span data-testid="module-attribute-value">China</span></div>
         <div data-testid="module-attribute-row"><span data-testid="module-attribute-name">Material</span><span data-testid="module-attribute-value">Plastic</span></div>
+        <table><tr><td>Age Range</td><td>3-6 years</td></tr></table>
+        <dl><dt>Single gross weight</dt><dd>250 g</dd><dt>Single package size (cm)</dt><dd>30x20x10</dd></dl>
         <div data-module-name="module_recommend"><img src="https://sc04.alicdn.com/kf/unrelated.jpg_960x960.jpg"></div>
-        ${description}<script>window.detailData = ${JSON.stringify({ globalData: { product: { customPrice: { fixedDollarPrice: 23 } } }, nodeMap: { recommendations: { categoryId: 999999 }, module_description: { privateData, renderType } } })};</script>
+        ${description}<script>window.detailData = ${JSON.stringify({ globalData: { product: { customPrice: { fixedDollarPrice: 23 }, attributes: [
+          { id: 123, name: 'Animal', values: [{ id: 456, name: 'Bee' }] },
+        ] } }, nodeMap: { recommendations: { categoryId: 999999 }, module_description: { privateData, renderType } } })};</script>
         </body></html>` });
     });
     for (const module of ['module_structure_description', 'module_description', 'missing', 'structured-data-only', 'late-iframe']) {
@@ -100,6 +105,11 @@ test('reads modern and legacy detail modules without collecting recommendation i
       assert.equal(product.sourcePriceRange.minPrice, '23.00');
       assert.equal(product.sourceCategoryId, '234567');
       assert.deepEqual(product.sourceCategoryPath, ['Parent', 'Leaf']);
+      assert.equal(product.attributes.find((item) => item.name === 'Age Range').value, '3-6 years');
+      assert.deepEqual(product.attributes.find((item) => item.name === 'Animal').valueIds, { Bee: '456' });
+      assert.equal(product.origin, 'China');
+      assert.deepEqual(product.packaging, { weight: '0.25', length: '30', width: '20', height: '10' });
+      assert.equal(product.sourceAttributeSchemaVersion, SOURCE_ATTRIBUTE_SCHEMA_VERSION);
     }
   } finally {
     await browser.close();

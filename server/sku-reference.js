@@ -2,12 +2,60 @@ import { requiredAttributeKey } from './publish-reference.js';
 import { browserResourcePolicy } from './browser-resource-policy.js';
 
 const valueKey = (value) => String(value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
-const skuKey = (attributes) => JSON.stringify(Object.entries(attributes || {}).map(([name, value]) => [requiredAttributeKey(name), valueKey(value)]).sort());
+const nameKey = (name) => /^(?:socket standard|socket type|plug type|output plug|connector type|connector|插座标准|插头类型|输出插头|连接器类型)$/i.test(String(name || '').trim())
+  ? requiredAttributeKey('plug type') : requiredAttributeKey(name);
+const skuKey = (attributes) => JSON.stringify(Object.entries(attributes || {}).map(([name, value]) => [nameKey(name), valueKey(value)]).sort());
+
+export function resolveReferencedSkuRows(product, groups, { appliedGroups = [], normalizeValue = (value) => value } = {}) {
+  const mismatch = () => new Error('引用 SKU 与国际站规格组合不一致，请检查规格选项');
+  const total = groups.reduce((count, group) => count * group.options.length, groups.length ? 1 : 0);
+  if (!total || total > 5000) throw mismatch();
+  const targetNames = new Set(groups.map((group) => nameKey(group.name)));
+  const expected = new Map();
+  for (const sku of product.skus) {
+    const attributes = Object.fromEntries(Object.entries(sku.attributes || {}).map(([name, value]) => [nameKey(name), value]));
+    for (const group of appliedGroups) {
+      const sourceNames = (group.sourceGroups || [group.name]).map(nameKey);
+      if (sourceNames.some((name) => attributes[name] == null)) continue;
+      const rawValue = group.sourceGroups?.length
+        ? sourceNames.map((name) => normalizeValue(attributes[name])).join(' / ')
+        : attributes[sourceNames[0]];
+      let targetName = nameKey(group.name);
+      if (group.sourceGroups?.length && groups.length === 1) targetName = nameKey(groups[0].name);
+      if (!targetNames.has(targetName)) continue;
+      const actualValue = group.appliedValues?.[rawValue] ?? group.appliedValues?.[normalizeValue(rawValue)] ?? rawValue;
+      sourceNames.forEach((name) => delete attributes[name]);
+      attributes[targetName] = actualValue;
+    }
+    // A constant descriptive attribute may be absent from the target matrix.
+    // Only omit it when every source SKU agrees; never collapse real variants.
+    for (const name of Object.keys(attributes)) {
+      if (targetNames.has(name)) continue;
+      const values = product.skus.map((item) => Object.entries(item.attributes || {}).find(([key]) => nameKey(key) === name)?.[1]);
+      if (values.every((value) => value != null && valueKey(normalizeValue(value)) === valueKey(normalizeValue(attributes[name])))) delete attributes[name];
+    }
+    const key = skuKey(Object.fromEntries(Object.entries(attributes).map(([name, value]) => [name, normalizeValue(value)])));
+    if (expected.has(key)) throw new Error('引用 SKU 转换后出现重复规格组合，未写入商品编码和库存');
+    expected.set(key, sku);
+  }
+  const resolved = Array.from({ length: total }, (_, index) => {
+    let remainder = index;
+    const attributes = {};
+    for (let i = groups.length - 1; i >= 0; i--) {
+      attributes[groups[i].name] = normalizeValue(groups[i].options[remainder % groups[i].options.length]);
+      remainder = Math.floor(remainder / groups[i].options.length);
+    }
+    return { attributes, sku: expected.get(skuKey(attributes)) };
+  });
+  const matched = new Set(resolved.filter((row) => row.sku).map((row) => row.sku));
+  if (matched.size !== product.skus.length || resolved.filter((row) => row.sku).length !== matched.size) throw mismatch();
+  return resolved;
+}
 
 // Alibaba virtualizes the SKU body and merges repeating property cells. Its
 // header records the complete ordered options and data-row gives the absolute
 // combination index, so neither scrolling nor merged cells can shift a SKU.
-export async function fillReferencedSkuRows(page, product, fill, onProgress = () => {}, { timeoutMs = browserResourcePolicy().constrained ? 20000 : 10000 } = {}) {
+export async function fillReferencedSkuRows(page, product, fill, onProgress = () => {}, { timeoutMs = browserResourcePolicy().constrained ? 20000 : 10000, appliedGroups = [], normalizeValue } = {}) {
   if (!product.categoryReference || !product.skus?.length || !product.variantGroups?.some((group) => group.options?.length)) return { filled: 0 };
   const root = page.locator('#sku');
   const notReady = () => Object.assign(new Error('国际站引用规格表尚未完成加载，已保留商品和任务进度，未提交当前商品'), { code: 'PUBLISH_FIELD_NOT_READY', fieldName: '引用规格表' });
@@ -20,26 +68,18 @@ export async function fillReferencedSkuRows(page, product, fill, onProgress = ()
     options: [...node.querySelectorAll('.checkSelectBabel .labelText')].map((option) => option.textContent.trim()),
   })).filter((group) => group.name && group.options.length));
   const deadline = performance.now() + timeoutMs;
-  let groups = await readGroups();
-  while (!groups.length) {
-    if (performance.now() >= deadline) throw notReady();
-    await page.waitForTimeout(150);
-    groups = await readGroups();
-  }
-  const total = groups.reduce((count, group) => count * group.options.length, groups.length ? 1 : 0);
-  if (!total || total > 5000) throw new Error('引用规格表结构无法识别或组合超过 5000 行');
-  const expected = new Map(product.skus.map((sku) => [skuKey(sku.attributes), sku]));
-  const resolved = Array.from({ length: total }, (_, index) => {
-    let remainder = index;
-    const attributes = {};
-    for (let i = groups.length - 1; i >= 0; i--) {
-      attributes[groups[i].name] = groups[i].options[remainder % groups[i].options.length];
-      remainder = Math.floor(remainder / groups[i].options.length);
+  let resolved;
+  while (!resolved) {
+    const groups = await readGroups();
+    try {
+      if (!groups.length) throw notReady();
+      resolved = resolveReferencedSkuRows(product, groups, { appliedGroups, normalizeValue });
+    } catch (error) {
+      if (performance.now() >= deadline) throw error;
+      await page.waitForTimeout(150);
     }
-    return { attributes, sku: expected.get(skuKey(attributes)) };
-  });
-  const matched = new Set(resolved.filter((row) => row.sku).map((row) => row.sku));
-  if (product.skus.some((sku) => !matched.has(sku))) throw new Error('引用 SKU 与国际站规格组合不一致，请检查规格选项');
+  }
+  const total = resolved.length;
   const scroll = root.locator('.virtualized-table-scroll-wrapper');
   await scroll.evaluate((node) => { node.scrollTop = 0; node.dispatchEvent(new Event('scroll')); });
   const completed = new Set();
