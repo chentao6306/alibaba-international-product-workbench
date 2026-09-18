@@ -10,7 +10,7 @@ import { buildAlibabaPublishUrl, categoryIdFromUrl, normalizeCategoryId } from '
 import { REQUIRED_ATTRIBUTE_ALIASES, requiredAttributeKey } from './publish-reference.js';
 import { sourcePlatform, crossPlatformPublishErrors } from './source-platform.js';
 import { submitWithRepairs } from './publish-recovery.js';
-import { readPostingLogistics, logisticsControlValue, missingLogisticsFields, fillLogisticsAttributes, sourceLogisticsAttributes } from './posting-logistics.js';
+import { readPostingLogistics, logisticsControlValue, missingLogisticsFields, fillLogisticsAttributes, sourceLogisticsAttributes, capturePostingLogistics } from './posting-logistics.js';
 import { readSellerGroups, applySellerGroup } from './seller-groups.js';
 import { ImageDownloadQueue } from './image-download-queue.js';
 import { ORIGIN_COUNTRIES, originCountry, isOriginRegionAttribute, productOrigin, synchronizeProductOrigin } from './origin-country.js';
@@ -22,7 +22,7 @@ import { browserResourcePolicy } from './browser-resource-policy.js';
 import { browserStep } from './browser-step.js';
 import { userFacingError } from './browser-error.js';
 import { ensureSimplifiedChinese } from './posting-language.js';
-import { attributeId, extractAlibabaAttributes, mergeSourceAttributes, packagingFromAttributes, readAlibabaAttributeRows, readPostingAttributeSchema, sourceAttributeForField, SOURCE_ATTRIBUTE_SCHEMA_VERSION } from './category-attributes.js';
+import { attributeId, extractAlibabaAttributes, mergeSourceAttributes, packagingFromAttributes, readAlibabaAttributeRows, readPostingAttributeSchema, sourceAttributeForField, SOURCE_ATTRIBUTE_SCHEMA_VERSION, bindSourceAttributesToPostingSchema } from './category-attributes.js';
 
 const WORKBENCH_URL = 'https://i.alibaba.com/';
 const SOURCE_DESCRIPTION_SELECTOR = '[data-module-name="module_description"], [data-testid="module-description"], [data-module-name="module_structure_description"], [data-testid="module-details-structure-description"]';
@@ -701,6 +701,7 @@ export async function waitForActionResult(page, action, mode, originalUrl) {
   try {
     await requireClearPostingOverlays(page);
     const requiredAttributes = await captureCategoryAttributes(page);
+    const acceptedLogistics = await capturePostingLogistics(page);
     await action.click();
     let deadline = Date.now() + 15000;
     while (Date.now() < deadline) {
@@ -716,7 +717,7 @@ export async function waitForActionResult(page, action, mode, originalUrl) {
         throw error;
       }
       const result = classifyAlibabaActionResult({ mode, url, originalUrl, feedback });
-      if (result.succeeded) return { verifiedBy: result.verifiedBy, feedback, responses, requiredAttributes };
+      if (result.succeeded) return { verifiedBy: result.verifiedBy, feedback, responses, requiredAttributes, acceptedLogistics };
     }
     const feedback = await visibleFeedback(page);
     requireNoPolicyWarning(feedback);
@@ -731,7 +732,7 @@ export async function waitForActionResult(page, action, mode, originalUrl) {
       bodyText
     });
     if (finalResult.succeeded) {
-      return { verifiedBy: finalResult.verifiedBy, feedback, responses, requiredAttributes };
+      return { verifiedBy: finalResult.verifiedBy, feedback, responses, requiredAttributes, acceptedLogistics };
     }
     const relevant = feedback
       .filter((text) => /必填|不能为空|请填写|请输入|无效|未填写|请上传|请不要输入|非英文|至少|错误|失败|error|required|invalid/i.test(text))
@@ -1054,7 +1055,7 @@ export function hasCompleteSourceData(product) {
     && Boolean(String(product.description || product.descriptionHtml || '').trim());
 }
 
-export function validateProductData(product) {
+export function validateProductData(product, { mode = 'submit' } = {}) {
   const errors = crossPlatformPublishErrors(product);
   const mainImages = product.mainImages || product.images || [];
   if (!String(product.title || '').trim()) errors.push('缺少商品标题');
@@ -1076,6 +1077,14 @@ export function validateProductData(product) {
   if (!String(product.description || product.descriptionHtml || '').trim()) errors.push('缺少商品详情');
   const tiers = canonicalizePriceTiers(product.priceTiers || []);
   if (product.priceTiers) product.priceTiers = tiers;
+  const minimumOrder = numericValue(tiers[0]?.minQuantity || product.minOrder || product.moq);
+  const enabledSkus = (product.skus || []).filter((sku) => sku.enabled !== false);
+  const stockValues = product.categoryReference && product.variantGroups?.length && enabledSkus.length
+    ? enabledSkus.map((sku) => sku.stock) : [product.stock];
+  if (mode === 'submit' && minimumOrder > 0 && stockValues.every((stock) => stock != null && String(stock).trim() !== '' && Number.isFinite(Number(stock)))) {
+    const total = stockValues.reduce((sum, stock) => sum + Number(stock), 0);
+    if (total < minimumOrder) errors.push(`可售数量 ${total} 小于最小起订量 ${minimumOrder}，请核实库存或起订量`);
+  }
   if (tiers.some((tier) => numericValue(tier.price) <= 0 || numericValue(tier.minQuantity) <= 0)) {
     errors.push('阶梯价格或起订量无效');
   }
@@ -1563,12 +1572,37 @@ export async function fillLogisticsFields(page, packaging = {}) {
     && verified.filter((field) => field.key === key).every((field) => Number(field.value) > 0));
 }
 
+export async function fillDeliveryFields(page, deliveryTime) {
+  const tiers = parseDeliveryTiers(deliveryTime);
+  if (!tiers.some((tier) => tier.leadDays)) return;
+  const section = page.locator('#struct-ladderPeriod:visible').first();
+  if (!await section.count()) return;
+  await section.scrollIntoViewIfNeeded({ timeout: 3000 });
+  const inputs = page.locator('#struct-ladderPeriod input:not([type="hidden"]):visible');
+  await inputs.first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {
+    throw Object.assign(new Error('国际站发货期控件尚未加载，已保留来源交期和商品进度'), { code: 'PUBLISH_FIELD_NOT_READY', fieldName: '发货期' });
+  });
+  const count = await inputs.count();
+  // Lead time is independent of package dimensions. Preserve the source's
+  // quantity/day pairs even when packaging still needs seller confirmation.
+  for (let index = 0; index < tiers.length && index * 2 + 1 < count; index++) {
+    const tier = tiers[index];
+    const quantity = inputs.nth(index * 2);
+    const days = inputs.nth(index * 2 + 1);
+    if (tier.upperQuantity != null && await quantity.isVisible()) await fillAndVerify(quantity, tier.upperQuantity, '交期数量');
+    if (tier.leadDays && await days.isVisible()) await fillAndVerify(days, tier.leadDays, '交期天数');
+  }
+}
+
 export async function requireLogisticsReady(page, product) {
   const fields = await page.evaluate(readPostingLogistics);
   const missing = missingLogisticsFields(fields, product.packaging || {});
   const active = fields.some((field) => Number(field.value) > 0);
-  const attribute = page.locator('#logisticsProperty .logistics-property-content:visible').last();
-  if (active && await attribute.count() && !String(await attribute.innerText()).trim()) {
+  const attribute = page.locator('#logisticsProperty:visible').last();
+  // An empty value container can have zero width even though its card and Add
+  // button are visible. Test the card so this missing field is not overlooked.
+  const selected = await attribute.locator('.logistics-property-content').allTextContents();
+  if (active && await attribute.count() && !selected.some((value) => value.trim())) {
     missing.push({ label: '物流属性', reason: sourceLogisticsAttributes(product).length ? 'not_committed' : 'missing_source' });
   }
   if (!missing.length) return;
@@ -1590,7 +1624,8 @@ export function attributeOptionMatchScore(source, option) {
   const normalize = (value) => String(value ?? '').toLowerCase()
     .replace(/[＜]/g, '<').replace(/[＞]/g, '>')
     .replace(/[–—～~]/g, '-')
-    .replace(/\b(?:years? old|years?|yrs?)\b|岁/g, '')
+    .replace(/\b(?:years? old|years?|yrs?)\b|岁/g, 'year')
+    .replace(/(\d)\s*y\b/g, '$1year')
     .replace(/\b(?:months?|mos?)\b|个月/g, 'month')
     .replace(/\s+(?:to)\s+/g, '-')
     .replace(/英寸|inch(?:es)?|["“”]/g, '')
@@ -1606,7 +1641,7 @@ export function attributeOptionMatchScore(source, option) {
   const b = numbers(offered);
   if (a.length || b.length) {
     if ((wanted.includes('month') || offered.includes('month')) && wanted.includes('month') !== offered.includes('month')) return 0;
-    const unit = (value) => value.match(/(?:\d)(mm|cm|km|m|kg|mg|g|mah|ah|ml|l|kw|w|kv|v|hz|khz|mhz|ghz)(?:$|[<>+])/i)?.[1] || '';
+    const unit = (value) => value.match(/(?:\d)(year|month|mm|cm|km|m|kg|mg|g|mah|ah|ml|l|kw|w|kv|v|hz|khz|mhz|ghz)(?:$|[<>+])/i)?.[1] || '';
     if (unit(wanted) && unit(offered) && unit(wanted) !== unit(offered)) return 0;
     if (a.length !== b.length || !a.length) {
       // A single measurement may be represented by a containing interval.
@@ -2849,6 +2884,17 @@ function categoryFieldLocator(page, field) {
   return row.locator(CATEGORY_INPUTS).nth(field.inputIndex);
 }
 
+async function ensureCategoryFieldControl(page, field) {
+  if (field.inputIndex >= 0) return field;
+  const row = field.rowId ? page.locator(`[id="${field.rowId.replace(/["\\]/g, '')}"]`)
+    : page.locator(`[data-posting-attribute-row="${field.rowIndex}"]`);
+  const add = row.locator('.posting-field-multi-text button.add-button:visible').last();
+  if (!await add.isVisible().catch(() => false) || await add.isDisabled()) return null;
+  await add.click({ timeout: 3000 });
+  if (!await row.locator(CATEGORY_INPUTS).first().waitFor({ state: 'visible', timeout: 3000 }).then(() => true, () => false)) return null;
+  return (await page.evaluate(readPostingAttributeSchema)).find((entry) => field.id ? entry.id === field.id : entry.rowIndex === field.rowIndex);
+}
+
 export async function fillCategoryAttributes(page, product, onProgress = () => {}) {
   const mapped = new Set();
   const completed = new Set();
@@ -2859,13 +2905,15 @@ export async function fillCategoryAttributes(page, product, onProgress = () => {
     const fields = await page.evaluate(readPostingAttributeSchema);
     for (const initial of fields) {
       const current = await page.evaluate(readPostingAttributeSchema);
-      const field = current.find((entry) => initial.id ? entry.id === initial.id : entry.label === initial.label);
-      if (!field || field.disabled || isOriginRegionAttribute(field.label) || field.inputIndex < 0 || (field.saleSpecification && !field.required)) continue;
+      let field = current.find((entry) => initial.id ? entry.id === initial.id : entry.label === initial.label);
+      if (!field || field.disabled || isOriginRegionAttribute(field.label) || (field.saleSpecification && !field.required)) continue;
       const key = field.id || field.rowId || field.label;
       if (completed.has(key) && field.hasValue) continue;
       const source = sourceAttributeForField(product, field);
       const value = source?.value ?? inferRequiredAttributeValue(product, ...field.labels);
       if (value == null || value === '') continue;
+      field = await ensureCategoryFieldControl(page, field);
+      if (!field || field.inputIndex < 0) continue;
       if (field.hasValue && [value].flat().every((item) => field.values.some((selected) => attributeOptionMatchScore(item, selected) >= 90))) {
         mapped.add(source?.name || field.label); completed.add(key); continue;
       }
@@ -2874,7 +2922,7 @@ export async function fillCategoryAttributes(page, product, onProgress = () => {
         ? await fillOriginCountry(page, product.origin || value)
         : await fillChoice(page, categoryFieldLocator(page, field), value, {
           valueIds: source?.matchedById ? source.valueIds : {},
-          minimumScore: requiredAttributeKey(field.label) === requiredAttributeKey('Age Range') ? 90 : 70,
+          minimumScore: ['Age', 'Age Range'].some((name) => requiredAttributeKey(field.label) === requiredAttributeKey(name)) ? 90 : 70,
         }).catch(() => false);
       if (filled) { mapped.add(source?.name || field.label); completed.add(key); changed = true; }
     }
@@ -2905,9 +2953,10 @@ export async function recoverRequiredAttributes(page, product, labels, onProgres
     const aliases = requiredLabelAliases(rawLabel);
     if (aliases.some(isOriginRegionAttribute)) continue;
     if (!aliases.length) continue;
-    const descriptor = schema.find((field) => field.labels.some((label) => requiredAttributeKey(label) === requiredAttributeKey(rawLabel)));
+    let descriptor = schema.find((field) => field.labels.some((label) => requiredAttributeKey(label) === requiredAttributeKey(rawLabel)));
     if (descriptor?.saleSpecification && !descriptor.required) continue;
     const source = descriptor && sourceAttributeForField(product, descriptor);
+    if (descriptor && source?.value != null && source.value !== '') descriptor = await ensureCategoryFieldControl(page, descriptor);
     const field = descriptor ? (descriptor.inputIndex < 0 ? null : categoryFieldLocator(page, descriptor)) : await fieldByAnyLabel(page, aliases);
     if (!field) continue;
     onProgress(`补填必填属性：${aliases[0]}`);
@@ -2923,7 +2972,7 @@ export async function recoverRequiredAttributes(page, product, labels, onProgres
     for (const candidate of [value].filter((item) => item != null && item !== '')) {
       if (await fillChoice(page, field, candidate, {
         valueIds: source?.matchedById ? source.valueIds : {},
-        minimumScore: requiredAttributeKey(rawLabel) === requiredAttributeKey('Age Range') ? 90 : 70,
+        minimumScore: ['Age', 'Age Range'].some((name) => requiredAttributeKey(rawLabel) === requiredAttributeKey(name)) ? 90 : 70,
       }).catch(() => false)) {
         filled = true;
         break;
@@ -4440,14 +4489,17 @@ export class SellerPublisher {
         assignedDirectly = true;
       }
       if (!assignedDirectly) {
-        await trigger.hover({ timeout: 3000 }).catch(() => {});
-        await page.waitForTimeout(250);
         // A page-wide file input may belong to SKU images or the editor.
         // Bind portal uploads to the chooser opened by this main-image slot.
-        let target = await findUploadTarget(trigger, 900);
-        if (!target) {
-          await trigger.click({ timeout: 3000 }).catch(() => {});
-          target = await findUploadTarget(trigger, 5000);
+        // Scrolling from logistics can remount the placeholder and discard the
+        // first hover. Clicking it opens the image bank on some form builds.
+        // Re-enter the settled slot instead of changing the upload operation.
+        await trigger.scrollIntoViewIfNeeded({ timeout: 3000 });
+        let target = null;
+        for (let attempt = 0; !target && attempt < 3; attempt++) {
+          await page.mouse.move(0, 0);
+          await trigger.hover({ timeout: 3000 }).catch(() => {});
+          target = await findUploadTarget(trigger, 2500);
         }
         if (!target) {
           const menuText = compactText((await page.locator('[class*="menu"], [class*="popup"], [class*="overlay"]').evaluateAll((nodes) => nodes
@@ -4821,23 +4873,7 @@ export class SellerPublisher {
     }
 
     await page.waitForTimeout(500);
-    const deliveryTiers = logisticsFilled ? parseDeliveryTiers(product.deliveryTime) : [];
-    const deliveryInputs = page.locator('#struct-ladderPeriod input:not([type="hidden"])');
-    const deliveryCount = await deliveryInputs.count().catch(() => 0);
-    // Alibaba renders each delivery row as two inputs: quantity upper bound
-    // followed by lead-time days. Keep the source quantity ranges intact;
-    // writing the day value into every input changes 1-50 into 1-14.
-    for (let index = 0; index < deliveryTiers.length && index * 2 + 1 < deliveryCount; index += 1) {
-      const tier = deliveryTiers[index];
-      const quantityInput = deliveryInputs.nth(index * 2);
-      const daysInput = deliveryInputs.nth(index * 2 + 1);
-      if (tier.upperQuantity != null && await quantityInput.isVisible().catch(() => false)) {
-        await fillAndVerify(quantityInput, tier.upperQuantity, '交期数量').catch(() => {});
-      }
-      if (tier.leadDays && await daysInput.isVisible().catch(() => false)) {
-        await fillAndVerify(daysInput, tier.leadDays, '交期天数').catch(() => {});
-      }
-    }
+    await fillDeliveryFields(page, product.deliveryTime);
     return {
       mappedAttributes: [...mappedAttributes],
       unmappedAttributes: [...new Set([...unmappedAttributes, ...variantResult.unmapped])],
@@ -5413,7 +5449,7 @@ export class SellerPublisher {
     if (!isProductPostingUrl(publishPageUrl)) throw new Error('绑定地址不是阿里巴巴国际站商品发布页');
     const mismatch = categoryMismatchMessage(product, publishCategory);
     if (mismatch) throw new Error(mismatch);
-    const validationErrors = validateProductData(product);
+    const validationErrors = validateProductData(product, { mode });
     if (validationErrors.length) throw new Error(`商品资料未通过上架检查：${validationErrors.join('；')}`);
     // Only download the current product's media in advance. All sets share
     // a bounded queue; low-memory machines use one image worker. Browser uploads
@@ -5483,6 +5519,8 @@ export class SellerPublisher {
     reportStage('确认并进入目标类目表单');
     await enterPostingForm(page, publishPageUrl, expectedCategoryId);
     await requirePostingPageAvailable(page);
+    await waitForPostingTitle(page, { verify: () => waitForHumanVerification(page), onProgress: reportStage });
+    product = bindSourceAttributesToPostingSchema(product, await page.evaluate(readPostingAttributeSchema));
     await ensureSimplifiedChinese(page, {
       onProgress: reportStage, verify: () => waitForHumanVerification(page),
       beforeSwitch: () => requireClearPostingOverlays(page), signal: connection.signal,
@@ -5623,6 +5661,7 @@ export class SellerPublisher {
     // field pass. Re-apply the all-or-nothing logistics rule immediately
     // before the final action so stale weight/volume values cannot survive.
     reportStage('复核物流和必填资料');
+    await fillDeliveryFields(page, product.deliveryTime);
     await fillLogisticsFields(page, product.packaging || {});
     await fillLogisticsAttributes(page, product);
     await fillFreightTemplate(page, product);
@@ -5796,14 +5835,14 @@ export class SellerPublisher {
           return recovered.length > 0 || cleared.length > 0;
         },
         logistics: async (error) => {
-          const before = await page.evaluate(readPostingLogistics);
+          const before = await capturePostingLogistics(page);
           await fillLogisticsFields(page, product.packaging || {});
-          const attributesFilled = await fillLogisticsAttributes(page, product);
-          const templateFilled = await fillFreightTemplate(page, product);
+          await fillLogisticsAttributes(page, product);
+          await fillFreightTemplate(page, product);
           await requireLogisticsReady(page, product);
-          const after = await page.evaluate(readPostingLogistics);
+          const after = await capturePostingLogistics(page);
           // Retry only a verified repair; do not keep submitting unchanged data.
-          return JSON.stringify(before) !== JSON.stringify(after) || attributesFilled || templateFilled;
+          return JSON.stringify(before) !== JSON.stringify(after);
         },
         mainImages: async () => {
           if (!await clearMainImagesForRetry(page)) return false;
@@ -5820,6 +5859,7 @@ export class SellerPublisher {
       sellerGroup,
       feedback: verification.feedback,
       requiredAttributes: verification.requiredAttributes || [],
+      acceptedLogistics: verification.acceptedLogistics,
       fieldMapping,
       warnings: [
         videoWarning,

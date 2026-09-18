@@ -173,7 +173,7 @@ export function applyPublishedProductReference(target, reference, options = {}) 
   if (options.fullTemplate) {
     const patch = applyPublishedProductReference(target, reference);
     const missing = copyMissingProductData(target, reference);
-    for (const field of ['packaging', 'services', 'certificates', 'deliveryTime', 'salesUnit']) {
+    for (const field of ['packaging', 'services', 'certificates', 'deliveryTime', 'salesUnit', 'freightTemplate', 'logisticsAttributes']) {
       delete patch[field];
       if (missing[field] != null) patch[field] = missing[field];
     }
@@ -253,7 +253,7 @@ export function applyPublishedProductReference(target, reference, options = {}) 
     'model', 'modelImages', 'compatibleModel', 'compatibleModels',
     'productType', 'type', 'color', 'colorImages', 'specifications',
     'platformAttributes', 'internationalAttributes', 'targetAttributes',
-    'services', 'certificates', 'deliveryTime', 'salesUnit', 'packaging'
+    'services', 'certificates', 'deliveryTime', 'salesUnit', 'packaging', 'freightTemplate', 'logisticsAttributes'
   ]) cloneIfPresent(field);
 
   if (options.onlyMissing) {

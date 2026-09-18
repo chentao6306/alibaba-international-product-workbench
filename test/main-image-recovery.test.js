@@ -1,8 +1,51 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { chromium } from 'playwright-core';
 import { findChromium } from '../server/browser-runtime.js';
 import { SellerPublisher, mainImageUploadRecords, restoreMainImageOrder } from '../server/publisher.js';
+
+test('re-enters a delayed main-image hover menu without opening the image bank', { skip: !findChromium(), timeout: 30000 }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'main-image-hover-'));
+  const files = ['one', 'two', 'three', 'four'].map(name => {
+    const file = path.join(directory, name + '.jpg'); fs.writeFileSync(file, 'fixture'); return file;
+  });
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<div class="image-uploader" style="height:80px"></div><div style="height:2400px"></div><div id="logistics">物流</div><div class="sc-images-upload-dropdown" style="display:none;position:fixed"><input type="file" multiple accept="image/jpeg"></div>');
+    await page.evaluate(() => {
+      window.entries = 0; window.bankOpened = false;
+      const root = document.querySelector('.image-uploader'), portal = document.querySelector('.sc-images-upload-dropdown');
+      for (let i = 0; i < 6; i++) {
+        const slot = document.createElement('div'); slot.className = 'image-upload-list-item'; slot.style.cssText = 'display:inline-block;width:90px;height:80px';
+        slot.innerHTML = '<span id="image-placeholder-span">上传图片</span>';
+        slot.onmouseenter = () => {
+          if (++window.entries < 2) return;
+          const box = slot.getBoundingClientRect(); portal.style.left = box.x + 'px'; portal.style.top = box.bottom + 'px'; portal.style.display = 'block';
+        };
+        slot.onclick = () => { window.bankOpened = true; };
+        root.append(slot);
+      }
+      portal.querySelector('input').onchange = event => {
+        [...event.target.files].forEach((file, i) => {
+          root.children[i].innerHTML = '<img src="https://example.com/' + file.name + '" width="30" height="30">';
+        }); portal.style.display = 'none';
+      };
+    });
+    await page.locator('#logistics').scrollIntoViewIfNeeded();
+    const publisher = new SellerPublisher(directory);
+    publisher.waitForMainImageUploads = async () => 4;
+    assert.equal(await publisher.uploadMainImageBatch(page, files), 4);
+    assert.equal(await page.evaluate(() => window.bankOpened), false);
+    assert.ok(await page.evaluate(() => window.entries >= 2));
+    assert.equal(await page.locator('.image-uploader img').count(), 4);
+  } finally {
+    await browser.close(); fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test('failed main-image records can be removed and source order restored without removing accepted files', { skip: !findChromium() }, async () => {
   const browser = await chromium.launch({ executablePath: findChromium(), headless: true });

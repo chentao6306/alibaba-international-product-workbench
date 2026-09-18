@@ -13,6 +13,12 @@ export const REQUIRED_ATTRIBUTE_ALIASES = [
   ['处理器型号', 'processor type', 'processor model'],
   ['降噪', 'noise cancelling', 'noise canceling', 'noise cancellation'],
   ['防水等级', 'waterproof standard', 'waterproof rating'],
+  ['防护等级', 'ip level', 'protection level'],
+  ['适用人群', 'applicable people'],
+  ['电池续航时间', 'battery life'],
+  ['显示类型', 'display type'],
+  ['物品形状', 'item shape'],
+  ['硬盘容量', 'hard drive capacity'],
   ['屏幕刷新率', 'display refresh rate'],
   ['快速充电', 'quick charge'],
   ['前置摄像头', 'front camera'],
@@ -48,7 +54,8 @@ export const REQUIRED_ATTRIBUTE_ALIASES = [
   ['运行内存', 'ram'],
   ['存储容量', 'storage capacity', 'rom'],
   ['插头', 'plug', 'plug type'],
-  ['年龄范围', '年龄段', '适用年龄', 'age range', 'age group', 'applicable age', 'recommended age'],
+  ['年龄范围', '年龄段', 'age range', 'age group'],
+  ['适用年龄', 'age', 'applicable age', 'recommended age'],
   ['动物', 'animal', 'animals'],
   ['性别', 'gender'],
   ['是否可定制', 'is customized', 'is_customized', 'customizable', 'customised', 'customized'],
@@ -96,7 +103,14 @@ export function createRequiredFieldRepair(target, reference, fields = []) {
     const rows = [...attributes, ...customAttributes].filter((row) => requiredAttributeKey(row.name) === key);
     if (rows.length && rows.every((row) => String(row.value) === String(value))) continue;
     if (rows.length) {
-      for (const row of rows) Object.assign(row, { value: structuredClone(value), source: 'reference-published-product' });
+      for (const row of rows) {
+        // IDs for rejected values must not select the old option again.
+        if (row.valueIds) row.valueIds = {};
+        delete row.valueId;
+        delete row.attributeValueId;
+        delete row.propertyValueId;
+        Object.assign(row, { value: structuredClone(value), source: 'reference-published-product' });
+      }
     } else attributes.push({ name: key, value: structuredClone(value), source: 'reference-published-product' });
     repaired.push(key);
   }
@@ -117,6 +131,10 @@ export function createPublishedReferenceTemplate(candidate, snapshot) {
   const requiredAttributes = (snapshot?.result || candidate.publishResult)?.requiredAttributes || [];
   const repair = createRequiredFieldRepair(reference, { requiredAttributes }, requiredAttributes.map((item) => item.name));
   const template = { ...reference, ...repair?.patch, requiredAttributes };
+  const acceptedLogistics = (snapshot?.result || candidate.publishResult)?.acceptedLogistics;
+  for (const field of ['packaging', 'logisticsAttributes', 'freightTemplate']) {
+    if (acceptedLogistics && Object.hasOwn(acceptedLogistics, field)) template[field] = structuredClone(acceptedLogistics[field]);
+  }
   // Successful form values also belong to specification groups. Leaving the
   // old group options alongside repaired attributes makes the publisher select
   // the rejected options again on the next product.

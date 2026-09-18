@@ -1,6 +1,8 @@
 # 抄得快 · 阿里巴巴国际站商品工作台
 
-**当前完整源码：1.4.25，2026-09-19 修订。** 分支为 [`codex/category-publishing-1.4.25`](https://github.com/chentao6306/alibaba-international-product-workbench/tree/codex/category-publishing-1.4.25)。按实际发布页处理动态类目属性，补充物流属性与包装单位转换；缺少必填资料时从原商品核对一次，提交前明确提示真实缺项和账号经营类目限制。见 [本次修订与验证范围](docs/verification-1.4.25.md)。
+**当前完整源码：1.4.26，2026-09-19 修订。** 分支为 [`codex/publish-logistics-1.4.26`](https://github.com/chentao6306/alibaba-international-product-workbench/tree/codex/publish-logistics-1.4.26)。修复发货期延迟加载漏填、年龄与场景属性映射、主图菜单误开图片银行；引用成功商品可携带已接受的包装、物流属性和运费模板，并提前检查库存与起订量冲突。见 [本次修订与验证范围](docs/verification-1.4.26.md)。
+
+**1.4.25：** 按实际发布页处理动态类目属性，补充物流属性与包装单位转换；缺少必填资料时从原商品核对一次，提示真实缺项和账号经营类目限制。见 [1.4.25 验证记录](docs/verification-1.4.25.md)。
 
 **1.4.23 修复分支说明：** `codex/fix-english-description-editor-1.4.23` 使用详情区固定结构定位并主动滚动到富文本入口，兼容英文 `Commodity Details`、延迟生成的编辑控件和隐藏副本。进度区分“定位详情区”“初始化编辑器”和“编辑区域就绪”；不会反复切换已选中的编辑模式。见 [1.4.23 验证记录](docs/verification-1.4.23.md)。
 
@@ -12,13 +14,13 @@
 
 采集列表中途暂停后，点击“采集已发现的 N 件商品”即可停止继续翻页、转为读取这些商品的详情；点击原来的继续按钮则接着翻页。详情采集仍支持断点继续。上架时遇到登录失效或发布表单反复加载不完整，任务暂停并保留当前商品；重新登录或处理页面问题后点击继续。国际站明确提示类目不存在或失效时，仅当类目未经用户修改或引用、原商品的新旧类目路径完全一致时，自动更新过期的来源类目 ID 一次；其他情况暂停，需选择有效类目后继续。
 
-Windows 桌面客户端，提供国际站、1688、速卖通商品采集、资料编辑、引用成功商品、批量保存草稿与提交上架。授权管理后台部署在 Linux 服务器。`Stable` 分支保留为 **1.4.17 历史归档**，当前版本请使用上面的 1.4.25 分支。
+Windows 桌面客户端，提供国际站、1688、速卖通商品采集、资料编辑、引用成功商品、批量保存草稿与提交上架。授权管理后台部署在 Linux 服务器。`Stable` 分支保留为 **1.4.17 历史归档**，当前版本请使用上面的 1.4.26 分支。
 
 客户端通过 Playwright 操作真实浏览器页面，不是 Alibaba 官方发布 API。验证码需要用户完成；平台审核、账号权限和类目必填规则仍由 Alibaba 决定。
 
 ## 下载与完整备份
 
-- [当前 1.4.25 完整源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/codex/category-publishing-1.4.25)
+- [当前 1.4.26 完整源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/codex/publish-logistics-1.4.26)
 - [1.4.17 Stable 历史源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/Stable)
 - [1.4.17 安装包与加密数据备份](https://github.com/chentao6306/alibaba-international-product-workbench/releases/tag/v1.4.17-stable)
 - [1.4.17 修复和验证记录](docs/verification-1.4.17.md)
@@ -48,7 +50,7 @@ Release 另存安装包和加密数据备份，覆盖项目本地数据、当前
 以下命令在 Windows PowerShell 执行。私有仓库需要已获授权的 GitHub SSH 身份。
 
 ```powershell
-git clone --branch codex/category-publishing-1.4.25 git@github.com:chentao6306/alibaba-international-product-workbench.git
+git clone --branch codex/publish-logistics-1.4.26 git@github.com:chentao6306/alibaba-international-product-workbench.git
 cd alibaba-international-product-workbench
 node --version
 npm --version
@@ -81,11 +83,11 @@ npm run desktop
 
 桌面界面更改后需 `npm run build` 并重新打开桌面端。`start.bat` 会按需安装依赖、构建并启动浏览器版；`dev.bat` 启动开发服务。关闭命令窗口或按 `Ctrl+C` 停止对应服务。
 
-更新当前 1.4.25 分支后：
+更新当前 1.4.26 分支后：
 
 ```powershell
-git switch codex/category-publishing-1.4.25
-git pull --ff-only origin codex/category-publishing-1.4.25
+git switch codex/publish-logistics-1.4.26
+git pull --ff-only origin codex/publish-logistics-1.4.26
 npm ci
 node node_modules/playwright-core/cli.js install chromium
 npm run prepare:chromium
@@ -153,7 +155,7 @@ sudo systemctl restart kua-yipu-auth
 
 正式客户端授权入口由 `server/auth-endpoint.js` 固定。源码桌面可用 `KUA_YIPU_AUTH_URL` 指向本机开发后台；**正式打包客户端忽略此环境变量**。迁移生产地址需要修改该模块默认地址、配置对应有效证书并重新打包。仅设置打包终端环境变量不能改变正式入口。
 
-授权服务 `/health` 中的版本为 `1.4.9`，代表独立授权协议实现；当前桌面版本为 `1.4.25`。本次源码提交包含授权服务完整代码，不执行线上部署。后台可配置 1/3/15 天等断线保持时间，不延长付费授权到期日，在线停用仍立即生效。
+授权服务 `/health` 中的版本为 `1.4.9`，代表独立授权协议实现；当前桌面版本为 `1.4.26`。本次源码提交包含授权服务完整代码，不执行线上部署。后台可配置 1/3/15 天等断线保持时间，不延长付费授权到期日，在线停用仍立即生效。
 
 ## 项目原理
 
@@ -225,17 +227,17 @@ node tools/group-origin-ui-qa.mjs
 npx electron tools/verification-window-qa.mjs
 ```
 
-当前 1.4.25 修订的测试、打包核对和真实账号验证范围见 [验证记录](docs/verification-1.4.25.md)。历史记录不代表当前版本在所有类目均已通过实测。
+当前 1.4.26 修订的测试、打包核对和真实账号验证范围见 [验证记录](docs/verification-1.4.26.md)。历史记录不代表当前版本在所有类目均已通过实测。
 
 源站未公开的 SKU 商业数据无法凭空获得，图片链接可能失效，跨类目引用可能带来不适用属性。带 `live`、`publish` 的工具可能操作真实站点，先阅读脚本并使用隔离数据目录。
 
 ```powershell
-git fetch origin codex/category-publishing-1.4.25
+git fetch origin codex/publish-logistics-1.4.26
 git rev-parse HEAD
-git rev-parse origin/codex/category-publishing-1.4.25
-git diff --exit-code HEAD origin/codex/category-publishing-1.4.25
+git rev-parse origin/codex/publish-logistics-1.4.26
+git diff --exit-code HEAD origin/codex/publish-logistics-1.4.26
 git status --short
-git ls-tree -r --name-only origin/codex/category-publishing-1.4.25
+git ls-tree -r --name-only origin/codex/publish-logistics-1.4.26
 ```
 
-首次 Stable 归档从已验收的 `65dc255` 建立并保留全部历史，该历史分支的应用源码保持 1.4.17。当前 1.4.25 分支在后续提交中包含最新修复。历史 Release 的 SHA-256 清单用于下载校验；解密密钥不上传 GitHub。
+首次 Stable 归档从已验收的 `65dc255` 建立并保留全部历史，该历史分支的应用源码保持 1.4.17。当前 1.4.26 分支在后续提交中包含最新修复。历史 Release 的 SHA-256 清单用于下载校验；解密密钥不上传 GitHub。

@@ -64,6 +64,31 @@ export function sourceLogisticsAttributes(product) {
   return [...new Set((Array.isArray(value) ? value : String(value ?? '').split(/[\n；;]/)).map((value) => String(value).trim()).filter(Boolean))];
 }
 
+// Values committed in the form immediately before the successful action.
+// Canonical kg/cm values let a later explicit reference survive UI unit changes.
+export async function capturePostingLogistics(page) {
+  const fields = await page.evaluate(readPostingLogistics);
+  const packaging = {};
+  for (const key of ['weight', 'length', 'width', 'height']) {
+    const candidates = fields.filter((field) => field.key === key && Number(field.value) > 0).map((field) => {
+      const factors = key === 'weight' ? { kg: 1, g: 0.001, lb: 0.45359237 } : { cm: 1, mm: 0.1, m: 100, in: 2.54 };
+      return Number((Number(field.value) * (factors[field.unit] ?? 1)).toPrecision(12));
+    });
+    if (candidates.length && candidates.every((value) => Math.abs(value - candidates[0]) < 1e-8)) packaging[key] = candidates[0];
+  }
+  const controls = await page.evaluate(() => {
+    const visible = (node) => Boolean(node.getClientRects().length);
+    const contents = [...document.querySelectorAll('#logisticsProperty .logistics-property-content')].filter(visible);
+    const logisticsAttributes = [...new Set(contents.flatMap((node) => (node.innerText || '').split(/[\n；;]/).map((text) => text.trim()).filter(Boolean)))];
+    const root = [...document.querySelectorAll('#shippingTemplateId')].find(visible);
+    const field = root?.matches('input,select') ? root : root?.querySelector('input,select');
+    const freightTemplate = field?.tagName === 'SELECT' ? [...field.selectedOptions].filter((option) => option.value).map((option) => option.textContent.trim()).join('')
+      : root?.querySelector('.next-select-values em, .next-tag-body')?.textContent?.trim() || (field?.readOnly ? field.value : '');
+    return { logisticsAttributes, ...(freightTemplate ? { freightTemplate } : {}) };
+  });
+  return { packaging, ...controls };
+}
+
 export async function fillLogisticsAttributes(page, product) {
   const values = sourceLogisticsAttributes(product);
   if (!values.length) return false;

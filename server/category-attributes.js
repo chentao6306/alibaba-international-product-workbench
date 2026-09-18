@@ -166,23 +166,29 @@ export function readPostingAttributeSchema() {
   return rows.flatMap((row, index) => {
     if (!row.getClientRects().length || row.closest('#saleAttributesItems, [class*="customizedServices"]')) return [];
     const heading = row.querySelector('.label, .next-form-item-label, label:not(:has(input)), legend');
-    const label = clean(heading?.textContent || row.getAttribute('data-attribute-name') || row.getAttribute('aria-label'));
+    const labelNode = heading?.cloneNode(true);
+    labelNode?.querySelectorAll('.upload-image-switch, .next-icon, button').forEach((node) => node.remove());
+    const label = clean(labelNode?.textContent || row.getAttribute('data-attribute-name') || row.getAttribute('aria-label'))
+      .replace(/(?:添加规格图|Add Specification).*$/i, '').trim();
     const controls = [...row.querySelectorAll(selector)];
     const field = controls.find((node) => !node.disabled && node.getClientRects().length);
     if (!label) return [];
     let id = row.dataset.attributeId || row.dataset.propertyId
       || row.id.match(/^(?:struct-)?p-(\d+)$/)?.[1] || field?.name?.match(/^p-(\d+)$/)?.[1] || '';
-    const labels = [label, row.dataset.enName, row.dataset.attributeName].filter(Boolean);
+    // Verified seller property IDs disambiguate labels translated differently
+    // on the public detail page (Theme) and the Chinese posting page (场景).
+    const propertyLabels = { '200515261': ['Theme'], '210194576': ['Age'], '210240146': ['Age Range'] };
+    const labels = [label, row.dataset.enName, row.dataset.attributeName, ...(propertyLabels[id] || [])].filter(Boolean);
     const fiberKey = Object.getOwnPropertyNames(row).find((key) => key.startsWith('__reactFiber'));
     let fiber = fiberKey && row[fiberKey];
     for (let depth = 0; fiber && depth < 6; depth++, fiber = fiber.return) {
       const props = fiber.memoizedProps;
       if (!props) continue;
-      const candidateId = String(props.attributeId ?? props.propertyId ?? props.id ?? '').replace(/^(?:struct-)?p-/, '');
+      const candidateId = [props.attributeId, props.propertyId, props.name, props.id]
+        .map((value) => String(value ?? '').replace(/^(?:struct-)?p-/, '')).find((value) => /^\d+$/.test(value)) || '';
       if (!/^\d+$/.test(candidateId) || (id && candidateId !== id)) continue;
       id ||= candidateId;
       for (const value of [props.label, props.attributeName, props.propertyName, props.enName]) if (typeof value === 'string' && clean(value)) labels.push(clean(value));
-      break;
     }
     const enabled = controls.filter((node) => !node.disabled && node.getClientRects().length);
     const hasValue = enabled.some((node) => ['checkbox', 'radio'].includes(node.type) ? node.checked
@@ -210,7 +216,30 @@ export function sourceAttributeForField(product, field) {
     const exact = items.find((item) => attributeId(item) === field.id);
     if (exact) return { ...exact, matchedById: true };
   }
+  const compatible = items.filter((item) => !field.id || !attributeId(item) || attributeId(item) === field.id);
+  const normalizeName = (name) => clean(name).normalize('NFKC').toLowerCase();
+  const exactNames = new Set((field.labels || [field.label]).map(normalizeName));
   const names = new Set((field.labels || [field.label]).map(requiredAttributeKey));
-  const item = items.find((item) => names.has(requiredAttributeKey(item.name)));
+  const item = compatible.find((item) => exactNames.has(normalizeName(item.name)))
+    || compatible.find((item) => names.has(requiredAttributeKey(item.name)));
   return item ? { ...item, matchedById: false } : null;
+}
+
+// Keep the relationship between the seller's initial language and the Chinese
+// form using stable property IDs, including categories absent from our aliases.
+export function bindSourceAttributesToPostingSchema(product, schema) {
+  let changed = false;
+  const bind = (items = []) => items.map((item) => {
+    if (attributeId(item)) return item;
+    const key = requiredAttributeKey(item.name);
+    const matches = schema.filter((field) => field.id && !field.saleSpecification
+      && (field.labels || [field.label]).some((label) => requiredAttributeKey(label) === key));
+    const ids = [...new Set(matches.map((field) => field.id))];
+    if (ids.length !== 1) return item;
+    changed = true;
+    return { ...item, id: ids[0] };
+  });
+  const attributes = bind(product.attributes);
+  const customAttributes = bind(product.customAttributes);
+  return changed ? { ...product, ...(product.attributes ? { attributes } : {}), ...(product.customAttributes ? { customAttributes } : {}) } : product;
 }
