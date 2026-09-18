@@ -2,11 +2,11 @@ import { requiredAttributeKey } from './publish-reference.js';
 
 const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
 export const attributeId = (item) => clean(item?.attributeId ?? item?.propertyId ?? item?.attrId ?? item?.propId ?? item?.id).replace(/^(?:struct-)?p-/, '');
-export const SOURCE_ATTRIBUTE_SCHEMA_VERSION = 2;
+export const SOURCE_ATTRIBUTE_SCHEMA_VERSION = 3;
 
 export function needsSourceAttributeRefresh(product) {
   if (product.categoryReference || Number(product.sourceAttributeSchemaVersion) >= SOURCE_ATTRIBUTE_SCHEMA_VERSION) return false;
-  return /必填属性或规格未填写|来源缺少必填资料|缺少包装重量/.test(String(product.publishResult?.message || ''));
+  return /必填属性或规格未填写|来源缺少必填资料|已采集但发布页未接受|缺少包装重量|重量未填写|体积未填写|物流属性未填写/.test(String(product.publishResult?.message || ''));
 }
 
 export function mergeSourceAttributes(...sources) {
@@ -36,7 +36,7 @@ export function extractAlibabaAttributes(detailData) {
     if (!node || typeof node !== 'object' || seen.has(node) || ++visited > 15000) return;
     seen.add(node);
     if (Array.isArray(node)) { node.forEach((item) => walk(item, section)); return; }
-    if (/packaging/i.test(section)) {
+    if (/packaging|packinfo/i.test(section)) {
       for (const [key, label] of [['singleGrossWeight', 'Single gross weight'], ['singlePackageSize', 'Single package size']]) {
         const value = node[key];
         if (typeof value === 'string' || typeof value === 'number') result.push({ name: label,
@@ -44,11 +44,12 @@ export function extractAlibabaAttributes(detailData) {
       }
     }
     const name = clean(node.attributeName ?? node.attrName ?? node.propertyName ?? node.propName ?? node.name ?? node.key);
-    const raw = node.attributeValue ?? node.attrValue ?? node.propertyValue ?? node.propValue ?? node.value ?? node.values;
+    const raw = node.attributeValue ?? node.attrValue ?? node.propertyValue ?? node.propValue ?? node.value ?? node.values
+      ?? node.attributeValues ?? node.propertyValues ?? node.valueList;
     const entries = [raw].flat().filter((value) => value != null).map((value) => typeof value === 'object'
-      ? { value: clean(value.valueName ?? value.name ?? value.label ?? value.text ?? value.value), id: clean(value.valueId ?? value.id) }
+      ? { value: clean(value.valueName ?? value.attributeValueName ?? value.propertyValueName ?? value.name ?? value.label ?? value.text ?? value.value), id: clean(value.valueId ?? value.attributeValueId ?? value.propertyValueId ?? value.id) }
       : { value: clean(value), id: '' }).filter((value) => value.value);
-    if (name && entries.length && name.length <= 100 && entries.every((value) => value.value.length <= 2000)) {
+    if (name && entries.length && name.length <= 100 && entries.every((value) => value.value.length <= 2000 && value.value !== '[object Object]')) {
       const id = attributeId(node);
       const ids = entries.map((entry) => entry.id || clean(node.valueId ?? node.attributeValueId));
       result.push({ name, value: entries.length === 1 ? entries[0].value : entries.map((entry) => entry.value),
@@ -62,7 +63,7 @@ export function extractAlibabaAttributes(detailData) {
     }
   };
   for (const [name, module] of Object.entries(detailData?.nodeMap || {})) {
-    if (/attribute|specification|packaging/i.test(name) && !/recommend|related|similar|sku/i.test(name)) walk(module?.privateData || module, name);
+    if (/attribute|specification|packaging|productPropert|productPackInfo/i.test(name) && !/recommend|related|similar|sku/i.test(name)) walk(module?.privateData || module, name);
   }
   const product = detailData?.globalData?.product || {};
   for (const field of ['attributes', 'attributeList', 'productAttributes', 'properties', 'propertyList']) walk(product[field], 'Product Attributes');
@@ -101,7 +102,8 @@ export function readAlibabaAttributeRows() {
         }
       }
     }
-    if (!name || !value || name.length > 100 || value.length > 2000 || /[\r\n]/.test(name)) return;
+    if (!name || !value || name.length > 100 || value.length > 2000 || /[\r\n]/.test(name)
+      || /^(?:key attributes|other attributes|product attributes|关键属性|其他属性|商品属性)$/i.test(name)) return;
     const id = row.getAttribute('data-attribute-id') || row.getAttribute('data-property-id') || '';
     result.push({ name, value, ...(id ? { id } : {}), source: 'dom',
       section: clean(row.closest('[data-testid="module-attribute-group"]')?.querySelector('[data-testid="module-attribute-group-title"]')?.textContent) || 'Product Attributes' });
@@ -157,19 +159,20 @@ export function packagingFromAttributes(attributes = []) {
 // Serialized into the seller page. Read actual rendered category fields and
 // stable property IDs; a new category does not need its own filling routine.
 export function readPostingAttributeSchema() {
-  const rows = [...document.querySelectorAll('.sell-catProp-item, #struct-specification [id^="p-"]')];
+  const rows = [...document.querySelectorAll('.sell-catProp-item, #struct-specification [id^="p-"], [data-attribute-id], [data-property-id]')]
+    .filter((row) => !row.parentElement?.closest('.sell-catProp-item, #struct-specification [id^="p-"], [data-attribute-id], [data-property-id]'));
   const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').replace(/^[*＊]\s*/, '').replace(/[:：]\s*$/, '').trim();
   const selector = 'input:not([type="hidden"]):not([type="file"]):not([type="button"]):not([type="submit"]), textarea, select';
   return rows.flatMap((row, index) => {
     if (!row.getClientRects().length || row.closest('#saleAttributesItems, [class*="customizedServices"]')) return [];
-    const heading = row.querySelector('.label, label:not(:has(input)), legend');
-    const label = clean(heading?.textContent);
+    const heading = row.querySelector('.label, .next-form-item-label, label:not(:has(input)), legend');
+    const label = clean(heading?.textContent || row.getAttribute('data-attribute-name') || row.getAttribute('aria-label'));
     const controls = [...row.querySelectorAll(selector)];
     const field = controls.find((node) => !node.disabled && node.getClientRects().length);
     if (!label) return [];
     let id = row.dataset.attributeId || row.dataset.propertyId
       || row.id.match(/^(?:struct-)?p-(\d+)$/)?.[1] || field?.name?.match(/^p-(\d+)$/)?.[1] || '';
-    const labels = [label];
+    const labels = [label, row.dataset.enName, row.dataset.attributeName].filter(Boolean);
     const fiberKey = Object.getOwnPropertyNames(row).find((key) => key.startsWith('__reactFiber'));
     let fiber = fiberKey && row[fiberKey];
     for (let depth = 0; fiber && depth < 6; depth++, fiber = fiber.return) {
@@ -181,13 +184,23 @@ export function readPostingAttributeSchema() {
       for (const value of [props.label, props.attributeName, props.propertyName, props.enName]) if (typeof value === 'string' && clean(value)) labels.push(clean(value));
       break;
     }
-    const hasValue = controls.some((node) => ['checkbox', 'radio'].includes(node.type) ? node.checked
+    const enabled = controls.filter((node) => !node.disabled && node.getClientRects().length);
+    const hasValue = enabled.some((node) => ['checkbox', 'radio'].includes(node.type) ? node.checked
       : node.tagName === 'SELECT' ? [...node.selectedOptions].some((option) => option.value)
         : (node.getAttribute('role') !== 'combobox' || node.readOnly) && Boolean(clean(node.value)))
       || [...row.querySelectorAll('.next-select-values em, .next-tag-body, [class*="selected-value"]')].some((node) => clean(node.textContent));
-    return [{ id, label, labels: [...new Set(labels)], rowId: row.id, rowIndex: index, inputIndex: controls.indexOf(field),
+    const values = enabled.flatMap((node) => ['checkbox', 'radio'].includes(node.type)
+      ? (node.checked ? [clean(node.closest('label')?.textContent || node.value)] : [])
+      : node.tagName === 'SELECT' ? [...node.selectedOptions].filter((option) => option.value).map((option) => clean(option.textContent))
+        : (node.getAttribute('role') !== 'combobox' || node.readOnly) && clean(node.value) ? [clean(node.value)] : []);
+    values.push(...[...row.querySelectorAll('.next-select-values em, .next-tag-body, [class*="selected-value"]')].map((node) => clean(node.textContent)).filter(Boolean));
+    const controlType = field?.tagName === 'SELECT' ? (field.multiple ? 'multiSelect' : 'select') : field?.type || '';
+    row.setAttribute('data-posting-attribute-row', String(index));
+    return [{ id, label, labels: [...new Set(labels)], rowId: row.id, rowIndex: index, inputIndex: controls.indexOf(field), controlType,
+      disabled: controls.length > 0 && enabled.length === 0, values: [...new Set(values)],
       saleSpecification: Boolean(row.closest('#struct-specification')),
-      required: Boolean(row.querySelector('label.required, .label.required, [aria-required="true"], [required]')), hasValue }];
+      required: row.getAttribute('aria-required') === 'true' || row.getAttribute('data-required') === 'true'
+        || Boolean(row.querySelector('label.required, .label.required, .next-form-item-label.required, [aria-required="true"], [required]')), hasValue }];
   });
 }
 

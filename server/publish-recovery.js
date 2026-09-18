@@ -8,7 +8,7 @@ export function publishRepairPlan(error) {
   const attributes = (error?.requiredFields || []).length > 0
     || /属性值不能为空|required(?: field| attribute)?[^\n]{0,40}(?:empty|blank|missing)|attribute[^\n]{0,40}(?:empty|required)/i.test(message)
     || /(?:必填项?不能为空|不能为空)/.test(message);
-  const logistics = /物流属性|重量、体积|logistics attribute.*(?:fill in completely|remove all|not filled|incomplete)|(?:packaging|shipping).*?(?:incomplete|required|empty)|发货期未填写/i.test(message);
+  const logistics = /物流属性|重量、体积|(?:重量|体积|发货期|运费模[板版]).{0,10}(?:未填写|为空|必填)|logistics attribute.*(?:fill in completely|remove all|not filled|incomplete)|(?:packaging|shipping|weight|volume).*?(?:incomplete|required|empty)/i.test(message);
   const overlay = /页面仍有弹窗遮罩|overlay|intercepts pointer events/i.test(message);
   return [
     overlay && 'overlay',

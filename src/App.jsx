@@ -670,7 +670,7 @@ function ProductEditor({ product, onClose, onSaved, notify }) {
     origin: productOrigin(product) || product.origin || '', model: product.model || '', brand: product.brand || '', productType: product.productType || '',
     salesUnit: product.salesUnit || 'Piece', paymentMethod: product.paymentMethod || '', priceMode: product.priceMode || 'quantity-tier',
     videoUrl: product.videoUrl || '', deliveryDays: String(product.deliveryTime?.[1]?.[1] || '').match(/\d+/)?.[0] || '7',
-    freightTemplate: product.freightTemplate || '', services: product.services || {}, certificates: (product.certificates || []).map((item) => ({ ...item })),
+    freightTemplate: product.freightTemplate || '', logisticsAttributes: (Array.isArray(product.logisticsAttributes) ? product.logisticsAttributes : []).join('\n'), services: product.services || {}, certificates: (product.certificates || []).map((item) => ({ ...item })),
     regionalPricing: product.regionalPricing || {},
     fobMinPrice: initialFob.minPrice ?? '', fobMaxPrice: initialFob.maxPrice ?? '', fobTiers: (initialFob.tiers || []).map((tier) => ({ ...tier }))
   });
@@ -728,7 +728,7 @@ function ProductEditor({ product, onClose, onSaved, notify }) {
       const mainImages = form.mainImages.map((url) => url.trim()).filter(Boolean);
       const fobPrice = { minPrice: Number(form.fobMinPrice || 0), maxPrice: Number(form.fobMaxPrice || 0), currencySymbol: product.currencySymbol || '$', tiers: form.fobTiers.map((tier) => ({ ...tier, minQuantity: Number(tier.minQuantity || 0), maxQuantity: tier.maxQuantity ? Number(tier.maxQuantity) : null, price: Number(tier.price || 0) })) };
       await api(`/api/products/${product.id}`, { method: 'PATCH', body: JSON.stringify({
-        ...form, price: Number(form.price), stock: Number(form.stock), moq: Number(form.moq), mainImages,
+        ...form, logisticsAttributes: form.logisticsAttributes.split('\n').map((value) => value.trim()).filter(Boolean), price: Number(form.price), stock: Number(form.stock), moq: Number(form.moq), mainImages,
         images: mainImages, mainImage: mainImages[0] || '', detailImages: form.detailImages.map((url) => url.trim()).filter(Boolean),
         fobPrice, ...(form.usdRate && product.currencySymbol !== '$' ? { usdRate: Number(form.usdRate) } : {}),
         deliveryTime: [['1', form.deliveryDays], ['999999', form.deliveryDays]]
@@ -741,6 +741,7 @@ function ProductEditor({ product, onClose, onSaved, notify }) {
     <div className="drawer-header"><div><span>商品编辑</span><h2>{product.sourceId}</h2></div><button className="icon-button" onClick={onClose} title="关闭"><X size={20} /></button></div>
     <form onSubmit={save} className="edit-form" noValidate>
       <div className="editor-tabs">{[['basic', '基础信息'], ['media', '图片与视频'], ['attributes', '商品属性'], ['custom', '自定义属性'], ['specs', '规格与SKU'], ['trade', '交易信息'], ['logistics', '物流信息'], ['service', '服务与证书'], ['description', '商品描述'], ['regional', '国家/地区定价'], ['audit', '来源与审计']].map(([value, label]) => <button type="button" key={value} className={tab === value ? 'active' : ''} onClick={() => setTab(value)}>{label}</button>)}</div>
+      {product.publishResult?.requiredFields?.length > 0 && <p className="data-missing">上次发布需要补充或核对：{product.publishResult.requiredFields.join('、')}。请在商品属性或物流信息中填写后重试。</p>}
       <div className={`editor-tab-pane ${tab === 'basic' ? '' : 'hidden'}`} data-editor-tab="basic">
       <div className={`completeness-strip ${productCompleteness({ ...product, ...form, packaging: form.packaging }).complete ? 'complete' : ''}`}><CircleCheck size={17} /><span>主图 {form.mainImages.length} · 详情图 {form.detailImages.length} · 属性 {form.attributes.length} · 规格 {form.variantGroups.length} · 价格 {product.sourcePriceRange?.formattedText || `${form.priceTiers.length} 档`}</span></div>
       <h3 className="edit-section-title">基础信息</h3>
@@ -796,6 +797,7 @@ function ProductEditor({ product, onClose, onSaved, notify }) {
       <div className="form-grid"><label><span>产品类型</span><input value={form.productType} onChange={update('productType')} /></label><label><span>品牌</span><input value={form.brand} onChange={update('brand')} /></label><label><span>型号</span><input value={form.model} onChange={update('model')} /></label><label><span>原产地（国家）</span><OriginCountrySelect value={form.origin} onChange={(origin) => setForm((current) => ({ ...current, ...synchronizeProductOrigin(current, { origin }) }))} /></label></div>
       <div className="form-grid packaging-grid">{[['length', '包装长 (cm)'], ['width', '包装宽 (cm)'], ['height', '包装高 (cm)'], ['weight', '包装重量 (kg)']].map(([key, label]) => <label key={key}><span>{label}</span><input type="number" min="0" step="any" value={form.packaging[key] || ''} onChange={(event) => setForm((value) => ({ ...value, packaging: { ...value.packaging, [key]: event.target.value } }))} /></label>)}</div>
       <label><span>运费模板</span><input value={form.freightTemplate || ''} onChange={update('freightTemplate')} /></label>
+      <label><span>物流属性（每行一项）</span><textarea value={form.logisticsAttributes} onChange={update('logisticsAttributes')} placeholder="填写国际站发布页中的准确选项名称；电池、液体等属性请按实物确认" /></label>
       </div>
       <div className={`editor-tab-pane ${tab === 'description' ? '' : 'hidden'}`} data-editor-tab="description">
       <label><span>商品摘要</span><textarea rows="5" value={form.description} onChange={update('description')} /></label><label><span>普通富文本详情 HTML</span><textarea rows="14" value={form.descriptionHtml} onChange={update('descriptionHtml')} /></label>

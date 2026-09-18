@@ -596,7 +596,7 @@ app.patch('/api/products/:id', (request, response, next) => {
     'attributes', 'variantGroups', 'skus', 'priceTiers', 'deliveryTime', 'packaging',
       'origin', 'model', 'brand', 'productType', 'videoUrl', 'selected', 'subtitle', 'keywords',
     'categoryPath', 'categoryId', 'customAttributes', 'descriptionHtml', 'structuredDescription',
-    'services', 'certificates', 'regionalPricing', 'shipping', 'freightTemplate', 'deliveryCountry',
+    'services', 'certificates', 'regionalPricing', 'shipping', 'freightTemplate', 'logisticsAttributes', 'deliveryCountry',
     'deliveryOptions', 'salesUnit', 'paymentMethod', 'fobPrice', 'priceMode', 'skuPriceMode'
     , 'currencySymbol'
   ];
@@ -623,7 +623,7 @@ app.post('/api/products/batch-update', (request, response, next) => {
       'origin', 'model', 'brand', 'productType', 'videoUrl', 'keywords', 'customAttributes', 'services',
       'categoryPath', 'categoryId', 'currencySymbol',
       'attributeOperation', 'variantOperation', 'skuRows',
-      'certificates', 'regionalPricing', 'shipping', 'freightTemplate', 'deliveryCountry', 'deliveryOptions',
+      'certificates', 'regionalPricing', 'shipping', 'freightTemplate', 'logisticsAttributes', 'deliveryCountry', 'deliveryOptions',
       'salesUnit', 'paymentMethod', 'fobPrice', 'priceMode', 'skuPriceMode', 'packaging', 'deliveryTime'
     ]);
     const safePatch = Object.fromEntries(Object.entries(patch).filter(([key]) => allowed.has(key)));
@@ -948,6 +948,35 @@ async function runPublishJob(jobId) {
         publisher.clearPublishStop(jobId);
         store.patchJob(jobId, { progress: index + 1, total, message: `已处理 ${index + 1}/${total}：${product.title}` });
       } catch (error) {
+        // A category's live form may reveal a field absent from an older
+        // capture. Refresh that exact source once before considering it missing.
+        const refreshJob = store.read((state) => state.jobs.find((item) => item.id === jobId));
+        if (error.code === 'PUBLISH_REQUIRED_DATA_MISSING' && error.missingSourceFields?.length
+          && sourcePlatform(product) === 'alibaba.com' && !product.categoryReference
+          && refreshJob?.status === 'running' && !refreshJob.metadata?.attributeRefreshAttempts?.[product.id]) {
+          store.patchJob(jobId, { metadata: { ...refreshJob.metadata,
+            attributeRefreshAttempts: { ...refreshJob.metadata?.attributeRefreshAttempts, [product.id]: true } },
+          message: `正在从原商品重新核对：${error.missingSourceFields.join('、')}` });
+          try {
+            const [fresh] = await withVerificationContext({
+              onWaiting: (message) => store.patchJob(jobId, { message }),
+              shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status)),
+            }, () => collector.enrichProducts([product]));
+            const enriched = preparePublishProduct(mergeSourceDataForPublish(product, fresh));
+            const relevant = (item) => JSON.stringify([item.attributes, item.customAttributes, item.packaging, item.origin]);
+            if (relevant(enriched) !== relevant(product) && store.read((state) => state.jobs.find((item) => item.id === jobId)?.status) === 'running') {
+              store.update((draft) => {
+                const target = draft.products.find((item) => item.id === product.id);
+                if (target) Object.assign(target, enriched, { updatedAt: new Date().toISOString() });
+              });
+              publisher.clearPublishStop(jobId);
+              index -= 1;
+              continue;
+            }
+          } catch (refreshError) {
+            if (['COLLECT_PAUSED', 'LOGIN_REQUIRED'].includes(refreshError.code)) error = refreshError;
+          }
+        }
         if (error.code === 'PUBLISH_CATEGORY_INVALID' && canRefreshSourceCategory(product)
           && !store.read((state) => state.jobs.find((item) => item.id === jobId)?.metadata?.categoryRefreshAttempts?.[product.id])) {
           const current = store.read((state) => state.jobs.find((item) => item.id === jobId));
@@ -992,7 +1021,9 @@ async function runPublishJob(jobId) {
         if (!pauseRequested && !requiresHuman && !environmentNotReady) store.update((draft) => {
           const target = draft.products.find((item) => item.id === product.id);
           if (target) {
-            const result = { status: 'failed', message };
+            const result = { status: 'failed', message, code: error.code || '',
+              requiredFields: error.requiredFields || [], missingSourceFields: error.missingSourceFields || [],
+              unmatchedSourceFields: error.unmatchedSourceFields || [] };
             Object.assign(target, { status: 'publish_failed', publishResult: result, updatedAt: new Date().toISOString() });
             target.publishHistory = Array.isArray(target.publishHistory) ? target.publishHistory : [];
             const failureRoute = resolvePublishRoute(target, store.read().settings);
@@ -1001,18 +1032,15 @@ async function runPublishJob(jobId) {
           }
         });
         publisher.clearPublishStop(jobId);
-        // A required category field is often the only difference between a
-        // failed listing and a product Alibaba accepts. Reuse a successful
-        // product from the same category once, keeping the target's identity,
-        // price, inventory and media untouched, then let the normal loop retry
-        // the exact item with the repaired publish template.
+        // Repair only from the reference explicitly selected for this product.
+        // Unrelated successful products are not evidence for its attributes.
         const jobState = store.read((state) => state.jobs.find((item) => item.id === jobId));
         const retries = jobState?.metadata?.autoReferenceRetries && typeof jobState.metadata.autoReferenceRetries === 'object'
           ? jobState.metadata.autoReferenceRetries : {};
         const requiredFields = [...new Set([...(error.requiredFields || []), ...requiredLabelsFromError(message)])];
         const attempted = retries[product.id]?.referenceIds || (retries[product.id]?.referenceId ? [retries[product.id].referenceId] : []);
-        if (!pauseRequested && !requiresHuman && !environmentNotReady && error.code !== 'PUBLISH_POLICY_REVIEW_REQUIRED' && requiredFields.length && attempted.length < 2) {
-          const repair = findPublishedReferenceRepair(product, store.read().products, requiredFields, attempted);
+        if (product.categoryReference && !pauseRequested && !requiresHuman && !environmentNotReady && error.code !== 'PUBLISH_POLICY_REVIEW_REQUIRED' && requiredFields.length && attempted.length < 2) {
+          const repair = findPublishedReferenceRepair(product, store.read().products.filter((candidate) => candidate.id === product.categoryReference.referenceId), requiredFields, attempted);
           if (repair) {
             store.update((draft) => {
               const target = draft.products.find((item) => item.id === product.id);

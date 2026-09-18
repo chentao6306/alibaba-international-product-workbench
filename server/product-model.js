@@ -17,7 +17,7 @@ const FIND_REPLACE_FIELDS = [
   'title', 'subtitle', 'keywords', 'attributes', 'customAttributes', 'categoryPath', 'categoryId',
   'origin', 'model', 'brand', 'productType', 'variantGroups', 'skus',
   'description', 'descriptionHtml', 'structuredDescription', 'services',
-  'certificates', 'salesUnit', 'paymentMethod', 'freightTemplate',
+  'certificates', 'salesUnit', 'paymentMethod', 'freightTemplate', 'logisticsAttributes',
   'deliveryCountry', 'deliveryOptions', 'shipping', 'packaging', 'deliveryTime'
 ];
 
@@ -117,7 +117,7 @@ export function mergeSourceDataForPublish(target, source) {
 
 export function copyMissingProductData(target, reference) {
   const patch = {};
-  const copyWhenBlank = ['origin', 'model', 'productType', 'deliveryTime', 'variantGroups', 'skus', 'salesUnit', 'freightTemplate', 'services', 'certificates'];
+  const copyWhenBlank = ['origin', 'model', 'productType', 'deliveryTime', 'variantGroups', 'skus', 'salesUnit', 'freightTemplate', 'logisticsAttributes', 'services', 'certificates'];
   for (const field of copyWhenBlank) {
     if (isBlank(target?.[field]) && !isBlank(reference?.[field])) patch[field] = clone(reference[field]);
   }
@@ -376,7 +376,7 @@ function snapshotFields(product) {
     origin: product.origin || '', model: product.model || '', brand: product.brand || '', productType: product.productType || '',
     packaging: product.packaging || {}, deliveryTime: list(product.deliveryTime), shipping: product.shipping || {},
     ...(product.sourcePackaging ? { sourcePackaging: product.sourcePackaging } : {}),
-    freightTemplate: product.freightTemplate || '', services: product.services || {}, certificates: list(product.certificates),
+    freightTemplate: product.freightTemplate || '', logisticsAttributes: list(product.logisticsAttributes), services: product.services || {}, certificates: list(product.certificates),
     description: product.description || '', descriptionHtml: product.descriptionHtml || '',
     structuredDescription: product.structuredDescription || null, regionalPricing: product.regionalPricing || {}
   });

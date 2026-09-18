@@ -10,6 +10,7 @@ import { buildAlibabaPublishUrl, categoryIdFromUrl, normalizeCategoryId } from '
 import { REQUIRED_ATTRIBUTE_ALIASES, requiredAttributeKey } from './publish-reference.js';
 import { sourcePlatform, crossPlatformPublishErrors } from './source-platform.js';
 import { submitWithRepairs } from './publish-recovery.js';
+import { readPostingLogistics, logisticsControlValue, missingLogisticsFields, fillLogisticsAttributes, sourceLogisticsAttributes } from './posting-logistics.js';
 import { readSellerGroups, applySellerGroup } from './seller-groups.js';
 import { ImageDownloadQueue } from './image-download-queue.js';
 import { ORIGIN_COUNTRIES, originCountry, isOriginRegionAttribute, productOrigin, synchronizeProductOrigin } from './origin-country.js';
@@ -1095,6 +1096,7 @@ export function preparePublishProduct(product) {
   const next = { ...product };
   const collectedAttributes = [...(product.attributes || []), ...(product.customAttributes || [])];
   next.origin = productOrigin(product);
+  next.logisticsAttributes = sourceLogisticsAttributes(product);
   if (next.origin) Object.assign(next, synchronizeProductOrigin(product, { origin: next.origin }));
   const packaging = packagingFromAttributes(collectedAttributes);
   next.packaging = { ...(product.packaging || {}) };
@@ -1537,235 +1539,51 @@ export function shouldUseColorSaleSpecification(colorGroup, targetSupportsColor)
   return Boolean(targetSupportsColor) && needsColorSaleSpecification(colorGroup);
 }
 
-const LOGISTICS_FIELD_LABELS = {
-  weight: ['毛重(KG/Piece)', '单个产品毛重', 'single gross weight', 'gross weight', 'product weight'],
-  length: ['长(CM/Piece)', '包装长度', 'package length', 'length(cm/piece)', 'length'],
-  width: ['宽(CM/Piece)', '包装宽度', 'package width', 'width(cm/piece)', 'width'],
-  height: ['高(CM/Piece)', '包装高度', 'package height', 'height(cm/piece)', 'height']
-};
-
-const LOGISTICS_FIELD_SELECTORS = {
-  weight: [
-    'input[name="pkgWeight"]', 'input[name*="pkgWeight" i]',
-    'input[name*="grossWeight" i]', 'input[placeholder*="重量"]',
-    'input[placeholder*="weight" i]'
-  ],
-  length: [
-    '#pkgMeasure [role="gridcell"]:nth-child(1) input',
-    'input[name="pkgLength"]', 'input[name*="pkgLength" i]',
-    'input[name*="packageLength" i]', 'input[placeholder*="长(CM/Piece)" i]',
-    'input[placeholder*="length" i]'
-  ],
-  width: [
-    '#pkgMeasure [role="gridcell"]:nth-child(2) input',
-    'input[name="pkgWidth"]', 'input[name*="pkgWidth" i]',
-    'input[name*="packageWidth" i]', 'input[placeholder*="宽(CM/Piece)" i]',
-    'input[placeholder*="width" i]'
-  ],
-  height: [
-    '#pkgMeasure [role="gridcell"]:nth-child(3) input',
-    'input[name="pkgHeight"]', 'input[name*="pkgHeight" i]',
-    'input[name*="packageHeight" i]', 'input[placeholder*="高(CM/Piece)" i]',
-    'input[placeholder*="height" i]'
-  ]
-};
-
-const LOGISTICS_EXTRA_SELECTORS = [
-  'input[name*="volume" i]', 'input[name*="shipping" i]',
-  'input[name*="logistic" i]', 'input[name*="package" i]:not([name*="Length" i]):not([name*="Width" i]):not([name*="Height" i])',
-  'input[placeholder*="体积"]', 'input[placeholder*="物流"]',
-  'input[placeholder*="volume" i]', 'input[placeholder*="shipping" i]',
-  'input[placeholder*="logistic" i]'
-].join(', ');
-
-async function logisticsFields(page) {
-  const fields = {};
-  for (const key of Object.keys(LOGISTICS_FIELD_LABELS)) {
-    fields[key] = await firstVisible(page, LOGISTICS_FIELD_SELECTORS[key]);
-    if (!fields[key]) fields[key] = await fieldByAnyLabel(page, LOGISTICS_FIELD_LABELS[key]);
-  }
-  return fields;
-}
-
-async function setLogisticsSectionEnabled(page, enabled) {
-  const candidates = page.getByText(/包装运输\s*Packaging\s*&\s*shipping\s*specifications/i).last();
-  if (!await candidates.isVisible().catch(() => false)) return false;
-  let container = candidates.locator('xpath=ancestor::label[.//input[@type="checkbox"]][1]');
-  if (!await container.count().catch(() => 0)) container = candidates.locator('xpath=ancestor::*[.//input[@type="checkbox"]][1]');
-  const checkbox = container.locator('input[type="checkbox"]').first();
-  if (!await checkbox.count().catch(() => 0)) return false;
-  const checked = await checkbox.isChecked().catch(() => false);
-  if (checked !== enabled) {
-    if (enabled) await checkbox.check({ force: true }).catch(() => container.click({ force: true }).catch(() => {}));
-    else await checkbox.uncheck({ force: true }).catch(() => container.click({ force: true }).catch(() => {}));
-    await page.waitForTimeout(350);
-  }
-  return await checkbox.isChecked().catch(() => enabled) === enabled;
-}
-
-// Alibaba has changed the logistics form several times. Depending on the
-// selected category it can render more than one logistics card (for example a
-// product card and a "volume and weight including package" card), and the
-// generated input names are not stable. Resolve controls from their nearby
-// labels/containers instead of relying on one name or one optional checkbox.
-async function syncLogisticsControls(page, values, { clear = false } = {}) {
-  const numeric = {
-    weight: numericValue(values.weight),
-    length: numericValue(values.length),
-    width: numericValue(values.width),
-    height: numericValue(values.height)
-  };
-  numeric.volume = numeric.length > 0 && numeric.width > 0 && numeric.height > 0
-    ? numeric.length * numeric.width * numeric.height
-    : 0;
-  return page.evaluate(({ numeric, clear }) => {
-    const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-    const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
-    const logisticsHint = /logistic|shipping|package|packaging|volume|weight|length|width|height|物流|体积|重量|包装|尺寸|毛重|包装长|包装宽|包装高/i;
-    const metric = (node, context) => {
-      const ownText = `${node.name || ''} ${node.id || ''} ${node.placeholder || ''} ${node.getAttribute('aria-label') || ''}`;
-      const classify = (text) => {
-        if (/weight|gross|重量|毛重/i.test(text)) return 'weight';
-        if (/length|包装长|\b长\b|长\s*[（(]/i.test(text)) return 'length';
-        if (/width|包装宽|\b宽\b|宽\s*[（(]/i.test(text)) return 'width';
-        if (/height|包装高|\b高\b|高\s*[（(]/i.test(text)) return 'height';
-        if (/volume|体积/i.test(text)) return 'volume';
-        return '';
-      };
-      // A shared logistics wrapper often contains all four labels. Classify
-      // from the control's own metadata first so sibling labels cannot win.
-      return classify(ownText) || classify(context);
-    };
-    const setter = (node, value) => {
-      if (node instanceof HTMLSelectElement) {
-        if (clear) node.selectedIndex = 0;
-        node.dispatchEvent(new Event('input', { bubbles: true }));
-        node.dispatchEvent(new Event('change', { bubbles: true }));
-        return;
-      }
-      const prototype = node instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      const setValue = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
-      setValue?.call(node, clear ? '' : String(value));
-      node.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: clear ? 'deleteContentBackward' : 'insertText', data: clear ? null : String(value) }));
-      node.dispatchEvent(new Event('change', { bubbles: true }));
-      node.blur();
-    };
-    const controls = [];
-    for (const node of document.querySelectorAll('input:not([type="hidden"]), textarea, select')) {
-      if (!visible(node) || node.disabled) continue;
-      const ownText = `${node.name || ''} ${node.id || ''} ${node.placeholder || ''} ${node.getAttribute('aria-label') || ''}`;
-      const nearbyText = clean(node.closest('label')?.textContent || node.parentElement?.textContent || '').slice(0, 450);
-      let logisticsContext = logisticsHint.test(`${ownText} ${nearbyText}`);
-      let parent = node.parentElement;
-      for (let level = 0; parent && level < 6; level += 1, parent = parent.parentElement) {
-        const className = typeof parent.className === 'string' ? parent.className : '';
-        const id = parent.id || '';
-        const parentText = clean(parent.textContent).slice(0, 700);
-        if (logisticsHint.test(`${className} ${id}`) || /物流属性|体积与重量|包装运输|shipping specifications/i.test(parentText)) {
-          logisticsContext = true;
-          break;
-        }
-      }
-      if (!logisticsContext) continue;
-      const key = metric(node, nearbyText);
-      if (!key) continue;
-      controls.push({ node, key });
-    }
-    const seen = new Set();
-    let count = 0;
-    for (const { node, key } of controls) {
-      if (seen.has(node)) continue;
-      seen.add(node);
-      setter(node, numeric[key]);
-      count += 1;
-    }
-    return { count, keys: controls.map(({ key }) => key) };
-  }, { numeric, clear }).catch(() => ({ count: 0, keys: [] }));
-}
-
-async function clearLogisticsFields(page, fields = null) {
-  const targets = fields || await logisticsFields(page);
-  const extras = page.locator(LOGISTICS_EXTRA_SELECTORS);
-  const extraCount = await extras.count().catch(() => 0);
-  const allFields = [...Object.values(targets)];
-  for (let index = 0; index < extraCount; index += 1) {
-    const extra = extras.nth(index);
-    if (await extra.isVisible().catch(() => false)) allFields.push(extra);
-  }
-  const seen = new Set();
-  for (const field of allFields) {
-    if (!field) continue;
-    const key = await field.evaluate((node) => node).catch(() => null);
-    if (key && seen.has(key)) continue;
-    if (key) seen.add(key);
-    await field.fill('').catch(() => {});
-    await commitControlledInput(field, '');
-  }
-  return targets;
-}
-
 export async function forceClearLogisticsSection(page) {
-  const fields = await logisticsFields(page);
-  await clearLogisticsFields(page, fields);
-  // Current forms store the three anonymous size inputs in one pkgMeasure
-  // component. Clear each through a real edit, including its blur handler.
-  const measurements = page.locator('#pkgMeasure input:visible');
-  for (let index = 0; index < await measurements.count(); index += 1) {
-    const input = measurements.nth(index);
+  // Kept for explicit user clearing, never used to conceal publish failures.
+  const fields = await page.evaluate(readPostingLogistics);
+  for (const field of fields) {
+    const input = page.locator('[data-posting-logistics="' + field.index + '"]');
     await input.fill('');
     await input.press('Tab');
   }
-  await syncLogisticsControls(page, {}, { clear: true });
-  // If Alibaba kept the optional logistics module selected after a failed
-  // submit, clear its selection as well so the retry is a true all-empty
-  // logistics state. The helper is deliberately only used during recovery;
-  // normal filling never toggles this similarly named content option.
-  await setLogisticsSectionEnabled(page, false);
-  // Recommit only resolved logistics fields. Page-wide parent-text matching
-  // can erase a title or specification that happens to mention "weight".
-  await clearLogisticsFields(page, await logisticsFields(page));
-  await syncLogisticsControls(page, {}, { clear: true });
-  await page.waitForTimeout(500);
 }
 
 export async function fillLogisticsFields(page, packaging = {}) {
-  const values = {
-    weight: packaging.weight,
-    length: packaging.length,
-    width: packaging.width,
-    height: packaging.height
-  };
-  const completeSource = Object.values(values).every((value) => numericValue(value) > 0);
-  // Populate every rendered logistics card. Do not toggle the similarly named
-  // "Packaging & shipping specifications" checkbox: on current Alibaba forms
-  // that checkbox belongs to an unrelated optional content module.
-  const synced = await syncLogisticsControls(page, values, { clear: !completeSource });
-  const fields = await logisticsFields(page);
-  // The fixed labels used by older posting forms are not present in every
-  // category. The generic resolver above is authoritative; require one
-  // recognized control for each metric instead of rejecting a valid form just
-  // because its generated label/name changed.
-  const completeTarget = ['weight', 'length', 'width', 'height']
-    .every((key) => fields[key] || synced.keys.includes(key));
-
-  // Alibaba accepts this section only as a complete set or as an empty set.
-  // Never leave source or target values partially populated.
-  if (!completeSource || !completeTarget) {
-    await clearLogisticsFields(page, fields);
-    await syncLogisticsControls(page, {}, { clear: true });
-    return false;
+  const fields = await page.evaluate(readPostingLogistics);
+  for (const field of fields) {
+    const value = logisticsControlValue(packaging, field);
+    // Missing source values must not erase a seller's existing valid values.
+    if (value == null) continue;
+    const input = page.locator('[data-posting-logistics="' + field.index + '"]');
+    await fillAndVerify(input, value, '包装' + field.key);
   }
+  const verified = await page.evaluate(readPostingLogistics);
+  return ['weight', 'length', 'width', 'height'].every((key) => verified.some((field) => field.key === key)
+    && verified.filter((field) => field.key === key).every((field) => Number(field.value) > 0));
+}
 
-  try {
-    for (const key of Object.keys(values)) {
-      if (fields[key]) await fillAndVerify(fields[key], values[key], key);
-    }
-    return completeTarget;
-  } catch {
-    await clearLogisticsFields(page, fields);
-    await syncLogisticsControls(page, {}, { clear: true });
-    return false;
+export async function requireLogisticsReady(page, product) {
+  const fields = await page.evaluate(readPostingLogistics);
+  const missing = missingLogisticsFields(fields, product.packaging || {});
+  const active = fields.some((field) => Number(field.value) > 0);
+  const attribute = page.locator('#logisticsProperty .logistics-property-content:visible').last();
+  if (active && await attribute.count() && !String(await attribute.innerText()).trim()) {
+    missing.push({ label: '物流属性', reason: sourceLogisticsAttributes(product).length ? 'not_committed' : 'missing_source' });
   }
+  if (!missing.length) return;
+  throw Object.assign(new Error('发布前需补充物流资料：' + missing.map((item) => item.label).join('、')), {
+    code: 'PUBLISH_REQUIRED_DATA_MISSING', requiredFields: missing.map((item) => item.label),
+    missingSourceFields: missing.filter((item) => item.reason === 'missing_source').map((item) => item.label),
+    unmatchedSourceFields: missing.filter((item) => item.reason === 'not_committed').map((item) => item.label),
+  });
+}
+
+async function fillFreightTemplate(page, product) {
+  if (!String(product.freightTemplate || '').trim()) return false;
+  const field = await firstVisible(page, ['#shippingTemplateId input', '#shippingTemplateId select', 'input[name="shippingTemplateId"]', 'select[name="shippingTemplateId"]'])
+    || await fieldByAnyLabel(page, ['运费模板', '物流提供方式', 'Shipping template', 'Freight template']);
+  return field ? fillChoice(page, field, product.freightTemplate) : false;
 }
 
 export function attributeOptionMatchScore(source, option) {
@@ -1885,7 +1703,7 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
       for (const item of values) filled = await fillChoice(page, locator, item, { valueIds, minimumScore }) && filled;
       return filled;
     }
-    const row = locator.locator('xpath=ancestor::*[starts-with(@id,"p-") or contains(concat(" ", normalize-space(@class), " "), " sell-catProp-item ")][1]');
+    const row = locator.locator('xpath=ancestor::*[@data-posting-attribute-row or starts-with(@id,"p-") or contains(concat(" ", normalize-space(@class), " "), " sell-catProp-item ")][1]');
     const labels = row.locator('label').filter({ has: page.locator('input[type="checkbox"], input[type="radio"]') });
     const findOption = async () => {
       const texts = await labels.allTextContents();
@@ -1919,9 +1737,10 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
   }
   let chosenLabel = '';
   const chooseVisibleOption = async (candidate) => {
-    const menu = page.locator('.sell-o-select-options:visible').last();
+    let menu = page.locator('.sell-o-select-options:visible, .next-select-popup:visible').last();
+    if (!await menu.count()) menu = page.locator('[role="listbox"]:visible').last();
     const options = await menu.count()
-      ? menu.locator('.options-item')
+      ? menu.locator('.options-item:visible, [role="option"]:visible, .next-menu-item:visible, .next-select-menu-item:visible')
       : page.locator('[role="option"]:visible, .next-menu-item:visible, .next-select-menu-item:visible');
     // Alibaba's search can return no results for a complete option label
     // containing parentheses. Select an already loaded exact value first.
@@ -1948,8 +1767,10 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
     }
     // The menu virtualizes its options. Search reveals values outside the
     // first nine rows, including 6.6-inch screens and 6000-6999mAh batteries.
-    const search = menu.locator('.options-search input');
-    if (await search.isVisible().catch(() => false)) {
+    let search = menu.locator('input:not([readonly]):visible').first();
+    if (!await search.count()) search = locator;
+    const searchable = await search.evaluateAll((nodes) => Boolean(nodes[0] && !nodes[0].readOnly && !nodes[0].disabled));
+    if (searchable && await search.isVisible().catch(() => false)) {
       await search.fill(candidate.match(/\d+(?:\.\d+)?/)?.[0] || candidate);
       await page.waitForTimeout(300);
     }
@@ -1971,9 +1792,9 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
     const candidates = (Array.isArray(value) ? value : expected.split(/\s*[,;，；]\s*/)).map((item) => String(item).trim()).filter(Boolean);
     let selected = true;
     const selectedValues = () => locator.evaluate((node) => {
-      const root = node.closest('.next-select');
+      const root = node.closest('.next-select, [data-posting-attribute-row], .sell-catProp-item');
       return [...(root?.querySelectorAll('.next-select-values em, .next-tag-body, [class*="selected-value"]') || [])]
-        .map((item) => item.textContent);
+        .map((item) => item.textContent).concat(node.readOnly && node.value ? [node.value] : []);
     }).catch(() => []);
     for (const candidate of candidates) {
       chosenLabel = '';
@@ -3024,28 +2845,42 @@ function requiredLabelAliases(label) {
 const CATEGORY_INPUTS = 'input:not([type="hidden"]):not([type="file"]):not([type="button"]):not([type="submit"]), textarea, select';
 function categoryFieldLocator(page, field) {
   const row = field.rowId ? page.locator(`[id="${field.rowId.replace(/["\\]/g, '')}"]`)
-    : page.locator('.sell-catProp-item, #struct-specification [id^="p-"]').nth(field.rowIndex);
+    : page.locator(`[data-posting-attribute-row="${field.rowIndex}"]`);
   return row.locator(CATEGORY_INPUTS).nth(field.inputIndex);
 }
 
 export async function fillCategoryAttributes(page, product, onProgress = () => {}) {
-  const fields = await page.evaluate(readPostingAttributeSchema);
-  const mapped = [];
-  for (const field of fields) {
-    if (isOriginRegionAttribute(field.label) || field.inputIndex < 0 || (field.saleSpecification && !field.required)) continue;
-    const source = sourceAttributeForField(product, field);
-    const value = source?.value ?? inferRequiredAttributeValue(product, ...field.labels);
-    if (value == null || value === '') continue;
-    onProgress(`填写类目属性：${field.label}`);
-    const filled = requiredAttributeKey(field.label) === requiredAttributeKey('产地')
-      ? await fillOriginCountry(page, product.origin || value)
-      : await fillChoice(page, categoryFieldLocator(page, field), value, {
-        valueIds: source?.matchedById ? source.valueIds : {},
-        minimumScore: requiredAttributeKey(field.label) === requiredAttributeKey('Age Range') ? 90 : 70,
-      }).catch(() => false);
-    if (filled) mapped.push(source?.name || field.label);
+  const mapped = new Set();
+  const completed = new Set();
+  // Selecting one field can mount dependent fields or replace entire rows.
+  // Refresh descriptors after every edit, and bound cascading passes.
+  for (let pass = 0; pass < 4; pass += 1) {
+    let changed = false;
+    const fields = await page.evaluate(readPostingAttributeSchema);
+    for (const initial of fields) {
+      const current = await page.evaluate(readPostingAttributeSchema);
+      const field = current.find((entry) => initial.id ? entry.id === initial.id : entry.label === initial.label);
+      if (!field || field.disabled || isOriginRegionAttribute(field.label) || field.inputIndex < 0 || (field.saleSpecification && !field.required)) continue;
+      const key = field.id || field.rowId || field.label;
+      if (completed.has(key) && field.hasValue) continue;
+      const source = sourceAttributeForField(product, field);
+      const value = source?.value ?? inferRequiredAttributeValue(product, ...field.labels);
+      if (value == null || value === '') continue;
+      if (field.hasValue && [value].flat().every((item) => field.values.some((selected) => attributeOptionMatchScore(item, selected) >= 90))) {
+        mapped.add(source?.name || field.label); completed.add(key); continue;
+      }
+      onProgress(`填写类目属性：${field.label}`);
+      const filled = requiredAttributeKey(field.label) === requiredAttributeKey('产地')
+        ? await fillOriginCountry(page, product.origin || value)
+        : await fillChoice(page, categoryFieldLocator(page, field), value, {
+          valueIds: source?.matchedById ? source.valueIds : {},
+          minimumScore: requiredAttributeKey(field.label) === requiredAttributeKey('Age Range') ? 90 : 70,
+        }).catch(() => false);
+      if (filled) { mapped.add(source?.name || field.label); completed.add(key); changed = true; }
+    }
+    if (!changed) break;
   }
-  return mapped;
+  return [...mapped];
 }
 
 export function requiredLabelsFromError(message) {
@@ -3133,7 +2968,7 @@ export async function setImageUploadFiles(input, files, options = {}) {
 
 export async function emptyRequiredSpecificationLabels(page, includeCategory = false) {
   const fields = await page.evaluate(readPostingAttributeSchema);
-  return fields.filter((field) => (includeCategory || field.saleSpecification) && field.required && !field.hasValue).map((field) => field.label);
+  return fields.filter((field) => !field.disabled && (includeCategory || field.saleSpecification) && field.required && !field.hasValue).map((field) => field.label);
 }
 
 export async function requiredAttributeFailure(page, product, labels) {
@@ -4972,6 +4807,7 @@ export class SellerPublisher {
 
     onProgress('填写包装和物流属性');
     const logisticsFilled = await fillLogisticsFields(page, product.packaging || {});
+    await fillLogisticsAttributes(page, product);
     markSourceAttributes(['单个产品毛重', 'single gross weight'], logisticsFilled);
     markSourceAttributes(['单个包装尺寸', 'single package size'], logisticsFilled);
 
@@ -4985,7 +4821,7 @@ export class SellerPublisher {
     }
 
     await page.waitForTimeout(500);
-    const deliveryTiers = parseDeliveryTiers(product.deliveryTime);
+    const deliveryTiers = logisticsFilled ? parseDeliveryTiers(product.deliveryTime) : [];
     const deliveryInputs = page.locator('#struct-ladderPeriod input:not([type="hidden"])');
     const deliveryCount = await deliveryInputs.count().catch(() => 0);
     // Alibaba renders each delivery row as two inputs: quantity upper bound
@@ -5055,6 +4891,7 @@ export class SellerPublisher {
         return;
       }
     }
+    await fillFreightTemplate(page, product);
     await waitUntil(async () => await rowCount() > 0, '尚未找到完整的价格和起订量输入框');
     const commitRow = async (index) => {
       for (const [inputs, expected, label] of [[quantityInputs, tiers[index].minQuantity, '起订量'], [priceInputs, tiers[index].price, '价格']]) {
@@ -5670,6 +5507,13 @@ export class SellerPublisher {
       reportStage('检查国际站目标分组');
       await applySellerGroup(page, options.sellerGroup);
     }
+    reportStage('按当前类目预检必填属性');
+    await fillCategoryAttributes(page, product, reportStage);
+    if (mode === 'submit') {
+      const schema = await page.evaluate(readPostingAttributeSchema);
+      const missing = schema.filter((field) => field.required && !field.disabled && !field.saleSpecification && !field.hasValue).map((field) => field.label);
+      if (missing.length) throw await requiredAttributeFailure(page, product, missing);
+    }
     // Switching Alibaba's detail editor can rebuild the entire form. Do it
     // before filling prices, specifications and images so a late editor-mode
     // transition cannot silently erase already completed fields.
@@ -5780,6 +5624,8 @@ export class SellerPublisher {
     // before the final action so stale weight/volume values cannot survive.
     reportStage('复核物流和必填资料');
     await fillLogisticsFields(page, product.packaging || {});
+    await fillLogisticsAttributes(page, product);
+    await fillFreightTemplate(page, product);
     reportStage('复核价格阶梯');
     await this.fillPriceFields(page, product, { onProgress: reportStage });
     await fillReferencedSkuRows(page, product, fillAndVerify, reportStage, { appliedGroups: finalVariantResult.groups, normalizeValue: englishSpecText });
@@ -5858,6 +5704,15 @@ export class SellerPublisher {
       }
     }
 
+    const readinessWarnings = [];
+    const unresolvedAttributes = await emptyRequiredSpecificationLabels(page, true);
+    if (mode !== 'submit' && unresolvedAttributes.length) readinessWarnings.push(`草稿待补充必填属性：${unresolvedAttributes.join('、')}`);
+    try { await requireLogisticsReady(page, product); }
+    catch (error) {
+      if (mode === 'submit') throw error;
+      readinessWarnings.push(error.message);
+    }
+
     const agreementText = page.getByText(/请再次检查并确认提交的信息真实、合法和有效/).last();
     if (await agreementText.isVisible().catch(() => false)) {
       const agreementContainer = agreementText.locator('xpath=ancestor::*[.//input[@type="checkbox"]][1]');
@@ -5882,7 +5737,6 @@ export class SellerPublisher {
     }
     reportStage(mode === 'submit' ? '提交国际站并等待结果' : '保存国际站草稿');
     const originalUrl = page.url();
-    let logisticsWarning = '';
     let sellerGroup = null;
     const verification = await submitWithRepairs({
       submit: async () => {
@@ -5907,7 +5761,7 @@ export class SellerPublisher {
         overlay: '关闭遮挡弹窗',
         specifications: '复核规格值和全部规格图片',
         attributes: '补填来源必填属性',
-        logistics: '清除平台允许留空的整组物流信息',
+        logistics: '重新填写并复核来源物流资料',
         mainImages: '重新上传并确认商品主图',
       }[field]}`),
       repairs: {
@@ -5941,10 +5795,15 @@ export class SellerPublisher {
           const cleared = await clearEmptySaleAttributeSelections(page);
           return recovered.length > 0 || cleared.length > 0;
         },
-        logistics: async () => {
-          await forceClearLogisticsSection(page);
-          logisticsWarning = '平台要求物流信息完整或全部留空，本次已清空可选物流字段；本地包装资料保留';
-          return true;
+        logistics: async (error) => {
+          const before = await page.evaluate(readPostingLogistics);
+          await fillLogisticsFields(page, product.packaging || {});
+          const attributesFilled = await fillLogisticsAttributes(page, product);
+          const templateFilled = await fillFreightTemplate(page, product);
+          await requireLogisticsReady(page, product);
+          const after = await page.evaluate(readPostingLogistics);
+          // Retry only a verified repair; do not keep submitting unchanged data.
+          return JSON.stringify(before) !== JSON.stringify(after) || attributesFilled || templateFilled;
         },
         mainImages: async () => {
           if (!await clearMainImagesForRetry(page)) return false;
@@ -5964,7 +5823,7 @@ export class SellerPublisher {
       fieldMapping,
       warnings: [
         videoWarning,
-        logisticsWarning,
+        ...readinessWarnings,
         ...(fieldMapping.warnings || []),
         fieldMapping.unmappedAttributes.length ? `${fieldMapping.unmappedAttributes.length} 个来源属性未在当前类目表单中找到对应字段` : ''
       ].filter(Boolean)
