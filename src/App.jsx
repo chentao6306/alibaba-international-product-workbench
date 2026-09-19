@@ -1,4 +1,5 @@
 import ReferenceDialog from './ReferenceDialog.jsx';
+import ProductEditor from './ProductEditor.jsx';
 import PublishRecovery from './PublishRecovery.jsx';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -492,7 +493,7 @@ function ProductsView({ state, refresh, notify, onMenu, platform, setPlatform, n
       </table></div>}
       {products.length > pageSize && <Pagination page={page} pageCount={pageCount} onPage={setPage} label={`第 ${page}/${pageCount} 页 · 共 ${products.length} 件`} />}
     </section>
-    {editing && <ProductEditor product={editing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); await refresh(); notify('商品修改已保存'); }} notify={notify} />}
+    {editing && <ProductEditor product={editing} CategorySelect={CategorySelect} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); await refresh(); notify('商品修改已保存'); }} notify={notify} />}
       {batchEditing && <BatchEditor products={selectedProducts} references={publishedReferenceProducts} onClose={() => setBatchEditing(false)} onSaved={async (result) => { setBatchEditing(false); await refresh(); notify(result?.categoryBindingReset ? '批量修改已应用，请重新绑定修改后类目的国际站发布表单' : '批量修改已应用'); }} notify={notify} />}
     {findReplaceOpen && <FindReplaceDialog products={selectedProducts.length ? selectedProducts : platformProducts} onClose={() => setFindReplaceOpen(false)} onSaved={async (result) => { setFindReplaceOpen(false); await refresh(); notify(`已替换 ${result.changedProducts} 件商品，共 ${result.total} 处`); }} notify={notify} />}
     {referenceOpen && <ReferenceDialog products={referenceEligibleProducts} references={publishedReferenceProducts} onClose={() => setReferenceOpen(false)} onSaved={async (result) => { setReferenceOpen(false); await refresh(); notify(`已引用类目、属性和规格，更新 ${result.changed.length} 件商品`); }} notify={notify} />}
@@ -644,174 +645,6 @@ function BatchEditor({ products, references, onClose, onSaved, notify }) {
   </aside>{referenceOpen && <ReferenceDialog products={products} references={references} onClose={() => setReferenceOpen(false)} onSaved={onSaved} notify={notify} />}</div>;
 }
 
-function ProductEditor({ product, onClose, onSaved, notify }) {
-  const initialMainImages = product.mainImages || product.images || (product.mainImage ? [product.mainImage] : []);
-  const initialFob = product.fobPrice && typeof product.fobPrice === 'object' ? product.fobPrice : {};
-  const initialMoq = String(product.moq || '').match(/\d[\d,]*/)?.[0]?.replace(/,/g, '')
-    || product.priceTiers?.[0]?.minQuantity || 1;
-  const [form, setForm] = useState({
-    usdRate: '',
-    title: product.title || '', price: product.price || '', stock: product.stock ?? 100, moq: initialMoq,
-    subtitle: product.subtitle || '', keywords: [...(product.keywords || [])], categoryPath: [...(product.categoryPath || (sourcePlatform(product) === 'alibaba.com' ? product.sourceCategoryPath : []) || [])], categoryId: product.categoryId || '',
-    description: product.description || '', descriptionHtml: product.descriptionHtml || '', structuredDescription: product.structuredDescription || null,
-    mainImages: [...initialMainImages], detailImages: [...(product.detailImages || [])],
-    attributes: (product.attributes || []).map((item) => ({ ...item })),
-    customAttributes: (product.customAttributes || []).map((item) => ({ ...item })),
-    variantGroups: (product.variantGroups || []).map((group) => ({ ...group, options: [...(group.options || [])] })),
-    skus: (product.skus || []).map((sku) => ({ ...sku, attributes: { ...(sku.attributes || {}) } })),
-    priceTiers: (product.priceTiers || []).map((tier) => ({ ...tier })), packaging: { ...(product.packaging || {}) },
-    origin: productOrigin(product) || product.origin || '', model: product.model || '', brand: product.brand || '', productType: product.productType || '',
-    salesUnit: product.salesUnit || 'Piece', paymentMethod: product.paymentMethod || '', priceMode: product.priceMode || 'quantity-tier',
-    videoUrl: product.videoUrl || '', deliveryDays: String(product.deliveryTime?.[1]?.[1] || '').match(/\d+/)?.[0] || '7',
-    freightTemplate: product.freightTemplate || '', logisticsAttributes: (Array.isArray(product.logisticsAttributes) ? product.logisticsAttributes : []).join('\n'), services: product.services || {}, certificates: (product.certificates || []).map((item) => ({ ...item })),
-    regionalPricing: product.regionalPricing || {},
-    fobMinPrice: initialFob.minPrice ?? '', fobMaxPrice: initialFob.maxPrice ?? '', fobTiers: (initialFob.tiers || []).map((tier) => ({ ...tier }))
-  });
-  const [saving, setSaving] = useState(false);
-  const [tab, setTab] = useState('basic');
-  const update = (key) => (event) => setForm((value) => ({ ...value, [key]: event.target.value }));
-  const updateArray = (key, index, value) => setForm((current) => {
-    if (['attributes', 'customAttributes'].includes(key) && current[key][index].name !== value.name) {
-      value = { ...value };
-      for (const id of ['id', 'attributeId', 'propertyId', 'attrId', 'propId', 'valueIds', 'valueId', 'attributeValueId', 'propertyValueId']) delete value[id];
-    }
-    const patch = { [key]: current[key].map((item, itemIndex) => itemIndex === index ? value : item) };
-    return { ...current, ...(['attributes', 'customAttributes'].includes(key) ? synchronizeProductOrigin(current, patch) : patch) };
-  });
-  const removeArray = (key, index) => setForm((current) => ({ ...current, [key]: current[key].filter((_, itemIndex) => itemIndex !== index) }));
-  function importLocalImages(event, target = 'mainImages', max = target === 'mainImages' ? 6 : 30) {
-    const files = [...(event.target.files || [])].filter((file) => /^image\//i.test(file.type));
-    if (!files.length) return;
-    Promise.all(files.map((file) => new Promise((resolve) => { const reader = new FileReader(); reader.onload = async () => { try { const result = await api('/api/media/upload', { method: 'POST', body: JSON.stringify({ name: file.name, data: String(reader.result || '') }) }); resolve(result.url || ''); } catch (error) { notify(error.message, 'error'); resolve(''); } }; reader.onerror = () => resolve(''); reader.readAsDataURL(file); }))).then((urls) => setForm((value) => ({ ...value, [target]: [...value[target], ...urls.filter(Boolean)].slice(0, max) })));
-    event.target.value = '';
-  }
-  function restoreSourceImages(target = 'mainImages') {
-    const sourceImages = product.source?.snapshot?.[target] || [];
-    const max = target === 'mainImages' ? 6 : 30;
-    if (!sourceImages.length) return notify(`来源快照没有可还原的${target === 'mainImages' ? '主图' : '详情图'}`, 'error');
-    setForm((value) => ({ ...value, [target]: sourceImages.slice(0, max) }));
-    notify(`已从来源图片库还原${target === 'mainImages' ? '主图' : '详情图'}`);
-  }
-  async function watermarkImages(target = 'mainImages', remove = false) {
-    const label = target === 'mainImages' ? '主图' : '详情图';
-    const urls = remove ? (product.source?.snapshot?.[target] || []) : form[target];
-    if (!urls.length) return notify(`没有可处理的${label}`, 'error');
-    try {
-      const result = await Promise.all(urls.map((url) => new Promise((resolve, reject) => { const image = new Image(); image.crossOrigin = 'anonymous'; image.onload = () => { const canvas = document.createElement('canvas'); canvas.width = image.naturalWidth || 1200; canvas.height = image.naturalHeight || 800; const context = canvas.getContext('2d'); context.drawImage(image, 0, 0, canvas.width, canvas.height); if (!remove) { context.fillStyle = 'rgba(255,255,255,.72)'; context.fillRect(18, canvas.height - 54, 270, 36); context.fillStyle = '#f06423'; context.font = 'bold 22px Microsoft YaHei'; context.fillText('抄得快', 30, canvas.height - 28); } resolve(canvas.toDataURL('image/jpeg', .9)); }; image.onerror = () => reject(new Error('图片跨域或格式不支持')); image.src = url; })));
-      setForm((value) => ({ ...value, [target]: result.slice(0, target === 'mainImages' ? 6 : 30) }));
-      notify(remove ? `已从来源图片恢复${label}（去除本工具水印）` : `${label}水印已添加`);
-    } catch (error) { notify(`图片处理失败：${error.message}`, 'error'); }
-  }
-  function validateEditorForm(formElement) {
-    const invalid = [...formElement.elements].find((control) => control.willValidate && !control.checkValidity());
-    if (!invalid) return true;
-    const pane = invalid.closest('.editor-tab-pane');
-    const invalidTab = pane?.dataset.editorTab;
-    const label = invalid.closest('label')?.querySelector(':scope > span')?.textContent?.trim() || '表单字段';
-    const reason = invalid.validity.valueMissing ? '不能为空' : invalid.validity.rangeUnderflow ? '小于允许的最小值' : invalid.validity.rangeOverflow ? '超过允许的最大值' : invalid.validity.stepMismatch ? '数字精度或步进格式不正确' : '格式不正确';
-    if (invalidTab && invalidTab !== tab) setTab(invalidTab);
-    notify(`请检查${label}：${reason}`, 'error');
-    window.setTimeout(() => {
-      invalid.focus({ preventScroll: false });
-      invalid.reportValidity();
-    }, 0);
-    return false;
-  }
-  async function save(event) {
-    event.preventDefault();
-    if (!validateEditorForm(event.currentTarget)) return;
-    setSaving(true);
-    try {
-      const mainImages = form.mainImages.map((url) => url.trim()).filter(Boolean);
-      const fobPrice = { minPrice: Number(form.fobMinPrice || 0), maxPrice: Number(form.fobMaxPrice || 0), currencySymbol: product.currencySymbol || '$', tiers: form.fobTiers.map((tier) => ({ ...tier, minQuantity: Number(tier.minQuantity || 0), maxQuantity: tier.maxQuantity ? Number(tier.maxQuantity) : null, price: Number(tier.price || 0) })) };
-      await api(`/api/products/${product.id}`, { method: 'PATCH', body: JSON.stringify({
-        ...form, logisticsAttributes: form.logisticsAttributes.split('\n').map((value) => value.trim()).filter(Boolean), price: Number(form.price), stock: Number(form.stock), moq: Number(form.moq), mainImages,
-        images: mainImages, mainImage: mainImages[0] || '', detailImages: form.detailImages.map((url) => url.trim()).filter(Boolean),
-        fobPrice, ...(form.usdRate && product.currencySymbol !== '$' ? { usdRate: Number(form.usdRate) } : {}),
-        deliveryTime: [['1', form.deliveryDays], ['999999', form.deliveryDays]]
-      }) });
-      await onSaved();
-    } catch (error) { notify(error.message, 'error'); }
-    finally { setSaving(false); }
-  }
-  return <div className="drawer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><aside className="drawer">
-    <div className="drawer-header"><div><span>商品编辑</span><h2>{product.sourceId}</h2></div><button className="icon-button" onClick={onClose} title="关闭"><X size={20} /></button></div>
-    <form onSubmit={save} className="edit-form" noValidate>
-      <div className="editor-tabs">{[['basic', '基础信息'], ['media', '图片与视频'], ['attributes', '商品属性'], ['custom', '自定义属性'], ['specs', '规格与SKU'], ['trade', '交易信息'], ['logistics', '物流信息'], ['service', '服务与证书'], ['description', '商品描述'], ['regional', '国家/地区定价'], ['audit', '来源与审计']].map(([value, label]) => <button type="button" key={value} className={tab === value ? 'active' : ''} onClick={() => setTab(value)}>{label}</button>)}</div>
-      {product.publishResult?.requiredFields?.length > 0 && <p className="data-missing">上次发布需要补充或核对：{product.publishResult.requiredFields.join('、')}。请在商品属性或物流信息中填写后重试。</p>}
-      <div className={`editor-tab-pane ${tab === 'basic' ? '' : 'hidden'}`} data-editor-tab="basic">
-      <CategoryReadiness product={{ ...product, ...form }} />
-      <div className={`completeness-strip ${productCompleteness({ ...product, ...form, packaging: form.packaging }).complete ? 'complete' : ''}`}><CircleCheck size={17} /><span>主图 {form.mainImages.length} · 详情图 {form.detailImages.length} · 属性 {form.attributes.length} · 规格 {form.variantGroups.length} · 价格 {product.sourcePriceRange?.formattedText || `${form.priceTiers.length} 档`}</span></div>
-      <h3 className="edit-section-title">基础信息</h3>
-      {sourcePlatform(product) !== 'alibaba.com' && <div className="source-strip">{sourcePlatformLabel(product)} → 阿里巴巴国际站 · {product.sourceCurrency || product.currencySymbol} {product.sourcePrice}</div>}
-      {product.currencySymbol !== '$' && <label><span>换算汇率（1 原币 = 多少美元）</span><input type="number" min="0.000001" step="any" value={form.usdRate} onChange={update('usdRate')} />{form.usdRate && <small>换算后基准售价：${(Number(form.price || 0) * Number(form.usdRate)).toFixed(2)}</small>}</label>}
-      <label><span>商品标题</span><textarea rows="3" value={form.title} onChange={update('title')} maxLength="128" required /><small>{form.title.length}/128</small></label>
-      <label><span>副标题</span><input value={form.subtitle} onChange={update('subtitle')} maxLength="128" /></label>
-      <label><span>商品关键词（逗号分隔）</span><textarea rows="3" value={form.keywords.join(', ')} onChange={(event) => setForm((value) => ({ ...value, keywords: event.target.value.split(/[,，\n]/).map((item) => item.trim()).filter(Boolean) }))} /></label>
-      <div className="form-grid"><label><span>目标类目（请选择）</span><CategorySelect path={form.categoryPath.join(' >> ')} includeId onChange={(option) => setForm((value) => ({ ...value, categoryPath: option.path ? option.path.split(' >> ') : [], categoryId: option.id || '' }))} /></label><label><span>目标类目 ID</span><input value={form.categoryId} readOnly placeholder="由类目选择自动填充" /></label></div>
-      <div className="form-grid"><label><span>基准销售价</span><div className="prefix-input"><b>{product.currencySymbol || '$'}</b><input type="number" min="0" step="0.01" value={form.price} onChange={update('price')} required /></div></label><label><span>默认库存</span><input type="number" min="0" value={form.stock} onChange={update('stock')} required /></label><label><span>起订量</span><input type="number" min="1" value={form.moq} onChange={update('moq')} required /></label><label><span>交期（天）</span><input type="number" min="1" value={form.deliveryDays} onChange={update('deliveryDays')} /></label></div>
-      <label><span>商品详情</span><textarea rows="9" value={form.description} onChange={update('description')} placeholder="商品卖点、规格说明与采购信息" /></label>
-      </div>
-      <div className={`editor-tab-pane ${tab === 'media' ? '' : 'hidden'}`} data-editor-tab="media">
-      <h3 className="edit-section-title">主图与详情图</h3>
-      <h4 className="media-section-title">主图（最多 6 张）</h4>
-      <div className="image-toolbar"><label className="file-button secondary-button"><Plus size={15} />上传本地图片<input type="file" accept="image/*" multiple onChange={(event) => importLocalImages(event, 'mainImages', 6)} /></label><button type="button" className="secondary-button" onClick={() => restoreSourceImages('mainImages')}>从来源图片库还原</button><button type="button" className="secondary-button" onClick={() => watermarkImages('mainImages', false)}>添加水印</button><button type="button" className="secondary-button" onClick={() => watermarkImages('mainImages', true)}>去除本工具水印</button><button type="button" className="secondary-button danger-button" onClick={() => setForm((value) => ({ ...value, mainImages: [] }))}>清空主图</button></div>
-      <div className="media-grid">{form.mainImages.map((url, index) => <div className="media-row" key={`main-${index}`}><strong className="media-index">主图 {index + 1}</strong><div className="mini-preview">{url ? <img src={url} alt="" /> : <Boxes size={18} />}</div><input value={url} onChange={(event) => updateArray('mainImages', index, event.target.value)} aria-label={`主图 ${index + 1}`} /><button type="button" className="icon-button danger" onClick={() => removeArray('mainImages', index)} title="删除主图"><X size={15} /></button></div>)}</div>
-      <button type="button" className="secondary-button add-row-button" disabled={form.mainImages.length >= 6} onClick={() => setForm((value) => ({ ...value, mainImages: [...value.mainImages, ''] }))}><Plus size={15} />添加主图地址</button>
-      <h4 className="media-section-title">详情图（支持本地上传与来源还原）</h4>
-      <div className="image-toolbar"><label className="file-button secondary-button"><Plus size={15} />上传本地详情图<input type="file" accept="image/*" multiple onChange={(event) => importLocalImages(event, 'detailImages', 30)} /></label><button type="button" className="secondary-button" onClick={() => restoreSourceImages('detailImages')}>从来源图片库还原详情图</button><button type="button" className="secondary-button" onClick={() => watermarkImages('detailImages', false)}>添加水印</button><button type="button" className="secondary-button" onClick={() => watermarkImages('detailImages', true)}>去除本工具水印</button><button type="button" className="secondary-button danger-button" onClick={() => setForm((value) => ({ ...value, detailImages: [] }))}>清空详情图</button></div>
-      <div className="media-grid">{form.detailImages.map((url, index) => <div className="media-row" key={`detail-${index}`}><strong className="media-index">详情图 {index + 1}</strong><div className="mini-preview">{url ? <img src={url} alt="" /> : <Boxes size={18} />}</div><input value={url} onChange={(event) => updateArray('detailImages', index, event.target.value)} aria-label={`详情图 ${index + 1}`} /><button type="button" className="icon-button danger" onClick={() => removeArray('detailImages', index)} title="删除详情图"><X size={15} /></button></div>)}</div>
-      <button type="button" className="secondary-button add-row-button" onClick={() => setForm((value) => ({ ...value, detailImages: [...value.detailImages, ''] }))}><Plus size={15} />添加详情图地址</button>
-      <label><span>商品视频地址</span><input value={form.videoUrl} onChange={update('videoUrl')} /></label>
-      </div>
-      <div className={`editor-tab-pane ${tab === 'attributes' ? '' : 'hidden'}`} data-editor-tab="attributes">
-      <h3 className="edit-section-title">商品属性</h3>
-      <div className="repeat-list">{form.attributes.map((item, index) => <div className="edit-data-row" key={`attr-${index}`}><input value={item.name || ''} onChange={(event) => updateArray('attributes', index, { ...item, name: event.target.value })} placeholder="属性名" /><input value={String(item.value ?? '')} onChange={(event) => updateArray('attributes', index, { ...item, value: event.target.value })} placeholder="属性值" /><button type="button" className="icon-button danger" onClick={() => removeArray('attributes', index)} title="删除属性"><X size={15} /></button></div>)}</div>
-      <button type="button" className="secondary-button add-row-button" onClick={() => setForm((value) => ({ ...value, attributes: [...value.attributes, { name: '', value: '' }] }))}><Plus size={15} />添加属性</button>
-      </div>
-      <div className={`editor-tab-pane ${tab === 'custom' ? '' : 'hidden'}`} data-editor-tab="custom"><h3 className="edit-section-title">自定义属性</h3><div className="repeat-list">{form.customAttributes.map((item, index) => <div className="edit-data-row" key={`custom-${index}`}><input value={item.name || ''} onChange={(event) => updateArray('customAttributes', index, { ...item, name: event.target.value })} placeholder="属性名" /><input value={String(item.value ?? '')} onChange={(event) => updateArray('customAttributes', index, { ...item, value: event.target.value })} placeholder="属性值" /><button type="button" className="icon-button danger" onClick={() => removeArray('customAttributes', index)} title="删除自定义属性"><X size={15} /></button></div>)}</div><button type="button" className="secondary-button add-row-button" onClick={() => setForm((value) => ({ ...value, customAttributes: [...value.customAttributes, { name: '', value: '' }] }))}><Plus size={15} />添加自定义属性</button></div>
-      <div className={`editor-tab-pane ${tab === 'specs' ? '' : 'hidden'}`} data-editor-tab="specs">
-      <h3 className="edit-section-title">规格组合</h3>
-      <div className="repeat-list">{form.variantGroups.map((group, index) => <div className="edit-data-row" key={`variant-${index}`}><input value={group.name || ''} onChange={(event) => updateArray('variantGroups', index, { ...group, name: event.target.value })} placeholder="规格名" /><input value={(group.options || []).join(', ')} onChange={(event) => updateArray('variantGroups', index, { ...group, options: event.target.value.split(/[,，]/).map((option) => option.trim()).filter(Boolean) })} placeholder="选项，用逗号分隔" /><button type="button" className="icon-button danger" onClick={() => removeArray('variantGroups', index)} title="删除规格"><X size={15} /></button></div>)}</div>
-      <button type="button" className="secondary-button add-row-button" onClick={() => setForm((value) => ({ ...value, variantGroups: [...value.variantGroups, { name: '', options: [] }] }))}><Plus size={15} />添加规格</button>
-      <h3 className="edit-section-title">SKU 明细</h3>
-      {form.skus.some((sku) => sku.derived) && <div className="sku-warning"><CircleAlert size={16} />当前SKU由规格组合推导。请人工确认每行价格、库存、编码和图片后再发布。</div>}
-      <div className="sku-table-wrap"><table className="sku-table"><thead><tr><th>规格组合</th><th>SKU编码</th><th>价格</th><th>库存</th><th>图片</th><th>来源</th><th /></tr></thead><tbody>{form.skus.map((sku, index) => <tr key={sku.id || index}><td>{Object.entries(sku.attributes || {}).map(([name, value]) => `${name}: ${value}`).join(' / ') || sku.name}</td><td><input value={sku.code || ''} onChange={(event) => updateArray('skus', index, { ...sku, code: event.target.value })} /></td><td><input type="number" min="0" step="0.01" value={sku.price || ''} onChange={(event) => updateArray('skus', index, { ...sku, price: event.target.value })} /></td><td><input type="number" min="0" value={sku.stock ?? ''} onChange={(event) => updateArray('skus', index, { ...sku, stock: Number(event.target.value) })} /></td><td><input value={sku.image || ''} onChange={(event) => updateArray('skus', index, { ...sku, image: event.target.value })} /></td><td><span className={`source-tag ${sku.derived ? 'derived' : ''}`}>{sku.derived ? '推导' : '来源'}</span></td><td><button type="button" className="icon-button danger" onClick={() => removeArray('skus', index)} title="删除SKU"><X size={15} /></button></td></tr>)}</tbody></table></div>
-      <button type="button" className="secondary-button add-row-button" onClick={() => setForm((value) => ({ ...value, skus: [...value.skus, { id: `sku-${Date.now()}`, attributes: {}, code: '', price: value.price, stock: value.stock, image: '', derived: false, source: 'manual' }] }))}><Plus size={15} />添加SKU</button>
-      </div>
-      <div className={`editor-tab-pane ${tab === 'trade' ? '' : 'hidden'}`} data-editor-tab="trade">
-      <h3 className="edit-section-title">阶梯价格</h3>
-      {product.sourcePriceRange && <div className="sku-warning"><CircleAlert size={16} />来源页面公开价格区间：{product.sourcePriceRange.formattedText} / {product.sourcePriceRange.unit || form.salesUnit}。来源未公开的逐 SKU 价格不会由系统推测或改写。</div>}
-      <div className="tier-header"><span>起订量</span><span>结束量</span><span>单价 {product.currencySymbol || '$'}</span><i /></div>
-      <div className="repeat-list">{form.priceTiers.map((tier, index) => <div className="tier-row" key={`tier-${index}`}><input type="number" min="1" value={tier.minQuantity || ''} onChange={(event) => updateArray('priceTiers', index, { ...tier, minQuantity: Number(event.target.value) })} /><input type="number" min="1" value={tier.maxQuantity ?? ''} placeholder="不限" onChange={(event) => updateArray('priceTiers', index, { ...tier, maxQuantity: event.target.value ? Number(event.target.value) : null })} /><input type="number" min="0" step="0.01" value={tier.price || ''} onChange={(event) => updateArray('priceTiers', index, { ...tier, price: event.target.value, currencySymbol: product.currencySymbol || '$' })} /><button type="button" className="icon-button danger" onClick={() => removeArray('priceTiers', index)} title="删除价格档"><X size={15} /></button></div>)}</div>
-      <button type="button" className="secondary-button add-row-button" onClick={() => setForm((value) => ({ ...value, priceTiers: [...value.priceTiers, { minQuantity: 1, maxQuantity: null, price: value.price, currencySymbol: product.currencySymbol || '$' }] }))}><Plus size={15} />添加价格档</button>
-      <div className="form-grid"><label><span>销售单位</span><input value={form.salesUnit || ''} onChange={update('salesUnit')} placeholder="Piece" /></label><label><span>付款方式</span><input value={form.paymentMethod || ''} onChange={update('paymentMethod')} /></label></div>
-      <label><span>定价模式</span><select value={form.priceMode} onChange={update('priceMode')}><option value="quantity-tier">按数量阶梯价</option><option value="sku">按SKU定价</option><option value="fob-range">FOB区间价格</option><option value="fob-tier">FOB阶梯价格</option><option value="source-range">来源公开区间价</option></select></label>
-      {form.priceMode === 'fob-range' && <div className="form-grid"><label><span>FOB最低价</span><input type="number" min="0" step="0.01" value={form.fobMinPrice} onChange={update('fobMinPrice')} /></label><label><span>FOB最高价</span><input type="number" min="0" step="0.01" value={form.fobMaxPrice} onChange={update('fobMaxPrice')} /></label></div>}
-      {form.priceMode === 'fob-tier' && <><h3 className="edit-section-title">FOB阶梯价格</h3><div className="tier-header"><span>起订量</span><span>结束量</span><span>FOB单价 {product.currencySymbol || '$'}</span><i /></div><div className="repeat-list">{form.fobTiers.map((tier, index) => <div className="tier-row" key={`fob-${index}`}><input type="number" min="1" value={tier.minQuantity || ''} onChange={(event) => updateArray('fobTiers', index, { ...tier, minQuantity: Number(event.target.value) })} /><input type="number" min="1" value={tier.maxQuantity ?? ''} placeholder="不限" onChange={(event) => updateArray('fobTiers', index, { ...tier, maxQuantity: event.target.value ? Number(event.target.value) : null })} /><input type="number" min="0" step="0.01" value={tier.price || ''} onChange={(event) => updateArray('fobTiers', index, { ...tier, price: event.target.value })} /><button type="button" className="icon-button danger" onClick={() => removeArray('fobTiers', index)} title="删除FOB价格档"><X size={15} /></button></div>)}</div><button type="button" className="secondary-button add-row-button" onClick={() => setForm((value) => ({ ...value, fobTiers: [...value.fobTiers, { minQuantity: 1, maxQuantity: null, price: value.price }] }))}><Plus size={15} />添加FOB价格档</button></>}
-      </div>
-      <div className={`editor-tab-pane ${tab === 'logistics' ? '' : 'hidden'}`} data-editor-tab="logistics">
-      <h3 className="edit-section-title">产品与包装</h3>
-      <div className="form-grid"><label><span>产品类型</span><input value={form.productType} onChange={update('productType')} /></label><label><span>品牌</span><input value={form.brand} onChange={update('brand')} /></label><label><span>型号</span><input value={form.model} onChange={update('model')} /></label><label><span>原产地（国家）</span><OriginCountrySelect value={form.origin} onChange={(origin) => setForm((current) => ({ ...current, ...synchronizeProductOrigin(current, { origin }) }))} /></label></div>
-      <div className="form-grid packaging-grid">{[['length', '包装长 (cm)'], ['width', '包装宽 (cm)'], ['height', '包装高 (cm)'], ['weight', '包装重量 (kg)']].map(([key, label]) => <label key={key}><span>{label}</span><input type="number" min="0" step="any" value={form.packaging[key] || ''} onChange={(event) => setForm((value) => ({ ...value, packaging: { ...value.packaging, [key]: event.target.value } }))} /></label>)}</div>
-      <label><span>运费模板</span><input value={form.freightTemplate || ''} onChange={update('freightTemplate')} /></label>
-      <label><span>物流属性（每行一项）</span><textarea value={form.logisticsAttributes} onChange={update('logisticsAttributes')} placeholder="填写国际站发布页中的准确选项名称；电池、液体等属性请按实物确认" /></label>
-      </div>
-      <div className={`editor-tab-pane ${tab === 'description' ? '' : 'hidden'}`} data-editor-tab="description">
-      <label><span>商品摘要</span><textarea rows="5" value={form.description} onChange={update('description')} /></label><label><span>普通富文本详情 HTML</span><textarea rows="14" value={form.descriptionHtml} onChange={update('descriptionHtml')} /></label>
-      </div>
-      <div className={`editor-tab-pane ${tab === 'service' ? '' : 'hidden'}`} data-editor-tab="service">
-      <label><span>服务数据 JSON</span><textarea rows="8" value={JSON.stringify(form.services || {}, null, 2)} onChange={(event) => { try { setForm((value) => ({ ...value, services: JSON.parse(event.target.value || '{}') })); } catch {} }} /></label><div className="repeat-list">{form.certificates.map((item, index) => <div className="certificate-row" key={`certificate-${index}`}><input value={item.name || ''} placeholder="证书名称" onChange={(event) => updateArray('certificates', index, { ...item, name: event.target.value })} /><input value={item.number || ''} placeholder="证书编号" onChange={(event) => updateArray('certificates', index, { ...item, number: event.target.value })} /><select value={String(item.verified ?? '')} onChange={(event) => updateArray('certificates', index, { ...item, verified: event.target.value === '' ? null : event.target.value === 'true' })}><option value="">未核验</option><option value="true">已核验</option><option value="false">核验失败</option></select><button type="button" className="icon-button danger" onClick={() => removeArray('certificates', index)} title="删除证书"><X size={15} /></button></div>)}</div><button type="button" className="secondary-button add-row-button" onClick={() => setForm((value) => ({ ...value, certificates: [...value.certificates, { name: '', number: '', verified: null, source: 'manual' }] }))}><Plus size={15} />添加证书</button>
-      </div>
-      <div className={`editor-tab-pane ${tab === 'regional' ? '' : 'hidden'}`} data-editor-tab="regional">
-      <label><span>国家/地区价格 JSON</span><textarea rows="5" value={JSON.stringify(form.regionalPricing || {}, null, 2)} onChange={(event) => { try { setForm((value) => ({ ...value, regionalPricing: JSON.parse(event.target.value || '{}') })); } catch {} }} /></label>
-      </div>
-      <div className={`editor-tab-pane ${tab === 'audit' ? '' : 'hidden'}`} data-editor-tab="audit"><div className="audit-summary"><strong>质量分 {product.quality?.score ?? '-'}</strong><span>{product.quality?.errors || 0} 个阻断项 · {product.quality?.warnings || 0} 个待确认项</span></div><div className="issue-list">{(product.quality?.issues || []).map((item) => <div key={item.code} className={`issue-row ${item.severity}`}><span>{item.severity === 'error' ? '阻断' : item.severity === 'warning' ? '待确认' : '提示'}</span><strong>{item.message}</strong><code>{item.field}</code></div>)}</div><h3 className="edit-section-title">来源记录</h3><dl className="source-facts"><div><dt>平台</dt><dd>{product.source?.platform || 'alibaba.com'}</dd></div><div><dt>采集语言</dt><dd>{product.sourceLanguage || product.source?.language || '未记录'} · 请求环境 {product.sourceCaptureLocale || product.source?.captureLocale || '-'}</dd></div><div><dt>采集时间</dt><dd>{product.source?.capturedAt || '-'}</dd></div><div><dt>来源商品</dt><dd>{product.source?.productId || product.sourceId}</dd></div><div><dt>来源快照字段</dt><dd>{Object.keys(product.source?.snapshot || {}).length} 个，当前工作字段 {Object.keys(product.working || {}).length} 个</dd></div><div><dt>人工修改记录</dt><dd>{product.auditTrail?.length || 0} 次</dd></div><div><dt>发布快照</dt><dd>{product.publishHistory?.length || 0} 次</dd></div></dl><details className="source-details"><summary>查看来源快照与当前工作数据</summary><div className="source-json-grid"><div><strong>来源快照（只读）</strong><pre>{JSON.stringify(product.source?.snapshot || {}, null, 2)}</pre></div><div><strong>当前工作数据</strong><pre>{JSON.stringify(product.working || {}, null, 2)}</pre></div></div></details></div>
-      <div className="source-strip"><ExternalLink size={15} /><a href={product.sourceUrl} onClick={(event) => { event.preventDefault(); if (sourcePlatform(product) === 'alibaba.com' && window.kuaYipu?.openSource) window.kuaYipu.openSource(product.sourceUrl).catch(() => {}); else window.open(product.sourceUrl, '_blank', 'noopener,noreferrer'); }} rel="noreferrer">打开来源商品</a></div>
-      <div className="drawer-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={saving}>{saving ? <LoaderCircle className="spin" size={17} /> : <Save size={17} />}保存修改</button></div>
-    </form>
-  </aside></div>;
-}
 
 function PublishView({ state, refresh, notify, onMenu, platform, setPlatform, folderId }) {
   const allSelected = state.products.filter((item) => item.selected && item.collectionFolderId === folderId);

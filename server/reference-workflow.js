@@ -4,6 +4,7 @@ import { createPublishedReferenceTemplate, createRequiredFieldRepair, requiredAt
 import { productCategory } from './category-routing.js';
 import { attachCategoryRequirements } from './category-readiness.js';
 import { findWorkspaceJobs } from './store.js';
+import { productEditPatch } from './product-edit.js';
 
 const success = (status) => ['published', 'submitted', 'success'].includes(String(status || '').toLowerCase());
 const hash = (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -87,8 +88,10 @@ export function previewProductReference(state, request) {
   if (!ids.length) fail('请选择需要引用的商品');
   const reference = referenceCandidates(state).find((item) => item.id === request.referenceId);
   if (!reference) fail('请选择已成功上架或从卖家后台读取的商品');
-  const products = ids.map((id) => state.products.find((item) => item.id === id));
-  if (products.some((item) => !item)) fail('部分商品已不存在，请刷新列表', 409);
+  const storedProducts = ids.map((id) => state.products.find((item) => item.id === id));
+  if (storedProducts.some((item) => !item)) fail('部分商品已不存在，请刷新列表', 409);
+  if (request.editorDraft && ids.length !== 1) fail('编辑预览只能包含一件商品');
+  const products = storedProducts.map((product) => ({ ...product, ...productEditPatch(request.editorDraft) }));
   if (findWorkspaceJobs(state, { productIds: ids }, ['queued', 'running', 'pause_requested']).length) fail('所选商品正在处理，请暂停任务后再引用资料', 409);
   const options = request.options || {};
   const items = products.map((product) => {
@@ -100,7 +103,7 @@ export function previewProductReference(state, request) {
       failure: product.publishResult || product.referenceRecovery?.failure || null, changes,
       skipped: blocked ? '商品已发布或就是引用商品' : !changes.length ? '没有需要修改的字段' : '', patch };
   });
-  const token = hash({ ids, options, reference: reference.template, products });
+  const token = hash({ ids, options, reference: reference.template, products, storedProducts });
   return { referenceId: reference.id, referenceTitle: reference.title, token, items };
 }
 
@@ -113,7 +116,7 @@ export function applyReferencePreview(state, request) {
     const recovery = { referenceId: preview.referenceId, appliedAt: new Date().toISOString(),
       failure: structuredClone(product.publishResult || product.referenceRecovery?.failure || null),
       fields: item.changes.map((change) => change.field), state: 'ready' };
-    recordProductMutation(product, { ...item.patch, referenceRecovery: recovery, status: 'ready', selected: true },
+    recordProductMutation(product, { ...productEditPatch(request.editorDraft), ...item.patch, referenceRecovery: recovery, status: 'ready', selected: true },
       { actor: 'user', action: 'reference-published-product' });
     delete product.publishResult;
     attachCategoryRequirements(product, state.postingSchemas);

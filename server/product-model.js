@@ -323,8 +323,11 @@ export function applyPublishedProductReference(target, reference, options = {}) 
     const colorImages = imageMap(reference.colorImages);
     const modelImages = imageMap(reference.modelImages);
     patch.variantGroups = patch.variantGroups.map((group) => {
-      const name = String(group?.name || '').toLowerCase();
-      const extraImages = /color|colour|颜色/.test(name) ? colorImages : /model|型号/.test(name) ? modelImages : {};
+      const name = requiredAttributeKey(group?.name);
+      // Model Number and Compatible Model are distinct specification groups.
+      // Only attach legacy image maps to their own group and current options.
+      const images = name === requiredAttributeKey('Color') ? colorImages : name === requiredAttributeKey('Model Number') ? modelImages : {};
+      const extraImages = Object.fromEntries(Object.entries(images).filter(([value]) => group.options?.includes(value)));
       return Object.keys(extraImages).length
         ? { ...group, optionImages: { ...(group.optionImages || {}), ...clone(extraImages) } }
         : group;
@@ -380,6 +383,7 @@ function snapshotFields(product) {
     packaging: product.packaging || {}, deliveryTime: list(product.deliveryTime), shipping: product.shipping || {},
     ...(product.sourcePackaging ? { sourcePackaging: product.sourcePackaging } : {}),
     freightTemplate: product.freightTemplate || '', logisticsAttributes: list(product.logisticsAttributes), services: product.services || {}, certificates: list(product.certificates),
+    ...(product.sellerGroup ? { sellerGroup: product.sellerGroup } : {}),
     description: product.description || '', descriptionHtml: product.descriptionHtml || '',
     structuredDescription: product.structuredDescription || null, regionalPricing: product.regionalPricing || {}
   });

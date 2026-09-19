@@ -86,9 +86,9 @@ try {
   assert.equal(discoveryRequested, true);
   await page.locator('.sidebar nav button').filter({ hasText: '商品工作台' }).click();
   await page.getByTitle('编辑完整资料').click();
-  await page.locator('.editor-tabs').getByRole('button', { name: '物流信息', exact: true }).click();
+  await page.getByRole('tab', { name: '商品属性', exact: true }).click();
   await page.getByLabel('产地国家').selectOption('Japan');
-  await page.getByRole('button', { name: '保存修改', exact: true }).click();
+  await page.getByRole('button', { name: '保存', exact: true }).click();
   await page.getByText('商品修改已保存', { exact: true }).waitFor();
   assert.equal(store.read().products[0].origin, 'Japan');
   assert.equal(store.read().products[0].attributes[0].value, 'Japan');
@@ -125,11 +125,11 @@ try {
   assert.equal(store.read().products[0].origin, 'China');
   assert.equal(store.read().products[0].attributes[0].value, 'China');
   await page.getByTitle('编辑完整资料').click();
-  await page.locator('.editor-tabs').getByRole('button', { name: '物流信息', exact: true }).click();
+  await page.getByRole('tab', { name: '商品属性', exact: true }).click();
   await page.getByLabel('产地国家').scrollIntoViewIfNeeded();
-  assert.ok(await page.locator('.drawer').evaluate((node) => node.scrollWidth <= node.clientWidth));
+  assert.ok(await page.locator('.pe-window').evaluate((node) => node.scrollWidth <= node.clientWidth));
   await page.screenshot({ path: path.join(root, 'origin-desktop.png') });
-  await page.getByRole('button', { name: '取消', exact: true }).click();
+  await page.getByRole('button', { name: '返回', exact: true }).click();
   store.update((state) => {
     state.jobs = [{ id: 'publish-live', type: 'publish', status: 'running', progress: 1, total: 3,
       currentProductId: 'qa-product', createdAt: new Date().toISOString(), message: '正在上传商品图片',

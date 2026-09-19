@@ -83,3 +83,47 @@ test('repairs a rejected single specification consistently while refusing to col
   target.variantGroups[0].options.push('Another');
   assert.deepEqual(buildReferencePatch(target, reference, { scope: 'failed-fields' }), {});
 });
+
+test('replaces an entire same-category template including removed color and new model image while retaining commercial content', () => {
+  // User-provided before/after example: a GWRC propeller references a PUSD VTX.
+  const target = syncProductModel({ id: 'propeller', status: 'ready', categoryId: '201346401',
+    title: 'Gwrc 10-Inch Plastic Three-Blade Propeller', brand: 'GWRC', model: '', color: 'Black',
+    compatibleBrand: 'For FPV', material: 'Plastic', privateMold: 'No', productType: 'Propellers',
+    attributes: [{ name: 'brand name', value: 'GWRC' }, { name: 'compatible brand', value: 'For FPV' },
+      { name: 'Material', value: 'Plastic' }, { name: 'private mold', value: 'No' }], customAttributes: [],
+    variantGroups: [{ name: 'color', options: ['Black'], optionImages: { Black: 'https://example.test/propeller.jpg' } },
+      { name: 'compatible model', options: ['10-Inch 1050'] }, { name: 'type', options: ['Propellers'] }],
+    colorImages: { Black: 'https://example.test/propeller.jpg' },
+    skus: [{ attributes: { color: 'Black', 'compatible model': '10-Inch 1050', type: 'Propellers' }, price: 3.5 }],
+    price: 3.5, minOrder: 2, priceTiers: [{ min: 2, price: 3.5 }, { min: 500, price: 2.9 }, { min: 2000, price: 2.7 }],
+    salesUnit: 'Piece', deliveryTime: [{ quantity: 500, days: 7 }], packaging: { weight: '0.010', length: '7', width: '7', height: '3.5' },
+    mainImages: ['https://example.test/propeller.jpg'], description: 'Plastic three-blade propeller',
+    detailImages: ['https://example.test/propeller-detail.jpg'],
+  }, { captureSource: true });
+  const template = { id: 'vtx', status: 'published', categoryId: '201346401', categoryPath: ['消费电子', '无人机配件'],
+    brand: 'PUSD', model: '5.8G 3W', compatibleBrand: ['DJI', 'Others'], material: ['Metal', 'Rubber'], privateMold: 'Yes',
+    productType: 'FPV VTX', attributes: [{ name: '品牌名称', value: 'PUSD' }, { name: '适用品牌', value: ['DJI', 'Others'] },
+      { name: '材质', value: ['Metal', 'Rubber'] }, { name: '私模', value: 'Yes' }],
+    variantGroups: [{ name: '适用型号', options: ['Other'] },
+      { name: '型号', options: ['5.8G 3W'], optionImages: { '5.8G 3W': 'https://example.test/vtx.jpg' } },
+      { name: '类型', options: ['FPV VTX'] }],
+    modelImages: { '5.8G 3W': 'https://example.test/vtx.jpg' },
+  };
+  const before = structuredClone(target), state = { products: [target, template], jobs: [] };
+  const request = { ids: ['propeller'], referenceId: 'vtx', options: { scope: 'full' } };
+  const preview = previewProductReference(state, request);
+  assert.equal(preview.items[0].categoryChanged, false);
+  assert.ok(preview.items[0].changes.some((change) => change.field === 'brand' && change.before === 'GWRC' && change.after === 'PUSD'));
+  applyReferencePreview(state, { ...request, previewToken: preview.token });
+  assert.equal(target.brand, 'PUSD'); assert.equal(target.model, '5.8G 3W'); assert.equal(target.color, '');
+  assert.deepEqual(target.colorImages, {}); assert.deepEqual(target.modelImages, template.modelImages);
+  assert.deepEqual(target.variantGroups, template.variantGroups);
+  assert.equal(target.attributes.some((item) => item.value === 'Plastic' || item.value === 'For FPV'), false);
+  assert.equal(target.privateMold, 'Yes'); assert.deepEqual(target.material, ['Metal', 'Rubber']);
+  assert.deepEqual(target.skus[0].attributes, { 适用型号: 'Other', 型号: '5.8G 3W', 类型: 'FPV VTX' });
+  assert.equal(target.skus[0].image, 'https://example.test/vtx.jpg'); assert.equal(target.skus[0].price, 3.5);
+  for (const field of ['title', 'mainImages', 'detailImages', 'description', 'price', 'priceTiers', 'minOrder', 'salesUnit', 'deliveryTime', 'packaging', 'source']) {
+    assert.deepEqual(target[field], before[field], field);
+  }
+  assert.equal(verifySourceIntegrity(target).valid, true);
+});

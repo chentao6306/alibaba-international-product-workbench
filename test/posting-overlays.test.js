@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { chromium } from 'playwright-core';
 import { findChromium } from '../server/browser-runtime.js';
-import { dismissPostingOverlays, fillChoice, waitForActionResult } from '../server/publisher.js';
+import { dismissPostingOverlays, fillCategoryAttributes, fillChoice, requireCategoryAttributes, waitForActionResult } from '../server/publisher.js';
 import { userFacingError } from '../server/browser-error.js';
 
 // Alibaba's TinyMCE table toolbar is labelled as a dialog, although it is
@@ -11,6 +11,27 @@ const inlineToolbar = `<div class="mce-tinymce mce-tinymce-inline mce-floatpanel
   role="dialog" aria-label="Inline toolbar" style="position:absolute;top:2000px">
   <div role="toolbar"><button aria-label="Delete table" onclick="document.querySelector('table').remove()">×</button></div>
 </div>`;
+
+test('clears a feature notice mounted during attribute filling before completing remaining required fields', { skip: !findChromium() }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<div class="sell-catProp-item" id="struct-p-2"><label>品牌名称</label><input required></div>
+      <div class="sell-catProp-item" id="struct-p-3"><label>蜂窝频段</label><input required></div>
+      <script>document.querySelector('input').addEventListener('input', () => {
+        if(window.noticeShown)return;window.noticeShown=true;
+        const notice=document.createElement('div');notice.className='next-dialog';notice.setAttribute('role','dialog');
+        notice.style='position:fixed;inset:0;background:white;z-index:100';
+        notice.innerHTML='AI详描体验<button onclick="this.parentElement.remove()">关闭</button>';document.body.append(notice);
+      });</script>`);
+    const product = { attributes: [{ id: '2', name: 'Brand Name', value: 'Other' }, { id: '3', name: 'Cellular Band', value: 'GSM' }] };
+    await fillCategoryAttributes(page, product);
+    assert.equal(await page.locator('#struct-p-2 input').inputValue(), 'Other');
+    assert.equal(await page.locator('#struct-p-3 input').inputValue(), 'GSM');
+    assert.equal(await page.locator('.next-dialog').count(), 0);
+    await requireCategoryAttributes(page, product);
+  } finally { await browser.close(); }
+});
 
 test('saves a draft with an open TinyMCE inline table toolbar without changing editor content', { skip: !findChromium() }, async () => {
   const browser = await chromium.launch({ executablePath: findChromium(), headless: true });

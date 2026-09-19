@@ -675,23 +675,10 @@ async function currentFormDiagnostics(page) {
 }
 
 export async function captureCategoryAttributes(page) {
-  return page.locator('.sell-catProp-item, #struct-specification [id^="p-"]').evaluateAll((rows) => rows
-    .filter((row) => row.offsetWidth || row.offsetHeight)
-    .map((row) => {
-      const label = row.querySelector('.label, label')?.cloneNode(true);
-      label?.querySelectorAll('.upload-image-switch, .next-icon, button').forEach((node) => node.remove());
-      const name = String(label?.textContent || '').replace(/^[*＊]\s*/, '').replace(/(?:添加规格图|Add Specification).*$/i, '').replace(/[：:]\s*$/, '').trim();
-      const selected = [...row.querySelectorAll('.next-select-values em, .next-tag-body')]
-        .map((node) => node.textContent?.trim()).filter(Boolean);
-      const inputs = [...row.querySelectorAll('input:not([type="hidden"]), textarea, select')]
-        .filter((node) => !['file', 'button', 'submit', 'search'].includes(node.type))
-        .filter((node) => !['checkbox', 'radio'].includes(node.type) || node.checked)
-        .flatMap((node) => node.tagName === 'SELECT' ? [...node.selectedOptions].filter((option) => option.value).map((option) => option.textContent.trim())
-          : ['checkbox', 'radio'].includes(node.type) ? node.closest('label')?.textContent?.trim() : node.value)
-        .filter(Boolean);
-      const values = [...new Set(selected.length ? selected : inputs)];
-      return { name, value: values.length > 1 ? values : values[0] || '' };
-    }).filter((item) => item.name && item.value)).catch(() => []);
+  // Successful-reference snapshots must use the same committed values as
+  // validation, including the custom brand entered after selecting Other.
+  return (await page.evaluate(readPostingAttributeSchema)).filter((field) => field.values.length)
+    .map((field) => ({ name: field.label, value: field.values.length > 1 ? field.values : field.values[0] }));
 }
 
 export async function waitForActionResult(page, action, mode, originalUrl) {
@@ -3168,6 +3155,9 @@ export async function fillCategoryAttributes(page, product, onProgress = () => {
     let pending = 0;
     const fields = await page.evaluate(readPostingAttributeSchema);
     for (const initial of fields) {
+      // Feature notices can arrive after the form has loaded or after an
+      // earlier field changes. Clear them before resolving the next control.
+      if (await page.locator(POSTING_BLOCKERS).count()) await requireClearPostingOverlays(page);
       const current = await page.evaluate(readPostingAttributeSchema);
       let field = current.find((entry) => initial.id ? entry.id === initial.id : entry.label === initial.label);
       if (!field || field.disabled || isOriginRegionAttribute(field.label) || (field.saleSpecification && !field.required)) continue;
@@ -3183,13 +3173,21 @@ export async function fillCategoryAttributes(page, product, onProgress = () => {
       }
       pending++;
       onProgress(`填写类目属性：${field.label}`);
-      const filled = requiredAttributeKey(field.label) === requiredAttributeKey('产地')
-        ? await fillOriginCountry(page, product.origin || value)
-        : await fillChoice(page, categoryFieldLocator(page, field), value, {
+      let filled;
+      try {
+        filled = requiredAttributeKey(field.label) === requiredAttributeKey('产地')
+          ? await fillOriginCountry(page, product.origin || value)
+          : await fillChoice(page, categoryFieldLocator(page, field), value, {
           ...choiceOptions,
           onValueCommitted: (id, label) => { choiceOptions.labels[id] = label; },
           minimumScore: ['Age', 'Age Range'].some((name) => requiredAttributeKey(field.label) === requiredAttributeKey(name)) ? 90 : 70,
         }).catch(() => false);
+      } catch (error) {
+        if (!await page.locator(POSTING_BLOCKERS).count()) throw error;
+        await requireClearPostingOverlays(page);
+        changed = true;
+        continue;
+      }
       if (filled) { mapped.add(source?.name || field.label); changed = true; }
     }
     if (!pending) break;
@@ -4920,6 +4918,13 @@ export class SellerPublisher {
 
   async downloadProductVideo(product) {
     if (!product.videoUrl) return '';
+    if (/^\/media\/[a-zA-Z0-9-]+\.mp4$/.test(product.videoUrl)) {
+      const file = path.join(this.dataDir, 'media', path.basename(product.videoUrl));
+      if (!fs.existsSync(file)) throw new Error('本地商品视频不存在，请重新选择');
+      const size = fs.statSync(file).size;
+      if (!size || size > 100 * 1024 * 1024) throw new Error('本地商品视频大小无效或超过 100MB');
+      return file;
+    }
     fs.mkdirSync(this.videoDir, { recursive: true });
     const response = await fetch(product.videoUrl, { headers: { referer: product.sourceUrl, 'user-agent': 'Mozilla/5.0' } });
     if (!response.ok) throw new Error(`商品视频下载失败（HTTP ${response.status}）`);

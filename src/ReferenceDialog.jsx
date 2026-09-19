@@ -12,11 +12,11 @@ async function request(url, body) {
   return data;
 }
 
-export default function ReferenceDialog({ products, onClose, onSaved, notify }) {
+export default function ReferenceDialog({ products, onClose, onSaved, notify, editorDraft, onApplyDraft, initialScope = 'full' }) {
   const [references, setReferences] = useState([]);
   const [referenceId, setReferenceId] = useState('');
   const [query, setQuery] = useState('');
-  const [options, setOptions] = useState({ scope: 'full', preserveSkuStock: true, includeLogistics: false });
+  const [options, setOptions] = useState({ scope: initialScope, preserveSkuStock: true, includeLogistics: false });
   const [preview, setPreview] = useState(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -30,7 +30,7 @@ export default function ReferenceDialog({ products, onClose, onSaved, notify }) 
   const reference = references.find((item) => item.id === referenceId);
   const template = reference?.template;
   const candidates = references.filter((item) => item.id === referenceId || [item.title, item.categoryId, (item.categoryPath || []).join(' '), item.template?.model].join(' ').toLowerCase().includes(query.toLowerCase()));
-  const body = { ids: products.map((item) => item.id), referenceId, options };
+  const body = { ids: products.map((item) => item.id), referenceId, options, ...(editorDraft ? { editorDraft } : {}) };
   function changeOptions(patch) { setOptions((value) => ({ ...value, ...patch })); setPreview(null); }
   async function run(action) {
     setBusy(true);
@@ -62,7 +62,7 @@ export default function ReferenceDialog({ products, onClose, onSaved, notify }) 
       {item.categoryChanged && <p className="reference-error">将更换商品类目，请核对新类目与商品是否相符。</p>}
       {item.changes.map((change) => <div className="reference-diff" key={change.field}><strong>{labels[change.field] || change.field}</strong><div><span>修改前</span><pre>{show(change.before)}</pre></div><div><span>修改后</span><pre>{show(change.after)}</pre></div></div>)}
     </details>)}</section>}
-    <div className="drawer-actions"><button className="secondary-button" disabled={busy} onClick={onClose}>取消</button><button className="secondary-button" disabled={busy || !referenceId} onClick={() => run(async () => setPreview(await request('/api/products/reference/preview', body)))}>预览修改</button><button className="primary-button" disabled={busy || !preview?.items.some((item) => !item.skipped)} onClick={() => run(async () => onSaved(await request('/api/products/reference', { ...body, previewToken: preview.token })))}>引用并保存</button></div>
+    <div className="drawer-actions"><button className="secondary-button" disabled={busy} onClick={onClose}>取消</button><button className="secondary-button" disabled={busy || !referenceId} onClick={() => run(async () => setPreview(await request('/api/products/reference/preview', body)))}>预览修改</button><button className="primary-button" disabled={busy || !preview?.items.some((item) => !item.skipped)} onClick={() => run(async () => onApplyDraft ? onApplyDraft({ patch: preview.items[0].patch, review: { ...body, previewToken: preview.token } }) : onSaved(await request('/api/products/reference', { ...body, previewToken: preview.token })))}>{onApplyDraft ? '应用到编辑窗口' : '引用并保存'}</button></div>
     </div>
   </aside></div>;
 }

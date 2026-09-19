@@ -30,6 +30,7 @@ import { collectionUrls, convertProductPrices, crossPlatformPublishErrors, parse
 import { cleanupWorkspace } from './storage-cleanup.js';
 import { AnnouncementInbox } from './announcements.js';
 import { normalizeSellerGroup } from './seller-groups.js';
+import { productEditPatch } from './product-edit.js';
 import { SecureSettings } from './secure-settings.js';
 import { DEFAULT_PROCESSING, prepareMarketplaceProduct, processingSettings, translateProductTitle } from './product-processing.js';
 import { initializeCollectionFolders, requireCollectionFolder, saveCollectionFolder, deleteCollectionFolder, moveProductsToFolder, findCollectedProduct } from './collection-folders.js';
@@ -598,19 +599,19 @@ app.post('/api/collector/open', async (request, response, next) => {
 });
 
 app.patch('/api/products/:id', (request, response, next) => {
-  const allowed = [
-    'title', 'price', 'stock', 'moq', 'description', 'mainImage', 'images', 'mainImages', 'detailImages',
-    'attributes', 'variantGroups', 'skus', 'priceTiers', 'deliveryTime', 'packaging',
-      'origin', 'model', 'brand', 'productType', 'videoUrl', 'selected', 'subtitle', 'keywords',
-    'categoryPath', 'categoryId', 'customAttributes', 'descriptionHtml', 'structuredDescription',
-    'services', 'certificates', 'regionalPricing', 'shipping', 'freightTemplate', 'logisticsAttributes', 'deliveryCountry',
-    'deliveryOptions', 'salesUnit', 'paymentMethod', 'fobPrice', 'priceMode', 'skuPriceMode'
-    , 'currencySymbol'
-  ];
   const updated = store.update((state) => {
     const product = state.products.find((item) => item.id === request.params.id);
     if (!product) return null;
-    const patch = Object.fromEntries(Object.entries(request.body).filter(([key]) => allowed.includes(key)));
+    const patch = productEditPatch(request.body);
+    if (Object.hasOwn(request.body, 'selected')) patch.selected = Boolean(request.body.selected);
+    if (Object.hasOwn(patch, 'sellerGroup')) patch.sellerGroup = normalizeSellerGroup(patch.sellerGroup);
+    if (request.body.referenceReview) {
+      applyReferencePreview(state, { ...request.body.referenceReview, ids: [product.id] });
+    }
+    if (patch.categoryId != null && String(patch.categoryId) !== String(product.categoryId || '')) {
+      patch.categoryReference = null;
+      for (const key of ['targetCategory', 'targetCategoryId', 'targetCategoryPath', 'internationalCategory', 'internationalCategoryPath', 'publishCategory', 'publishCategoryId', 'categoryAttributes']) patch[key] = null;
+    }
     if (request.body.usdRate && product.currencySymbol !== '$') Object.assign(patch, convertProductPrices({ ...product, ...patch }, request.body.usdRate));
     recordProductMutation(product, patch, { actor: 'user', action: 'single-edit' });
     syncProductModel(attachCategoryRequirements(product, state.postingSchemas));
@@ -947,7 +948,7 @@ async function runPublishJob(jobId) {
             onWaiting: reportStage,
             shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status))
           }, () => publisher.publishProduct(product, route.url, mode, route.category, jobId, reportStage, {
-            sellerGroup: job.metadata?.sellerGroup, listingMode: job.metadata?.listingMode,
+            sellerGroup: job.metadata?.sellerGroup || product.sellerGroup, listingMode: job.metadata?.listingMode,
             stockPolicy: job.metadata?.stockPolicy || 'preserve', defaultStock: job.metadata?.defaultStock,
             onCategorySchema: (schema) => store.update((state) => {
               rememberCategoryRequirements(state, schema);
@@ -1322,6 +1323,18 @@ app.post('/api/media/upload', (request, response, next) => {
     const fileName = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}.${extension}`;
     fs.writeFileSync(path.join(mediaDir, fileName), Buffer.from(match[2], 'base64'), { mode: 0o600 });
     response.status(201).json({ url: `/media/${fileName}`, name: String(request.body?.name || fileName) });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/media/video', express.raw({ type: 'video/mp4', limit: '100mb' }), (request, response, next) => {
+  try {
+    const buffer = request.body;
+    if (!Buffer.isBuffer(buffer) || buffer.length < 12 || buffer.toString('ascii', 4, 8) !== 'ftyp') {
+      return response.status(400).json({ error: '请选择有效的 MP4 视频' });
+    }
+    const fileName = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}.mp4`;
+    fs.writeFileSync(path.join(mediaDir, fileName), buffer, { mode: 0o600 });
+    response.status(201).json({ url: `/media/${fileName}` });
   } catch (error) { next(error); }
 });
 

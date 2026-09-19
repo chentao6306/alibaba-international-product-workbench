@@ -200,20 +200,23 @@ export function readPostingAttributeSchema() {
       for (const value of [props.label, props.attributeName, props.propertyName, props.enName]) if (typeof value === 'string' && clean(value)) labels.push(clean(value));
     }
     const enabled = controls.filter((node) => !node.disabled && node.getClientRects().length);
-    const hasValue = enabled.some((node) => ['checkbox', 'radio'].includes(node.type) ? node.checked
+    const committedControls = enabled.filter((node) => node.type !== 'search');
+    const hasValue = committedControls.some((node) => ['checkbox', 'radio'].includes(node.type) ? node.checked
       : node.tagName === 'SELECT' ? [...node.selectedOptions].some((option) => option.value)
         : (node.getAttribute('role') !== 'combobox' || node.readOnly) && Boolean(clean(node.value)))
       || [...row.querySelectorAll('.next-select-values em, .next-tag-body, [class*="selected-value"]')].some((node) => clean(node.textContent));
-    const values = enabled.flatMap((node) => ['checkbox', 'radio'].includes(node.type)
+    const values = committedControls.flatMap((node) => ['checkbox', 'radio'].includes(node.type)
       ? (node.checked ? [clean(node.closest('label')?.textContent || node.value)] : [])
       : node.tagName === 'SELECT' ? [...node.selectedOptions].filter((option) => option.value).map((option) => clean(option.textContent))
         : (node.getAttribute('role') !== 'combobox' || node.readOnly) && clean(node.value) ? [clean(node.value)] : []);
     values.push(...[...row.querySelectorAll('.next-select-values em, .next-tag-body, [class*="selected-value"]')].map((node) => clean(node.textContent)).filter(Boolean));
-    const customValues = enabled.filter((node) => ['INPUT', 'TEXTAREA'].includes(node.tagName) && !['checkbox', 'radio'].includes(node.type)
+    const customValues = committedControls.filter((node) => ['INPUT', 'TEXTAREA'].includes(node.tagName) && !['checkbox', 'radio'].includes(node.type)
       && !node.readOnly && node.getAttribute('role') !== 'combobox').map((node) => clean(node.value)).filter(Boolean);
-    // "Other" selects the input mechanism; the following text is the actual
-    // product value. Keep concrete selections alongside custom text.
-    const committedValues = customValues.length ? values.filter((value) => !/^(?:other|others|其他|其它|自定义)$/i.test(value)) : values;
+    // Remove an Other selector only when custom text replaces it. Other can
+    // itself be the literal brand in a plain input (including phone forms).
+    // Never discard a value that the editable input actually contains.
+    const committedValues = customValues.length ? values.filter((value) => customValues.includes(value)
+      || !/^(?:other|others|其他|其它|自定义)$/i.test(value)) : values;
     const controlType = field?.tagName === 'SELECT' ? (field.multiple ? 'multiSelect' : 'select')
       : field?.getAttribute('role') === 'combobox' || field?.readOnly ? 'combobox' : field?.type || '';
     row.setAttribute('data-posting-attribute-row', String(index));
