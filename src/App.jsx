@@ -1,3 +1,5 @@
+import ReferenceDialog from './ReferenceDialog.jsx';
+import PublishRecovery from './PublishRecovery.jsx';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Boxes, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, ClipboardList, CloudUpload,
@@ -15,6 +17,7 @@ import OriginCountrySelect from './OriginCountrySelect.jsx';
 import { productOrigin, synchronizeProductOrigin } from '../server/origin-country.js';
 import AuthorizationConnection from './AuthorizationConnection.jsx';
 import { publishCounts, productPublishDisplay } from '../server/publish-progress.js';
+import { categoryReadiness } from '../server/category-readiness.js';
 import { createPublishedReferenceTemplate } from '../server/publish-reference.js';
 
 const EMPTY = { shops: [], groups: [], collectionFolders: [], products: [], jobs: [], settings: {}, browser: {}, collectorBrowser: {} };
@@ -347,12 +350,24 @@ function productCompleteness(product) {
   if (!(Number(product.packaging?.weight) > 0)) missing.push('包装重量');
   if (!product.description && !product.descriptionHtml) missing.push('商品详情');
   const quality = product.quality;
-  if (quality?.issues?.length) {
+  if (quality && Array.isArray(quality.issues)) {
     const qualityMissing = quality.issues.filter((item) => item.severity === 'error').map((item) => item.message);
     return { main, detail, attributes, tiers, hasPriceRange, variants, skus: (product.skus || []).length, missing: qualityMissing, complete: quality.status !== 'blocked', review: quality.status === 'review', score: quality.score, warnings: quality.warnings, issues: quality.issues };
   }
   const complete = missing.length === 0;
   return { main, detail, attributes, tiers, hasPriceRange, variants, skus: (product.skus || []).length, missing, complete, review: false, score: complete ? 100 : Math.max(0, 100 - missing.length * 12), warnings: 0, issues: [] };
+}
+
+function CategoryReadiness({ product }) {
+  const check = categoryReadiness(product);
+  const pending = [...check.missing, ...check.conflicts];
+  const message = check.status === 'covered' ? `已核对 ${check.checked} 项类目必填资料`
+    : check.status === 'incomplete' ? `类目资料待核对：${pending.join('、')}`
+    : check.status === 'stale' ? '类目要求需重新核验' : '类目必填项待核验';
+  const explanation = check.status === 'covered' ? '本地资料已覆盖最近一次发布页的必填属性，发布时仍会复核当前控件、规格和物流要求。'
+    : check.status === 'incomplete' ? '请在商品属性中补充或确认这些字段；发布时会再次读取当前类目要求。'
+    : '尚无近期发布页的类目要求记录，不能仅凭已有资料判定可上架。首次发布检查后会更新同类商品。';
+  return <small className={pending.length ? 'data-warning' : 'data-counts'} title={explanation}>{message}</small>;
 }
 
 function hasCategoryMismatch(product, category) {
@@ -401,9 +416,7 @@ function ProductsView({ state, refresh, notify, onMenu, platform, setPlatform, n
     ? '请先勾选需要补全资料的商品'
     : !referenceEligibleProducts.length
       ? '已勾选商品均已上架成功，无需引用'
-      : !publishedReferenceProducts.length
-        ? '当前没有上架成功的商品可供引用'
-        : '引用成功商品的类目、商品属性、规格及 SKU 信息';
+      : '引用成功商品的类目、商品属性、规格及 SKU 信息';
 
   useEffect(() => { setPage(1); setMoveFolderId(''); setEditing(null); setBatchEditing(false); setFindReplaceOpen(false); setReferenceOpen(false); }, [folderId]);
   useEffect(() => { setPage(1); }, [query, filter, pageSize, platform]);
@@ -459,7 +472,7 @@ function ProductsView({ state, refresh, notify, onMenu, platform, setPlatform, n
       {selectedProducts.length > 0 && <button className="primary-button" onClick={() => navigate('publish', platform)}><CloudUpload size={15} />选中商品上架 {selectedProducts.length}</button>}
       <button className="secondary-button" disabled={!platformProducts.length} onClick={() => setFindReplaceOpen(true)}><Search size={15} />查找替换</button>
       {selectedProducts.length > 0 && <button className="primary-button" onClick={() => setBatchEditing(true)}><Pencil size={15} />批量修改 {selectedProducts.length}</button>}
-      <button className="secondary-button" disabled={!referenceEligibleProducts.length || !publishedReferenceProducts.length} title={referenceUnavailableReason} onClick={() => setReferenceOpen(true)}><ClipboardList size={15} />引用成功商品资料</button>
+      <button className="secondary-button" disabled={!referenceEligibleProducts.length} title={referenceUnavailableReason} onClick={() => setReferenceOpen(true)}><ClipboardList size={15} />引用成功商品资料</button>
       <ProcessSelectedProducts products={platformProducts} refresh={refresh} notify={notify} />
       {selectedProducts.length > 0 && <button className="secondary-button danger-button" onClick={removeSelected}><Trash2 size={15} />删除已勾选 {selectedProducts.length}</button>}
       {selectedProducts.length > 0 && <div className="move-folder-control"><select aria-label="移动到分组" value={moveFolderId} onChange={(event) => setMoveFolderId(event.target.value)}><option value="">移动到分组</option>{(state.collectionFolders || []).filter((folder) => folder.id !== folderId).map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select><button className="icon-button" title="移动已选商品" disabled={!moveFolderId} onClick={() => api('/api/products/move-folder', { method: 'POST', body: JSON.stringify({ ids: selectedProducts.map((item) => item.id), collectionFolderId: moveFolderId }) }).then(refresh).then(() => notify('商品已移动')).catch((error) => notify(error.message, 'error'))}><FolderTree size={17} /></button></div>}
@@ -472,7 +485,7 @@ function ProductsView({ state, refresh, notify, onMenu, platform, setPlatform, n
         <tbody>{pagedProducts.map((product) => { const completeness = productCompleteness(product); const display = productPublishDisplay(product, state.jobs); return <tr key={product.id} className={product.selected ? 'selected-row' : ''}>
           <td className="check-cell"><input type="checkbox" checked={Boolean(product.selected)} onChange={(event) => select([product.id], event.target.checked)} /></td>
           <td><div className="product-main"><div className="thumb">{product.mainImage ? <img src={product.mainImage} alt="" /> : <Boxes size={20} />}</div><div><strong>{product.title || '未命名商品'}</strong><small><span className={`platform-label platform-${sourcePlatform(product).replace('.', '-')}`}>{sourcePlatformLabel(product)}</span> ID {product.sourceId}</small></div></div></td>
-          <td><span className={`data-status ${completeness.complete ? 'complete' : ''}`} title={completeness.missing.length ? `阻断项：${completeness.missing.join('、')}` : completeness.review ? '来源未公开部分逐SKU数据，需要发布前确认' : '可进入发布检查'}>{!completeness.complete ? `资料阻断 ${completeness.score}` : completeness.review ? `资料待确认 ${completeness.score}` : `可发布 ${completeness.score}`}</span><small className="data-counts">主 {completeness.main} · 详 {completeness.detail} · 属 {completeness.attributes} · SKU {completeness.skus} · 价 {completeness.tiers || (completeness.hasPriceRange ? '区间' : 0)}</small>{completeness.warnings > 0 && <small className="data-warning">另有 {completeness.warnings} 项待确认</small>}{!completeness.complete && <small className="data-missing">{completeness.missing.join('；')}</small>}</td>
+          <td><span className={`data-status ${completeness.complete ? 'complete' : ''}`} title={completeness.missing.length ? `阻断项：${completeness.missing.join('、')}` : completeness.review ? '来源未公开部分逐SKU数据，需要发布前确认' : '可进入发布检查'}>{!completeness.complete ? `资料阻断 ${completeness.score}` : completeness.review ? `资料待确认 ${completeness.score}` : `资料齐全 ${completeness.score}`}</span><CategoryReadiness product={product} /><small className="data-counts">主 {completeness.main} · 详 {completeness.detail} · 属 {completeness.attributes} · SKU {completeness.skus} · 价 {completeness.tiers || (completeness.hasPriceRange ? '区间' : 0)}</small>{completeness.warnings > 0 && <small className="data-warning">另有 {completeness.warnings} 项待确认</small>}{!completeness.complete && <small className="data-missing">{completeness.missing.join('；')}</small>}</td>
           <td><b className="price">{!product.priceConversion && product.sourcePriceRange?.formattedText || `${product.currencySymbol || '¥'}${product.price || '-'}`}</b></td><td>{product.stock ?? '-'}</td><td><StatusBadge status={display.status} message={display.message} />{(display.jobId || display.status === 'publish_failed') && <small className="data-missing" title={display.message}>{display.message || '未记录失败原因'}</small>}</td>
           <td className="action-cell"><button className="icon-button" disabled={refreshingId === product.id} onClick={() => refreshDetail(product)} title="重新采集完整资料">{refreshingId === product.id ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}</button><button className="icon-button" onClick={() => setEditing(product)} title="编辑完整资料"><Pencil size={17} /></button><button className="icon-button danger" onClick={() => remove(product)} title="删除商品"><Trash2 size={17} /></button></td>
         </tr>; })}</tbody>
@@ -506,28 +519,6 @@ function FindReplaceDialog({ products, onClose, onSaved, notify }) {
     catch (error) { notify(error.message, 'error'); setBusy(false); }
   }
   return <div className="drawer-backdrop"><aside className="drawer batch-drawer"><div className="drawer-header"><div><span>查找与替换</span><h2>{products.length} 件商品</h2></div><button className="icon-button" onClick={onClose} title="关闭"><X size={20} /></button></div><div className="find-replace-form"><label><span>查找内容</span><input value={search} onChange={(event) => { setSearch(event.target.value); setPreview(null); }} placeholder="例如 apple" autoFocus /></label><label><span>替换为</span><input value={replacement} onChange={(event) => setReplacement(event.target.value)} placeholder="例如 liangxiang" /></label><label className="checkbox-label"><input type="checkbox" checked={caseSensitive} onChange={(event) => setCaseSensitive(event.target.checked)} /><span>区分大小写</span></label><button className="secondary-button" disabled={busy || !search.trim()} onClick={inspect}><Search size={16} />查找匹配</button></div>{preview && <div className="find-preview"><strong>找到 {preview.total} 处，涉及 {preview.changedProducts} 件商品</strong>{preview.matches.length ? <div className="find-preview-list">{preview.matches.map((item) => <div key={item.id}><b>{item.title || item.id}</b><span>{item.fields.map((field) => `${field.field}（${field.count}处）`).join('、')}</span></div>)}</div> : <p>没有匹配内容</p>}</div>}<div className="drawer-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="button" className="primary-button" disabled={busy || !preview?.total} onClick={apply}><Save size={17} />执行替换</button></div></aside></div>;
-}
-
-function ReferenceDialog({ products, references, onClose, onSaved, notify }) {
-  const [referenceId, setReferenceId] = useState(references[0]?.id || '');
-  const [busy, setBusy] = useState(false);
-  const reference = references.find((item) => item.id === referenceId);
-  const snapshot = reference?.publishHistory?.find((entry) => ['published', 'submitted', 'success'].includes(entry.result?.status || entry.status) && entry.data);
-  const template = reference ? createPublishedReferenceTemplate(reference, snapshot) : null;
-  async function apply() {
-    if (!referenceId) return notify('请选择已成功上架的引用商品', 'error');
-    setBusy(true);
-    try { onSaved(await api('/api/products/reference', { method: 'POST', body: JSON.stringify({ ids: products.map((item) => item.id), referenceId }) })); }
-    catch (error) { notify(error.message, 'error'); setBusy(false); }
-  }
-  return <div className="drawer-backdrop"><aside className="drawer batch-drawer">
-    <div className="drawer-header"><div><span>引用成功商品资料</span><h2>为 {products.length} 件商品引用资料</h2></div><button className="icon-button" onClick={onClose} title="关闭"><X size={20} /></button></div>
-    <div className="reference-help">用所选成功商品替换类目、产地、品牌、材质、私模、商品属性、规格选项及规格图片、SKU 编码、可售数量和启用状态，并补充缺失的包装、物流属性、运费模板与发货资料。保留待上架商品的标题、售价、主图和详情。请核对引用内容与实际商品一致。</div>
-    <label className="batch-field"><span>选择已成功上架的商品</span><select value={referenceId} onChange={(event) => setReferenceId(event.target.value)}><option value="">请选择引用商品</option>{references.map((item) => <option key={item.id} value={item.id}>{item.title || item.id}（{item.sourceId}）</option>)}</select></label>
-    {template && <div className="reference-list"><div><strong>引用类目</strong><small>{(template.categoryPath || template.sourceCategoryPath || []).join(' > ') || '未记录类目路径'} · {template.categoryId}</small></div><div><strong>商品属性 · {(template.attributes || []).length} 项</strong><small>{(template.attributes || []).map((item) => `${item.name}：${Array.isArray(item.value) ? item.value.join('、') : item.value}`).join('；')}</small></div><div><strong>规格与 SKU · {(template.skus || []).length} 行</strong><small>{(template.variantGroups || []).map((group) => `${group.name}：${(group.options || []).join('、')}`).join('；') || '该商品未设置规格'}</small></div></div>}
-    <div className="reference-list">{products.map((item) => <div key={item.id}><strong>{item.title || item.id}</strong><small>当前类目：{(item.categoryPath || []).join(' > ') || '未设置'}</small></div>)}</div>
-    <div className="drawer-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="button" className="primary-button" disabled={busy || !referenceId} onClick={apply}><ClipboardList size={17} />引用并保存</button></div>
-  </aside></div>;
 }
 
 function BatchEditor({ products, references, onClose, onSaved, notify }) {
@@ -639,7 +630,7 @@ function BatchEditor({ products, references, onClose, onSaved, notify }) {
     <div className="batch-body">
       {tab === 'trade' && products.some((product) => product.currencySymbol !== '$') && <label className="batch-field"><span>换算汇率（1 原币 = 多少美元）</span><input type="number" min="0.000001" step="any" value={usdRate} onChange={(event) => setUsdRate(event.target.value)} />{usdRate && <small>仅换算尚未转为美元的商品</small>}</label>}
       {tab === 'basic' && <>{field('标题前缀', 'titlePrefix')}{field('标题后缀', 'titleSuffix')}{field('统一副标题', 'subtitle')}{field('关键词（逗号或换行分隔）', 'keywords', 'text', true)}<label className="batch-field"><span>原产地（国家）</span><OriginCountrySelect value={form.origin} emptyLabel="保持原产地" onChange={(origin) => setForm((current) => ({ ...current, origin }))} /></label>{field('品牌', 'brand')}{field('产品类型', 'productType')}</>}
-      {tab === 'category' && <><label className="batch-field"><span>选择新产品类目</span><CategorySelect path={form.category} includeId onChange={(option) => setForm((v) => ({ ...v, category: option.path, categoryId: option.id || '' }))} /></label><label className="batch-field"><span>类目 ID（由选择或发布页绑定生成）</span><input value={form.categoryId} readOnly placeholder="选择类目后自动填充" /></label><div className="batch-actions"><button type="button" className="secondary-button" disabled={!references.length} onClick={() => setReferenceOpen(true)}><ClipboardList size={16} />引用成功商品资料</button><small className="batch-help">选择成功商品，引用其类目、商品属性和完整规格。</small></div></>}
+      {tab === 'category' && <><label className="batch-field"><span>选择新产品类目</span><CategorySelect path={form.category} includeId onChange={(option) => setForm((v) => ({ ...v, category: option.path, categoryId: option.id || '' }))} /></label><label className="batch-field"><span>类目 ID（由选择或发布页绑定生成）</span><input value={form.categoryId} readOnly placeholder="选择类目后自动填充" /></label><div className="batch-actions"><button type="button" className="secondary-button" onClick={() => setReferenceOpen(true)}><ClipboardList size={16} />引用成功商品资料</button><small className="batch-help">选择成功商品，引用其类目、商品属性和完整规格。</small></div></>}
       {tab === 'trade' && <><label className="batch-field"><span>定价模式</span><select value={form.priceMode || ''} onChange={update('priceMode')}><option value="">保持原模式</option><option value="fob-range">FOB区间价格</option><option value="fob-tier">FOB阶梯价格</option><option value="quantity-tier">数量阶梯价格</option><option value="sku">SKU定价</option></select></label>{field('价格调整比例（%）', 'pricePercent', 'number')}{field('统一加减金额', 'priceFixed', 'number')}{field('统一库存', 'stock', 'number')}{field('统一起订量', 'moq', 'number')}{field('统一交期（天）', 'deliveryDays', 'number')}<div className="form-grid">{field('FOB最低价', 'fobMinPrice', 'number')}{field('FOB最高价', 'fobMaxPrice', 'number')}</div>{field('SKU统一价格', 'skuPrice', 'number')}{field('SKU统一库存', 'skuStock', 'number')}<div className="batch-actions"><button type="button" className="secondary-button" onClick={exportSku}>导出 SKU Excel</button><label className="file-button secondary-button">导入 SKU Excel<input type="file" accept=".xlsx,.xls,.csv,.txt" onChange={importSku} /></label></div></>}
       {tab === 'logistics' && <><label className="batch-field"><span>原产地（国家）</span><OriginCountrySelect value={form.origin} emptyLabel="保持原产地" onChange={(origin) => setForm((current) => ({ ...current, origin }))} /></label>{field('毛重（kg）', 'weight', 'number')}{field('包装长（cm）', 'length', 'number')}{field('包装宽（cm）', 'width', 'number')}{field('包装高（cm）', 'height', 'number')}</>}
       {(tab === 'description' || tab === 'detail' || tab === 'service') && field('批量追加内容', 'description', 'text', true)}
@@ -680,6 +671,10 @@ function ProductEditor({ product, onClose, onSaved, notify }) {
   const [tab, setTab] = useState('basic');
   const update = (key) => (event) => setForm((value) => ({ ...value, [key]: event.target.value }));
   const updateArray = (key, index, value) => setForm((current) => {
+    if (['attributes', 'customAttributes'].includes(key) && current[key][index].name !== value.name) {
+      value = { ...value };
+      for (const id of ['id', 'attributeId', 'propertyId', 'attrId', 'propId', 'valueIds', 'valueId', 'attributeValueId', 'propertyValueId']) delete value[id];
+    }
     const patch = { [key]: current[key].map((item, itemIndex) => itemIndex === index ? value : item) };
     return { ...current, ...(['attributes', 'customAttributes'].includes(key) ? synchronizeProductOrigin(current, patch) : patch) };
   });
@@ -745,6 +740,7 @@ function ProductEditor({ product, onClose, onSaved, notify }) {
       <div className="editor-tabs">{[['basic', '基础信息'], ['media', '图片与视频'], ['attributes', '商品属性'], ['custom', '自定义属性'], ['specs', '规格与SKU'], ['trade', '交易信息'], ['logistics', '物流信息'], ['service', '服务与证书'], ['description', '商品描述'], ['regional', '国家/地区定价'], ['audit', '来源与审计']].map(([value, label]) => <button type="button" key={value} className={tab === value ? 'active' : ''} onClick={() => setTab(value)}>{label}</button>)}</div>
       {product.publishResult?.requiredFields?.length > 0 && <p className="data-missing">上次发布需要补充或核对：{product.publishResult.requiredFields.join('、')}。请在商品属性或物流信息中填写后重试。</p>}
       <div className={`editor-tab-pane ${tab === 'basic' ? '' : 'hidden'}`} data-editor-tab="basic">
+      <CategoryReadiness product={{ ...product, ...form }} />
       <div className={`completeness-strip ${productCompleteness({ ...product, ...form, packaging: form.packaging }).complete ? 'complete' : ''}`}><CircleCheck size={17} /><span>主图 {form.mainImages.length} · 详情图 {form.detailImages.length} · 属性 {form.attributes.length} · 规格 {form.variantGroups.length} · 价格 {product.sourcePriceRange?.formattedText || `${form.priceTiers.length} 档`}</span></div>
       <h3 className="edit-section-title">基础信息</h3>
       {sourcePlatform(product) !== 'alibaba.com' && <div className="source-strip">{sourcePlatformLabel(product)} → 阿里巴巴国际站 · {product.sourceCurrency || product.currencySymbol} {product.sourcePrice}</div>}
@@ -770,10 +766,10 @@ function ProductEditor({ product, onClose, onSaved, notify }) {
       </div>
       <div className={`editor-tab-pane ${tab === 'attributes' ? '' : 'hidden'}`} data-editor-tab="attributes">
       <h3 className="edit-section-title">商品属性</h3>
-      <div className="repeat-list">{form.attributes.map((item, index) => <div className="edit-data-row" key={`attr-${index}`}><input value={item.name || ''} onChange={(event) => updateArray('attributes', index, { ...item, name: event.target.value })} placeholder="属性名" /><input value={item.value || ''} onChange={(event) => updateArray('attributes', index, { ...item, value: event.target.value })} placeholder="属性值" /><button type="button" className="icon-button danger" onClick={() => removeArray('attributes', index)} title="删除属性"><X size={15} /></button></div>)}</div>
+      <div className="repeat-list">{form.attributes.map((item, index) => <div className="edit-data-row" key={`attr-${index}`}><input value={item.name || ''} onChange={(event) => updateArray('attributes', index, { ...item, name: event.target.value })} placeholder="属性名" /><input value={String(item.value ?? '')} onChange={(event) => updateArray('attributes', index, { ...item, value: event.target.value })} placeholder="属性值" /><button type="button" className="icon-button danger" onClick={() => removeArray('attributes', index)} title="删除属性"><X size={15} /></button></div>)}</div>
       <button type="button" className="secondary-button add-row-button" onClick={() => setForm((value) => ({ ...value, attributes: [...value.attributes, { name: '', value: '' }] }))}><Plus size={15} />添加属性</button>
       </div>
-      <div className={`editor-tab-pane ${tab === 'custom' ? '' : 'hidden'}`} data-editor-tab="custom"><h3 className="edit-section-title">自定义属性</h3><div className="repeat-list">{form.customAttributes.map((item, index) => <div className="edit-data-row" key={`custom-${index}`}><input value={item.name || ''} onChange={(event) => updateArray('customAttributes', index, { ...item, name: event.target.value })} placeholder="属性名" /><input value={item.value || ''} onChange={(event) => updateArray('customAttributes', index, { ...item, value: event.target.value })} placeholder="属性值" /><button type="button" className="icon-button danger" onClick={() => removeArray('customAttributes', index)} title="删除自定义属性"><X size={15} /></button></div>)}</div><button type="button" className="secondary-button add-row-button" onClick={() => setForm((value) => ({ ...value, customAttributes: [...value.customAttributes, { name: '', value: '' }] }))}><Plus size={15} />添加自定义属性</button></div>
+      <div className={`editor-tab-pane ${tab === 'custom' ? '' : 'hidden'}`} data-editor-tab="custom"><h3 className="edit-section-title">自定义属性</h3><div className="repeat-list">{form.customAttributes.map((item, index) => <div className="edit-data-row" key={`custom-${index}`}><input value={item.name || ''} onChange={(event) => updateArray('customAttributes', index, { ...item, name: event.target.value })} placeholder="属性名" /><input value={String(item.value ?? '')} onChange={(event) => updateArray('customAttributes', index, { ...item, value: event.target.value })} placeholder="属性值" /><button type="button" className="icon-button danger" onClick={() => removeArray('customAttributes', index)} title="删除自定义属性"><X size={15} /></button></div>)}</div><button type="button" className="secondary-button add-row-button" onClick={() => setForm((value) => ({ ...value, customAttributes: [...value.customAttributes, { name: '', value: '' }] }))}><Plus size={15} />添加自定义属性</button></div>
       <div className={`editor-tab-pane ${tab === 'specs' ? '' : 'hidden'}`} data-editor-tab="specs">
       <h3 className="edit-section-title">规格组合</h3>
       <div className="repeat-list">{form.variantGroups.map((group, index) => <div className="edit-data-row" key={`variant-${index}`}><input value={group.name || ''} onChange={(event) => updateArray('variantGroups', index, { ...group, name: event.target.value })} placeholder="规格名" /><input value={(group.options || []).join(', ')} onChange={(event) => updateArray('variantGroups', index, { ...group, options: event.target.value.split(/[,，]/).map((option) => option.trim()).filter(Boolean) })} placeholder="选项，用逗号分隔" /><button type="button" className="icon-button danger" onClick={() => removeArray('variantGroups', index)} title="删除规格"><X size={15} /></button></div>)}</div>
@@ -876,6 +872,11 @@ function PublishView({ state, refresh, notify, onMenu, platform, setPlatform, fo
     if (groupsLoading) return;
     run(() => api('/api/publish', { method: 'POST', body: JSON.stringify({ ids: selected.map((item) => item.id), mode, listingMode, publishDelayMinSeconds, publishDelayMaxSeconds, collectionFolderId: folderId, sellerGroup }) }), '批量上架任务已开始');
   }
+  async function retryFailed(products) {
+    if (!delayValid) return notify('请检查上架间隔设置', 'error');
+    if (mode === 'submit' && !window.confirm('将重新提交所选的 ' + products.length + ' 件失败商品，确定继续吗？')) return;
+    await run(() => api('/api/publish', { method: 'POST', body: JSON.stringify({ ids: products.map((item) => item.id), failedOnly: true, mode, listingMode, publishDelayMinSeconds, publishDelayMaxSeconds, collectionFolderId: folderId, sellerGroup }) }), '失败商品重试任务已开始');
+  }
   async function loadSellerGroups() {
     setGroupsLoading(true);
     try {
@@ -902,6 +903,7 @@ function PublishView({ state, refresh, notify, onMenu, platform, setPlatform, fo
     <PlatformTabs products={allSelected} value={platform} onChange={setPlatform} />
     <div className="publish-layout">
       <div className="publish-main">
+        <PublishRecovery products={state.products.filter((item) => item.collectionFolderId === folderId && (platform === 'all' || sourcePlatform(item) === platform))} disabled={busy || Boolean(currentJob) || groupsLoading} onRetry={retryFailed} refresh={refresh} notify={notify} />
         <section className="publish-categories">
           <div className="category-summary"><h2>目标类目</h2><span>{planLoading ? '正在读取' : `${automaticGroups.length} 组已就绪`}</span></div>
           {planError && <div className="category-warning"><CircleAlert size={17} /><span>类目预览失败：{planError}</span><button className="icon-button" onClick={() => setPlanRetry((value) => value + 1)} title="重新读取类目"><RefreshCw size={16} /></button></div>}

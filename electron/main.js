@@ -11,6 +11,7 @@ import { authorizationEndpoint } from '../server/auth-endpoint.js';
 import { showHumanVerification } from './human-verification.js';
 import { saveAccountCookies } from './seller-session.js';
 import { browserStep } from '../server/browser-step.js';
+import { captureSellerReferenceWithExecutor } from '../server/seller-reference.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -925,6 +926,12 @@ globalThis.__KUA_YIPU_SELLER_BRIDGE = {
     return true;
   },
   bind: inspectAndHideAlibabaSellerWindow,
+  captureReference: async () => {
+    const seller = currentAlibabaWindow({ preferPosting: true });
+    if (!isWindowAlive(seller)) throw new Error('请先打开卖家窗口，并进入已有商品的编辑表单');
+    return browserStep(() => captureSellerReferenceWithExecutor((script) => seller.webContents.executeJavaScript(script)),
+      { label: '读取当前卖家商品模板', timeoutMs: 45000 });
+  },
   status: () => {
     const seller = currentAlibabaWindow({ preferPosting: true });
     return {

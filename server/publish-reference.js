@@ -25,6 +25,7 @@ export const REQUIRED_ATTRIBUTE_ALIASES = [
   ['后置摄像头', 'rear camera'],
   ['屏幕 resolution', 'screen resolution', '显示分辨率', 'display resolution'],
   ['材质', 'material', '材料'],
+  ['Logo印刷', 'logo printing', 'logo printing method'],
   ['适用型号', 'compatible model', 'model compatibility'],
   ['类型', '种类', 'type', 'product type', '产品类型'],
   ['比例', 'scale'],
@@ -96,12 +97,21 @@ export function createRequiredFieldRepair(target, reference, fields = []) {
     .map((item) => [requiredAttributeKey(item.name), item.value]));
   const attributes = structuredClone(target.attributes || []);
   const customAttributes = structuredClone(target.customAttributes || []);
+  const variantGroups = structuredClone(target.variantGroups || []);
+  const skus = structuredClone(target.skus || []);
+  let specsChanged = false;
   const repaired = [];
   for (const key of wanted) {
     const value = values.get(key);
     if (value == null) continue;
+    const groups = variantGroups.filter((group) => requiredAttributeKey(group.name) === key);
+    // A field repair cannot collapse several real SKUs into one reference
+    // value. Such a change belongs to the explicit specification preview.
+    if (groups.some((group) => group.options?.length !== 1) || (groups.length && Array.isArray(value) && value.length !== 1)) continue;
+    const singleValue = Array.isArray(value) ? value[0] : value;
+    const changedGroups = groups.filter((group) => String(group.options[0]) !== String(singleValue));
     const rows = [...attributes, ...customAttributes].filter((row) => requiredAttributeKey(row.name) === key);
-    if (rows.length && rows.every((row) => String(row.value) === String(value))) continue;
+    if (rows.length && rows.every((row) => String(row.value) === String(value)) && !changedGroups.length) continue;
     if (rows.length) {
       for (const row of rows) {
         // IDs for rejected values must not select the old option again.
@@ -112,10 +122,23 @@ export function createRequiredFieldRepair(target, reference, fields = []) {
         Object.assign(row, { value: structuredClone(value), source: 'reference-published-product' });
       }
     } else attributes.push({ name: key, value: structuredClone(value), source: 'reference-published-product' });
+    for (const group of changedGroups) {
+      const oldValue = group.options[0];
+      const sourceGroup = reference.variantGroups?.find((item) => requiredAttributeKey(item.name) === key);
+      group.options = [singleValue]; group.optionIds = {};
+      group.optionImages = sourceGroup?.optionImages?.[singleValue] ? { [singleValue]: sourceGroup.optionImages[singleValue] } : {};
+      for (const sku of skus) {
+        for (const name of Object.keys(sku.attributes || {})) {
+          if (requiredAttributeKey(name) === key && sku.attributes[name] === oldValue) sku.attributes[name] = singleValue;
+        }
+      }
+      specsChanged = true;
+    }
     repaired.push(key);
   }
   if (!repaired.length) return null;
   const patch = { attributes };
+  if (specsChanged) Object.assign(patch, { variantGroups, skus });
   const topLevel = { 产地: 'origin', 省份: 'province', 品牌名称: 'brand', 型号: 'model', 适用型号: 'compatibleModel', 类型: 'productType', 材质: 'material', 私模: 'privateMold' };
   for (const key of repaired) {
     const field = topLevel[key];
@@ -139,8 +162,11 @@ export function createPublishedReferenceTemplate(candidate, snapshot) {
   // Successful form values also belong to specification groups. Leaving the
   // old group options alongside repaired attributes makes the publisher select
   // the rejected options again on the next product.
-  template.variantGroups = structuredClone(template.variantGroups || []);
-  template.skus = structuredClone(template.skus || []);
+  // A success receipt renamed values on this same product. Its original
+  // specification image is still valid; unlike cross-product field repair,
+  // preserve that image while applying the accepted label below.
+  template.variantGroups = structuredClone(reference.variantGroups || []);
+  template.skus = structuredClone(reference.skus || []);
   for (const item of requiredAttributes) {
     const group = template.variantGroups.find((group) => requiredAttributeKey(group.name) === requiredAttributeKey(item.name));
     if (!group || group.options?.length !== 1 || !item.value) continue;

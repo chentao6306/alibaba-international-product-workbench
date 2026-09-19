@@ -6,6 +6,7 @@ import path from 'node:path';
 import { JsonStore } from '../server/store.js';
 import { SellerPublisher } from '../server/publisher.js';
 import { ShopCollector } from '../server/collector.js';
+import { categoryRequirementSchema } from '../server/category-readiness.js';
 
 test('reports missing saved data without collecting source pages and continues both draft and direct batches', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'required-data-refresh-'));
@@ -23,8 +24,9 @@ test('reports missing saved data without collecting source pages and continues b
   });
   const originalPublish = SellerPublisher.prototype.publishProduct, originalEnrich = ShopCollector.prototype.enrichProducts;
   const attempts = [], refreshes = [];
-  SellerPublisher.prototype.publishProduct = async (product) => {
+  SellerPublisher.prototype.publishProduct = async (product, url, mode, category, jobId, progress, options) => {
     attempts.push(product.id);
+    await options.onCategorySchema(categoryRequirementSchema(product.categoryId, [{ id: 'scale', label: 'Scale', required: true }]));
     if (product.id === 'ready' || product.attributes.some((item) => item.name === 'Scale')) return { status: 'drafted', message: 'Saved receipt' };
     throw Object.assign(new Error('来源缺少必填资料：比例'), { code: 'PUBLISH_REQUIRED_DATA_MISSING', requiredFields: ['比例'], missingSourceFields: ['比例'] });
   };
@@ -54,12 +56,27 @@ test('reports missing saved data without collecting source pages and continues b
       assert.equal(absent.status, 'publish_failed');
       assert.deepEqual(absent.publishResult.missingSourceFields, ['比例']);
       assert.equal(absent.attributes.some((a) => a.name === 'Scale'), false);
+      assert.equal(absent.quality.categoryReadiness.status, 'incomplete');
+      assert.deepEqual(absent.quality.categoryReadiness.missing, ['Scale']);
+      assert.equal(state.postingSchemas['100001762'].fields[0].label, 'Scale');
       assert.equal(state.products.find((p) => p.id === 'refresh').price, 10);
       assert.equal(state.products.find((p) => p.id === 'refresh').title, 'Original refresh');
     }
+    attempts.length = 0;
+    await api('/api/publish', { ids: ['absent', 'ready', 'unrelated'], collectionFolderId: 'folder', mode: 'draft', failedOnly: true });
+    const retryDeadline = Date.now() + 10000;
+    while (store.read().jobs[0].status !== 'completed' && Date.now() < retryDeadline) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(store.read().jobs[0].status, 'completed');
+    assert.deepEqual(attempts, ['absent'], 'Retry excludes both successful drafts and published listings');
+    assert.deepEqual(refreshes, []);
     await api('/api/products/refresh/refresh-detail', {});
     assert.deepEqual(refreshes, ['refresh'], 'The user can still explicitly refresh a source product');
     assert.equal(store.read().products.find((p) => p.id === 'refresh').attributes.find((a) => a.name === 'Scale')?.value, '1:16');
+    assert.equal(store.read().products.find((p) => p.id === 'refresh').quality.categoryReadiness.status, 'covered');
+    const edited = await api('/api/products/absent', { attributes: [{ name: 'Scale', value: '1:12' }] }, 'PATCH');
+    assert.equal(edited.quality.categoryReadiness.status, 'covered');
+    const moved = await api('/api/products/absent', { categoryId: '999999' }, 'PATCH');
+    assert.equal(moved.quality.categoryReadiness.status, 'unchecked');
   } finally {
     await server.shutdownServer(); SellerPublisher.prototype.publishProduct = originalPublish; ShopCollector.prototype.enrichProducts = originalEnrich;
     fs.rmSync(root, { recursive: true, force: true });

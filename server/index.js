@@ -14,12 +14,14 @@ import {
   sanitizeCollectedProduct,
   SellerPublisher
 } from './publisher.js';
-import { applyPublishedProductReference, copyMissingProductData, createPublishSnapshot, findAndReplaceProduct, recordProductMutation, syncProductModel } from './product-model.js';
+import { copyMissingProductData, createPublishSnapshot, findAndReplaceProduct, recordProductMutation, syncProductModel } from './product-model.js';
 import { publishCounts, recordPublishOutcome } from './publish-progress.js';
 import { publishDelayFromRequest, waitForPublishDelay } from './publish-delay.js';
+import { attachCategoryRequirements, rememberCategoryRequirements } from './category-readiness.js';
 import { publishEnvironmentBlockCode } from './publish-recovery.js';
 import { buildAlibabaPublishUrl, createPublishPlan, normalizeCategoryId, productCategory, publishBindings, rememberPublishBinding, resolvePublishRoute } from './category-routing.js';
-import { createPublishedReferenceTemplate, findPublishedReferenceRepair } from './publish-reference.js';
+import { findPublishedReferenceRepair } from './publish-reference.js';
+import { applyReferencePreview, failedPublishProducts, previewProductReference, referenceCandidates } from './reference-workflow.js';
 import { userFacingError } from './browser-error.js';
 import { runWithProgressTimeout } from './progress-timeout.js';
 import { withVerificationContext } from './human-verification.js';
@@ -124,7 +126,7 @@ store.update((state) => {
       product.updatedAt = new Date().toISOString();
     }
   }
-  for (const product of state.products) syncProductModel(product);
+  for (const product of state.products) syncProductModel(attachCategoryRequirements(product, state.postingSchemas));
   for (const job of state.jobs) {
     if (!['publish', 'collect'].includes(job.type) || !['queued', 'running', 'pause_requested'].includes(job.status)) continue;
     job.status = 'paused';
@@ -362,6 +364,7 @@ function saveCollectedProduct(groupId, raw, options = {}) {
       deliveryCountry: options.destinationCountry || raw.deliveryCountry || '',
       updatedAt: now
     };
+    attachCategoryRequirements(normalized, draft.postingSchemas);
     if (!product) {
       product = syncProductModel({ id: newId(), shopId: target?.shopId || '', groupId: groupId || '', selected: false, status: 'ready', createdAt: now, ...normalized }, { captureSource: true, sourceSnapshot: collectedSnapshot || raw, capturedAt: now });
       draft.products.unshift(product);
@@ -610,6 +613,7 @@ app.patch('/api/products/:id', (request, response, next) => {
     const patch = Object.fromEntries(Object.entries(request.body).filter(([key]) => allowed.includes(key)));
     if (request.body.usdRate && product.currencySymbol !== '$') Object.assign(patch, convertProductPrices({ ...product, ...patch }, request.body.usdRate));
     recordProductMutation(product, patch, { actor: 'user', action: 'single-edit' });
+    syncProductModel(attachCategoryRequirements(product, state.postingSchemas));
     return product;
   });
   if (!updated) return next(Object.assign(new Error('没有找到该商品'), { status: 404 }));
@@ -703,6 +707,7 @@ app.post('/api/products/batch-update', (request, response, next) => {
         delete next.sourceSnapshot;
         delete next.sourceSnapshotHash;
         recordProductMutation(product, { ...next, status: 'ready' }, { actor: 'user', action: 'batch-edit' });
+        syncProductModel(attachCategoryRequirements(product, state.postingSchemas));
       });
       return state.products.filter((product) => ids.has(product.id));
     });
@@ -729,7 +734,7 @@ app.post('/api/products/:id/refresh-detail', async (request, response, next) => 
       }
       Object.assign(target, { status: 'ready', updatedAt: new Date().toISOString() });
       delete target.publishResult;
-      if (!hasWarning) syncProductModel(target, { captureSource: true, sourceSnapshot: enriched });
+      if (!hasWarning) syncProductModel(attachCategoryRequirements(target, draft.postingSchemas), { captureSource: true, sourceSnapshot: enriched });
       return target;
     });
     response.json(updated);
@@ -911,6 +916,10 @@ async function runPublishJob(jobId) {
         store.patchJob(jobId, { progress: index + 1, total, message: `已跳过不存在的商品 ${index + 1}/${total}` });
         continue;
       }
+      if (job.metadata.failedOnly && !failedPublishProducts([product]).length) {
+        store.update((draft) => recordPublishOutcome(draft, jobId, product.id, { status: 'skipped', message: '商品已完成处理，无需重试' }, index + 1));
+        continue;
+      }
       product = preparePublishProduct(product, { stockPolicy: job.metadata.stockPolicy || 'preserve', defaultStock: job.metadata.defaultStock });
       store.update((draft) => {
         const target = draft.products.find((item) => item.id === product.id);
@@ -937,7 +946,16 @@ async function runPublishJob(jobId) {
           (reportStage) => withVerificationContext({
             onWaiting: reportStage,
             shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status))
-          }, () => publisher.publishProduct(product, route.url, mode, route.category, jobId, reportStage, { sellerGroup: job.metadata?.sellerGroup, listingMode: job.metadata?.listingMode, stockPolicy: job.metadata?.stockPolicy || 'preserve', defaultStock: job.metadata?.defaultStock })),
+          }, () => publisher.publishProduct(product, route.url, mode, route.category, jobId, reportStage, {
+            sellerGroup: job.metadata?.sellerGroup, listingMode: job.metadata?.listingMode,
+            stockPolicy: job.metadata?.stockPolicy || 'preserve', defaultStock: job.metadata?.defaultStock,
+            onCategorySchema: (schema) => store.update((state) => {
+              rememberCategoryRequirements(state, schema);
+              for (const item of state.products) {
+                if (item.postingRequirements === schema) syncProductModel(item);
+              }
+            }),
+          })),
           {
             timeoutMs: stageTimeoutMs,
             initialStage: '启动国际站发布流程',
@@ -959,6 +977,7 @@ async function runPublishJob(jobId) {
             updatedAt: new Date().toISOString()
           });
           if (target) {
+            if (target.referenceRecovery) target.referenceRecovery.state = 'completed';
             target.publishHistory = Array.isArray(target.publishHistory) ? target.publishHistory : [];
             target.publishHistory.unshift({ ...publishSnapshot, result });
             syncProductModel(target);
@@ -984,9 +1003,10 @@ async function runPublishJob(jobId) {
             const result = { status: 'failed', message, code: error.code || '',
               listingMode: normalizeListingMode(job.metadata?.listingMode),
               ...(error.diagnostics ? { diagnostics: error.diagnostics } : {}),
-              requiredFields: error.requiredFields || [], missingSourceFields: error.missingSourceFields || [],
-              unmatchedSourceFields: error.unmatchedSourceFields || [] };
+              requiredFields: [...new Set([...(error.requiredFields || []), ...requiredLabelsFromError(message)])], missingSourceFields: error.missingSourceFields || [],
+              unmatchedSourceFields: error.unmatchedSourceFields || [], conflictingSourceFields: error.conflictingSourceFields || [] };
             Object.assign(target, { status: 'publish_failed', publishResult: result, updatedAt: new Date().toISOString() });
+            if (target.referenceRecovery) target.referenceRecovery.state = 'failed';
             target.publishHistory = Array.isArray(target.publishHistory) ? target.publishHistory : [];
             const failureRoute = resolvePublishRoute(target, store.read().settings);
             target.publishHistory.unshift({ ...createPublishSnapshot(target, { mode, category: failureRoute.category, categoryId: failureRoute.categoryId, publishPageUrl: failureRoute.url }), result });
@@ -1002,7 +1022,11 @@ async function runPublishJob(jobId) {
         const requiredFields = [...new Set([...(error.requiredFields || []), ...requiredLabelsFromError(message)])];
         const attempted = retries[product.id]?.referenceIds || (retries[product.id]?.referenceId ? [retries[product.id].referenceId] : []);
         if (product.categoryReference && !pauseRequested && !requiresHuman && !environmentNotReady && error.code !== 'PUBLISH_POLICY_REVIEW_REQUIRED' && requiredFields.length && attempted.length < 2) {
-          const repair = findPublishedReferenceRepair(product, store.read().products.filter((candidate) => candidate.id === product.categoryReference.referenceId), requiredFields, attempted);
+          const frozen = product.categoryReference.template;
+          const candidates = frozen ? [{ ...frozen, id: product.categoryReference.referenceId, status: 'published' }]
+            : store.read().products.filter((candidate) => candidate.id === product.categoryReference.referenceId);
+          const repair = ['full', 'failed-fields', undefined].includes(product.categoryReference.scope)
+            ? findPublishedReferenceRepair(product, candidates, requiredFields, attempted) : null;
           if (repair) {
             store.update((draft) => {
               const target = draft.products.find((item) => item.id === product.id);
@@ -1073,7 +1097,8 @@ app.post('/api/publish', (request, response, next) => {
   const existing = state.jobs.find((job) => job.type === 'publish' && ['queued', 'running', 'pause_requested', 'paused'].includes(job.status));
   if (existing) return next(Object.assign(new Error('已有未完成的上架任务，请先继续或完成该任务'), { status: 409 }));
   const ids = new Set(request.body.ids || state.products.filter((item) => item.selected).map((item) => item.id));
-  const products = state.products.filter((item) => ids.has(item.id));
+  const candidates = state.products.filter((item) => ids.has(item.id));
+  const products = request.body.failedOnly ? failedPublishProducts(candidates) : candidates;
   if (!products.length) return next(Object.assign(new Error('请至少选择一件商品'), { status: 400 }));
   if (products.some((product) => processingProducts.has(product.id))) return next(Object.assign(new Error('商品正在加工，请完成后再上架'), { status: 409 }));
   let sellerGroup;
@@ -1089,7 +1114,7 @@ app.post('/api/publish', (request, response, next) => {
   catch (error) { return next(error); }
   const plan = createPublishPlan(products, state.settings);
   const job = store.createJob('publish', {
-    productIds: products.map((item) => item.id), mode,
+    productIds: products.map((item) => item.id), mode, failedOnly: Boolean(request.body.failedOnly),
     listingMode: normalizeListingMode(request.body.listingMode || state.settings.listingMode || 'auto'),
     publishDelay,
     stockPolicy: state.settings.stockPolicy || 'minimum-order',
@@ -1234,40 +1259,30 @@ function publishPlanResponse(request, response, next) {
 app.get('/api/publish/plan', publishPlanResponse);
 app.post('/api/publish/plan', publishPlanResponse);
 
+app.get('/api/references', (_request, response) => {
+  response.json({ references: referenceCandidates(store.read()) });
+});
+app.post('/api/products/reference/preview', (request, response, next) => {
+  try { response.json(previewProductReference(store.read(), request.body)); }
+  catch (error) { next(error); }
+});
 app.post('/api/products/reference', (request, response, next) => {
+  try { response.json(store.update((state) => applyReferencePreview(state, request.body))); }
+  catch (error) { next(error); }
+});
+app.post('/api/references/capture-current', async (_request, response, next) => {
+  if (readingSellerGroups || store.read().jobs.some((job) => job.type === 'publish' && ['queued', 'running', 'pause_requested'].includes(job.status))) {
+    return next(Object.assign(new Error('卖家窗口正在处理任务，请暂停后再读取模板'), { status: 409 }));
+  }
+  readingSellerGroups = true;
   try {
-    const ids = new Set(Array.isArray(request.body?.ids) ? request.body.ids : []);
-    const referenceId = String(request.body?.referenceId || '');
-    if (!ids.size || !referenceId) return next(Object.assign(new Error('请选择待补全商品和引用商品'), { status: 400 }));
-    const result = store.update((state) => {
-      const reference = state.products.find((item) => item.id === referenceId && (
-        item.status === 'published'
-        || (Array.isArray(item.publishHistory) && item.publishHistory.some((entry) => ['published', 'submitted', 'success'].includes(String(entry.result?.status || entry.status || '').toLowerCase())))
-      ));
-      if (!reference) throw Object.assign(new Error('只能引用已成功上架的商品'), { status: 400 });
-      const successfulSnapshot = (reference.publishHistory || []).find((entry) =>
-        ['published', 'submitted', 'success'].includes(String(entry.result?.status || entry.status || '').toLowerCase())
-        && entry.data && typeof entry.data === 'object'
-      );
-      const referenceTemplate = createPublishedReferenceTemplate(reference, successfulSnapshot);
-      const active = findWorkspaceJobs(state, { productIds: [...ids] }, ['queued', 'running', 'pause_requested']);
-      if (active.length) throw Object.assign(new Error('所选商品正在处理，请暂停任务后再引用资料'), { status: 409 });
-      const changed = [];
-      for (const product of state.products) {
-        if (!ids.has(product.id) || product.id === reference.id || product.status === 'published') continue;
-        const patch = applyPublishedProductReference(product, referenceTemplate, { fullTemplate: true });
-        if (!Object.keys(patch).length) continue;
-        // A template reference is an explicit recovery action for a failed
-        // listing. Reset the working status and remove the stale failure
-        // banner so the item is immediately eligible for a clean retry.
-        recordProductMutation(product, { ...patch, status: 'ready' }, { actor: 'user', action: 'reference-published-product' });
-        delete product.publishResult;
-        changed.push({ id: product.id, title: product.title, fields: Object.keys(patch), categoryId: product.categoryId || '' });
-      }
-      return { referenceId, referenceTitle: reference.title || reference.id, changed };
+    const template = await publisher.captureCurrentReference();
+    store.update((state) => {
+      state.referenceTemplates = [template, ...(state.referenceTemplates || []).filter((item) => item.id !== template.id)].slice(0, 300);
     });
-    response.json(result);
+    response.json({ reference: template });
   } catch (error) { next(error); }
+  finally { readingSellerGroups = false; }
 });
 
 app.get('/api/storage', (_request, response) => {

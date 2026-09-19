@@ -29,12 +29,13 @@ test('collects structured detail images in source order and excludes recommended
   const description = extractAlibabaDescription({ nodeMap: { module_description: { privateData: {
     viewOrder: ['productDescription', 'productDetails', 'recommendProductInfo'],
     productDescription: { details: [{ type: 'image', url: 'https://sc04.alicdn.com/kf/first.jpg' }, { type: 'text', text: 'Product <detail>' }] },
-    productDetails: { details: [{ type: 'image', url: 'https://sc04.alicdn.com/kf/second.jpg' }] },
+    productDetails: { details: [{ type: 'image', url: 'https://sc04.alicdn.com/kf/second.jpg' }, { type: 'text', text: 'After second image' }, { type: 'image', url: 'https://sc04.alicdn.com/kf/first.jpg' }] },
     recommendProductInfo: { details: [{ type: 'image', url: 'https://sc04.alicdn.com/kf/unrelated.jpg' }] }
   } } } });
   assert.deepEqual(description.images, ['https://sc04.alicdn.com/kf/first.jpg', 'https://sc04.alicdn.com/kf/second.jpg']);
   assert.match(description.html, /Product &lt;detail&gt;/);
   assert.doesNotMatch(description.html, /unrelated/);
+  assert.match(description.html, /first.jpg[\s\S]*Product &lt;detail&gt;[\s\S]*second.jpg[\s\S]*After second image[\s\S]*first.jpg/);
   assert.deepEqual(extractAlibabaDescription(null), { html: '', text: '', images: [] });
 });
 
@@ -74,14 +75,15 @@ test('reads modern and legacy detail modules without collecting recommendation i
     await page.route('**/*', async (route) => {
       if (route.request().resourceType() !== 'document') return route.abort();
       if (route.request().url().includes('/descIframe.html')) return route.fulfill({ contentType: 'text/html',
-        body: '<div id="detail_decorate_root"><p>Original product description with a picture also used in its gallery.</p><img data-src="https://sc04.alicdn.com/kf/main0.jpg_960x960.jpg"></div>' });
+        body: '<div id="detail_decorate_root"><p>Original product description with a picture also used in its gallery.</p><img data-src="https://sc04.alicdn.com/kf/main0.jpg_960x960.jpg"><table><tr><td>Package Weight</td><td>185g</td></tr></table><video src="https://video.example/detail.mp4"></video></div>' });
       return route.fulfill({ contentType: 'text/html', body: `<html lang="en"><body><h1>Sample Phone</h1>${gallery}
+        <div data-module-name="module_gallery"><video src="https://video.example/main.mp4"></video></div>
         <nav class="breadcrumb"><a href="https://www.alibaba.com/parent_cid123456.html">Parent</a><a href="https://www.alibaba.com/leaf_cid234567.html">Leaf</a></nav>
         <div data-testid="module-attribute-row"><span data-testid="module-attribute-name">Place of Origin</span><span data-testid="module-attribute-value">China</span></div>
         <div data-testid="module-attribute-row"><span data-testid="module-attribute-name">Material</span><span data-testid="module-attribute-value">Plastic</span></div>
         <table><tr><td>Age Range</td><td>3-6 years</td></tr></table>
         <dl><dt>Single gross weight</dt><dd>250 g</dd><dt>Single package size (cm)</dt><dd>30x20x10</dd></dl>
-        <div data-module-name="module_recommend"><img src="https://sc04.alicdn.com/kf/unrelated.jpg_960x960.jpg"></div>
+        <div data-module-name="module_recommend"><img src="https://sc04.alicdn.com/kf/unrelated.jpg_960x960.jpg"><video src="https://video.example/unrelated.mp4"></video></div>
         ${description}<script>window.detailData = ${JSON.stringify({ globalData: { product: { customPrice: { fixedDollarPrice: 23 }, attributes: [
           { id: 123, name: 'Animal', values: [{ id: 456, name: 'Bee' }] },
         ] } }, nodeMap: { recommendations: { categoryId: 999999 }, module_description: { privateData, renderType } } })};</script>
@@ -110,6 +112,12 @@ test('reads modern and legacy detail modules without collecting recommendation i
       assert.equal(product.origin, 'China');
       assert.deepEqual(product.packaging, { weight: '0.25', length: '30', width: '20', height: '10' });
       assert.equal(product.sourceAttributeSchemaVersion, SOURCE_ATTRIBUTE_SCHEMA_VERSION);
+      assert.equal(product.videoUrl, 'https://video.example/main.mp4');
+      assert.equal(product.videos.some((item) => /unrelated/.test(item.url)), false);
+      if (module === 'late-iframe') {
+        assert.equal(product.attributes.find((item) => item.name === 'Package Weight').value, '185g');
+        assert.equal(product.videos.find((item) => item.role === 'detail')?.url, 'https://video.example/detail.mp4');
+      }
     }
   } finally {
     await browser.close();

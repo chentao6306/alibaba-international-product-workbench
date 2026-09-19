@@ -183,22 +183,24 @@ export function extractAlibabaDescription(detailData) {
   const order = Array.isArray(source.viewOrder) ? source.viewOrder.filter((key) => sections.includes(key)) : sections;
   const escape = (value) => String(value || '').replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
   const images = [];
+  const videos = [];
   const text = [];
   const html = [];
   for (const key of order) {
     for (const item of Array.isArray(source[key]?.details) ? source[key].details : []) {
       if (item?.type === 'image' && /^https?:\/\//i.test(item.url || '')) {
-        if (!images.includes(item.url)) {
-          images.push(item.url);
-          html.push(`<p><img src="${escape(item.url)}" /></p>`);
-        }
+        if (!images.includes(item.url)) images.push(item.url);
+        html.push(`<p><img src="${escape(item.url)}" /></p>`);
       } else if (item?.type === 'text' && typeof item.text === 'string' && item.text.trim()) {
         text.push(item.text.trim());
         html.push(`<p>${escape(item.text.trim())}</p>`);
+      } else if (item?.type === 'video' && /^https?:\/\//i.test(item.url || '')) {
+        videos.push({ role: 'detail', url: item.url, source: 'detailData.module_description' });
+        html.push(`<video controls src="${escape(item.url)}"></video>`);
       }
     }
   }
-  return { html: html.join(''), text: text.join('\n'), images };
+  return { html: html.join(''), text: text.join('\n'), images, ...(videos.length ? { videos } : {}) };
 }
 
 function structuredVariants(detailData) {

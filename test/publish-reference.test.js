@@ -48,6 +48,8 @@ test('does not reuse the target itself, empty values, or unknown categories', ()
 });
 
 test('extracts concrete missing fields and rejects quota failures as success', () => {
+  assert.deepEqual(requiredLabelsFromError('属性[Type] 必须填写\n商品属性：[类型] 必须填写'), ['Type', '类型']);
+  assert.deepEqual(requiredLabelsFromError('属性[Logo printing] 必须填写\n商品属性：[Logo印刷] 必须填写'), ['Logo printing', 'Logo印刷']);
   assert.deepEqual(requiredLabelsFromError('屏幕尺寸必填项不能为空；电池容量必填项不能为空'), ['屏幕尺寸', '电池容量']);
   assert.deepEqual(requiredLabelsFromError('提交后未检测到国际站成功反馈：类型必填项不能为空;商品图片项必填项不能为空'), ['类型']);
   assert.deepEqual(requiredLabelsFromError('Battery capacity cannot be empty; Screen size is required'), ['Battery capacity', 'Screen size']);

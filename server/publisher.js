@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { readSellerReference } from './seller-reference.js';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import sharp from 'sharp';
@@ -19,6 +20,8 @@ import { uploadEditorDetailImages } from './description-image-upload.js';
 import { fillReferencedSkuRows } from './sku-reference.js';
 import { findNormalDescriptionControl, findPostingTitle, requirePostingPageAvailable, revealDescriptionSection, waitForDescriptionEditor, waitForPostingTitle } from './posting-readiness.js';
 import { readSourceDescriptionFrame } from './source-description-frame.js';
+import { collectSourceAttributeSections } from './source-attributes.js';
+import { categoryRequirementSchema } from './category-readiness.js';
 import { browserResourcePolicy } from './browser-resource-policy.js';
 import { browserStep } from './browser-step.js';
 import { userFacingError } from './browser-error.js';
@@ -1839,6 +1842,36 @@ export async function closePostingAttributeMenus(page) {
   return !await menus.count();
 }
 
+// Prefer stable IDs, then a unique semantic match. A stale ID must not suppress
+// a valid label; equally plausible ranges must not silently select the first.
+export function chooseAttributeOption(options, value, valueId, minimumScore = 70) {
+  const available = options.map((option, index) => ({ ...option, index })).filter((option) => !option.disabled);
+  if (valueId != null) {
+    const exact = available.filter((option) => String(option.value) === String(valueId));
+    if (exact.length === 1) return exact[0];
+  }
+  const ranked = available.map((option) => ({ ...option, score: attributeOptionMatchScore(value, option.label) }))
+    .filter((option) => option.score >= minimumScore).sort((a, b) => b.score - a.score);
+  if (!ranked.length || (ranked[1]?.score === ranked[0].score
+    && (ranked[1].value !== ranked[0].value || ranked[1].label !== ranked[0].label))) return null;
+  return ranked[0];
+}
+
+const isOtherOption = (value) => /^(?:other|others|其他|其它|自定义)$/i.test(String(value || '').trim());
+function otherAttributeOption(options) {
+  const candidates = options.map((option, index) => ({ ...option, index })).filter((option) => !option.disabled && isOtherOption(option.label));
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
+async function fillOtherAttributeText(locator, value) {
+  const row = locator.locator('xpath=ancestor::*[@data-posting-attribute-row or starts-with(@id,"p-") or starts-with(@id,"struct-p-") or contains(concat(" ", normalize-space(@class), " "), " sell-catProp-item ")][1]');
+  const input = row.locator('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="button"]):not([type="submit"]):not([readonly]):not([disabled]):not([role="combobox"]):visible, textarea:not([readonly]):not([disabled]):visible');
+  if (!await input.first().waitFor({ state: 'visible', timeout: 1500 }).then(() => true, () => false) || await input.count() !== 1) return false;
+  await input.fill(String(value), { timeout: 2000 });
+  await input.press('Tab');
+  return (await input.inputValue().catch(() => '')).trim() === String(value).trim();
+}
+
 export async function fillChoice(page, locator, value, { valueIds = {}, minimumScore = 70, labels = {}, onValueCommitted = () => {} } = {}) {
   if (!locator || value == null || value === '') return false;
   if (!await locator.count().catch(() => 0)) return false;
@@ -1846,68 +1879,86 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
   const kind = await locator.evaluate((node) => ({ tag: node.tagName, type: node.type })).catch(() => null);
   if (!kind) return false;
   if (kind.tag === 'SELECT') {
-    const options = await locator.locator('option').evaluateAll((nodes) => nodes.map((node) => ({ value: node.value, label: node.textContent })));
+    const options = await locator.locator('option').evaluateAll((nodes) => nodes.map((node) => ({ value: node.value, label: node.textContent,
+      disabled: node.disabled || node.parentElement?.disabled || !node.value })));
     const multiple = await locator.evaluate((node) => node.multiple);
     // A DOM capture joins multi-select labels into one string; keep a literal
     // comma when that complete label is itself an available option.
     const values = [value].flat().flatMap((item) => multiple && !options.some((option) => attributeOptionMatchScore(item, option.label) >= 90)
       ? String(item).split(/\s*[,;，；]\s*/).filter(Boolean) : [String(item)]);
-    const targets = values.map((item) => options.find((option) => option.value && (valueIds[item] != null
-      ? String(valueIds[item]) === option.value : attributeOptionMatchScore(item, option.label) >= 90)));
+    const targets = values.map((item) => chooseAttributeOption(options, item, valueIds[item], minimumScore) || otherAttributeOption(options));
     if (targets.some((item) => !item) || (targets.length > 1 && !multiple)) return false;
+    const custom = targets.flatMap((option, index) => isOtherOption(option.label) && !isOtherOption(values[index]) ? [values[index]] : []);
+    if (custom.length > 1) return false;
+    const previous = await locator.evaluate((node) => [...node.selectedOptions].map((option) => option.value));
     await locator.selectOption(targets.map((item) => item.value), { timeout: 4000 });
-    const committed = await locator.evaluate((node, expected) => expected.every((value) => [...node.selectedOptions].some((option) => option.value === value)), targets.map((item) => item.value));
-    if (committed) targets.forEach((option, index) => { if (valueIds[values[index]] != null) onValueCommitted(String(option.value), option.label); });
+    if (custom.length && !await fillOtherAttributeText(locator, custom[0])) {
+      await locator.selectOption(previous, { timeout: 2000 }).catch(() => {});
+      return false;
+    }
+    const committed = await locator.evaluate((node, expected) => node.selectedOptions.length === new Set(expected).size
+      && expected.every((value) => [...node.selectedOptions].some((option) => option.value === value)), targets.map((item) => item.value));
+    if (committed) targets.forEach((option, index) => { if (valueIds[values[index]] != null) onValueCommitted(String(valueIds[values[index]]), isOtherOption(option.label) && custom.length ? custom[0] : option.label); });
     return committed;
   }
   if (['checkbox', 'radio'].includes(kind.type)) {
     const values = Array.isArray(value) ? value : expected.split(/\s*[,;，；]\s*/).filter(Boolean);
-    if (values.length > 1) {
-      let filled = true;
-      if (kind.type === 'radio') return false;
-      for (const item of values) filled = await fillChoice(page, locator, item, { valueIds, minimumScore, labels, onValueCommitted }) && filled;
-      return filled;
-    }
+    if (values.length > 1 && kind.type === 'radio') return false;
     const row = locator.locator('xpath=ancestor::*[@data-posting-attribute-row or starts-with(@id,"p-") or contains(concat(" ", normalize-space(@class), " "), " sell-catProp-item ")][1]');
     const checkboxLabels = row.locator('label').filter({ has: page.locator('input[type="checkbox"], input[type="radio"]') });
-    const findOption = async () => {
-      const texts = await checkboxLabels.allTextContents();
-      const ids = await checkboxLabels.evaluateAll((nodes) => nodes.map((node) => node.querySelector('input')?.value));
-      const index = valueIds[expected] != null ? ids.findIndex((id) => id === String(valueIds[expected]))
-        : texts.findIndex((text) => attributeOptionMatchScore(expected, text) >= 90);
-      return index < 0 ? null : checkboxLabels.nth(index);
+    const findOption = async (candidate) => {
+      const options = await checkboxLabels.evaluateAll((nodes) => nodes.map((node) => ({ value: node.querySelector('input')?.value,
+        label: node.textContent, disabled: node.querySelector('input')?.disabled })));
+      return chooseAttributeOption(options, candidate, valueIds[candidate], minimumScore) || otherAttributeOption(options);
     };
-    let label = await findOption();
-    if (!label) {
+    for (const candidate of values) {
+      if (await findOption(candidate)) continue;
       // Required sale attributes such as Type expose a real Add control.
-      // Commit a source value there, never invent a different product type.
       const add = row.locator('.sell-sequential-combocheckbox button.add-button:visible').last();
       if (!await add.isVisible().catch(() => false) || await add.isDisabled()) return false;
       await add.click({ timeout: 4000 });
       const custom = row.locator('.sell-sequential-combobox-custom-wrap input:visible').last();
       if (!await custom.waitFor({ state: 'visible', timeout: 2000 }).then(() => true, () => false)) return false;
-      await custom.fill(expected);
+      await custom.fill(String(candidate));
       await custom.press('Tab');
       const deadline = Date.now() + 2000;
-      do { label = await findOption(); if (label) break; await page.waitForTimeout(100); } while (Date.now() < deadline);
+      while (!await findOption(candidate) && Date.now() < deadline) await page.waitForTimeout(100);
+      if (!await findOption(candidate)) return false;
     }
-    if (!label || !await label.isVisible().catch(() => false)) return false;
-    const input = label.locator('input').first();
-    if (!await input.isChecked().catch(() => false)) await label.click({ timeout: 4000 });
-    return input.waitFor({ state: 'attached', timeout: 2000 }).then(async () => {
-      const deadline = Date.now() + 2000;
-      do {
-        if (await input.isChecked().catch(() => false)) {
-          if (valueIds[expected] != null) onValueCommitted(String(valueIds[expected]), await label.textContent());
-          return true;
-        }
-        await page.waitForTimeout(100);
-      } while (Date.now() < deadline);
+    // Resolve every value before replacing a stale/default selection. All
+    // actions stay inside this one attribute row, including read-back.
+    const targets = await Promise.all(values.map(findOption));
+    if (targets.some((target) => !target)) return false;
+    const custom = targets.flatMap((target, index) => isOtherOption(target.label) && !isOtherOption(values[index]) ? [values[index]] : []);
+    if (custom.length > 1) return false;
+    const previous = await checkboxLabels.evaluateAll((nodes) => nodes.map((node) => node.querySelector('input')?.checked));
+    const indexes = new Set(targets.map((target) => target.index));
+    for (let index = 0; index < await checkboxLabels.count(); index++) {
+      const label = checkboxLabels.nth(index), input = label.locator('input').first();
+      const desired = indexes.has(index);
+      if (kind.type === 'radio' && !desired) continue;
+      if (await input.isChecked() !== desired) await label.click({ timeout: 4000 });
+    }
+    if (custom.length && !await fillOtherAttributeText(locator, custom[0])) {
+      for (let index = 0; index < previous.length; index++) {
+        const label = checkboxLabels.nth(index);
+        if (await label.locator('input').first().isChecked() !== previous[index]) await label.click({ timeout: 1000 }).catch(() => {});
+      }
       return false;
-    }, () => false);
+    }
+    const deadline = Date.now() + 2000;
+    do {
+      const checks = await checkboxLabels.evaluateAll((nodes) => nodes.map((node) => node.querySelector('input')?.checked));
+      if (checks.every((checked, index) => checked === indexes.has(index))) {
+        targets.forEach((target, index) => { if (valueIds[values[index]] != null) onValueCommitted(String(valueIds[values[index]]), isOtherOption(target.label) && custom.length ? custom[0] : target.label); });
+        return true;
+      }
+      await page.waitForTimeout(100);
+    } while (Date.now() < deadline);
+    return false;
   }
   let chosenLabel = '';
-  const chooseVisibleOption = async (candidate) => {
+  const chooseVisibleOption = async (candidate, allowOther = false) => {
     // On slow desktops the trigger expands before the portal/search input
     // mounts. Wait for the actual popup before binding its options and search.
     const popups = '.sell-o-select-options:visible, .next-select-popup:visible, [role="listbox"]:visible';
@@ -1920,28 +1971,26 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
       : page.locator('[role="option"]:visible, .next-menu-item:visible, .next-select-menu-item:visible');
     // Alibaba's search can return no results for a complete option label
     // containing parentheses. Select an already loaded exact value first.
-    const loaded = await options.allTextContents();
-    if (valueIds[candidate] != null) {
-      const ids = await options.evaluateAll((nodes) => nodes.map((node) => {
-        const explicit = node.getAttribute('data-value') ?? node.getAttribute('value');
-        if (explicit != null) return explicit;
-        const key = Object.getOwnPropertyNames(node).find((key) => key.startsWith('__reactFiber'));
-        let fiber = key && node[key];
-        for (let depth = 0; fiber && depth < 5; depth++, fiber = fiber.return) {
-          const value = fiber.memoizedProps?.value;
-          if (typeof value === 'string' || typeof value === 'number') return String(value);
+    const chooseLoaded = async () => {
+      const available = await options.evaluateAll((nodes) => nodes.map((node) => {
+        let value = node.getAttribute('data-value') ?? node.getAttribute('value');
+        if (value == null) {
+          const key = Object.getOwnPropertyNames(node).find((key) => key.startsWith('__reactFiber'));
+          let fiber = key && node[key];
+          for (let depth = 0; fiber && depth < 5; depth++, fiber = fiber.return) {
+            const id = fiber.memoizedProps?.value;
+            if (typeof id === 'string' || typeof id === 'number') { value = String(id); break; }
+          }
         }
-        return '';
+        return { value, label: node.textContent, disabled: node.getAttribute('aria-disabled') === 'true'
+          || node.classList.contains('disabled') || node.classList.contains('next-disabled') };
       }));
-      const index = ids.indexOf(String(valueIds[candidate]));
-      if (index >= 0) { chosenLabel = loaded[index]; return options.nth(index).click({ timeout: 4000 }).then(() => true).catch(() => false); }
-      // Text remains usable when an option is virtualized or exposes no ID.
-    }
-    const exactIndex = loaded.map((text, index) => ({ index, score: attributeOptionMatchScore(candidate, text) }))
-      .filter((item) => item.score >= minimumScore).sort((a, b) => b.score - a.score)[0]?.index ?? -1;
-    if (exactIndex >= 0) {
-      return options.nth(exactIndex).click({ timeout: 4000 }).then(() => true).catch(() => false);
-    }
+      const match = chooseAttributeOption(available, candidate, valueIds[candidate], minimumScore) || (allowOther ? otherAttributeOption(available) : null);
+      if (!match) return false;
+      chosenLabel = match.label;
+      return options.nth(match.index).click({ timeout: 4000 }).then(() => true, () => false);
+    };
+    if (await chooseLoaded()) return true;
     // The menu virtualizes its options. Search reveals values outside the
     // first nine rows, including 6.6-inch screens and 6000-6999mAh batteries.
     let search = menu.locator('input:not([readonly]):visible').first();
@@ -1956,12 +2005,7 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
     }
     const deadline = Date.now() + 5000;
     do {
-      const texts = await options.allTextContents();
-      const ranked = texts.map((text, index) => ({ index, score: attributeOptionMatchScore(candidate, text) }))
-        .filter((item) => item.score >= minimumScore).sort((a, b) => b.score - a.score);
-      if (ranked.length) {
-        return options.nth(ranked[0].index).click({ timeout: 4000 }).then(() => true).catch(() => false);
-      }
+      if (await chooseLoaded()) return true;
       await page.waitForTimeout(200);
     } while (Date.now() < deadline);
     return false;
@@ -1973,9 +2017,30 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
     let selected = true;
     const selectedValues = () => locator.evaluate((node) => {
       const root = node.closest('.next-select, [data-posting-attribute-row], .sell-catProp-item');
-      return [...(root?.querySelectorAll('.next-select-values em, .next-tag-body, [class*="selected-value"]') || [])]
+      const values = [...(root?.querySelectorAll('.next-select-values em, .next-tag-body, [class*="selected-value"]') || [])]
         .map((item) => item.textContent).concat(node.readOnly && node.value ? [node.value] : []);
+      if (!values.some((value) => /^(?:other|others|其他|其它|自定义)$/i.test(value.trim()))) return values;
+      const row = node.closest('[data-posting-attribute-row], .sell-catProp-item');
+      const custom = [...(row?.querySelectorAll('input:not([readonly]):not([disabled]):not([role="combobox"]), textarea') || [])]
+        .filter((input) => !['checkbox', 'radio', 'hidden', 'file', 'button', 'submit'].includes(input.type) && input.getClientRects().length)
+        .map((input) => input.value.trim()).filter(Boolean);
+      return custom.length ? values.filter((value) => !/^(?:other|others|其他|其它|自定义)$/i.test(value.trim())).concat(custom) : values;
     }).catch(() => []);
+    const wantedLabels = candidates.map((candidate) => labels[valueIds[candidate]] || candidate);
+    const unexpected = (await selectedValues()).some((text) => !wantedLabels.some((candidate) => attributeOptionMatchScore(candidate, text) >= minimumScore));
+    if (unexpected) {
+      // Clear removable chips through their own controls. Do not manipulate
+      // React state or clear another property in a shared row.
+      const selectRoot = locator.locator('xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " next-select ")][1]');
+      const remove = selectRoot.locator('.next-tag-close-btn:visible, .next-select-values .next-icon-close:visible, [data-selected-value] [aria-label="Remove"]:visible');
+      for (let attempt = 0; attempt < 24 && await remove.count(); attempt++) {
+        const before = JSON.stringify(await selectedValues());
+        if (!await remove.first().click({ timeout: 1000 }).then(() => true, () => false)) break;
+        const deadline = Date.now() + 1000;
+        while (JSON.stringify(await selectedValues()) === before && Date.now() < deadline) await page.waitForTimeout(50);
+        if (JSON.stringify(await selectedValues()) === before) break;
+      }
+    }
     const committed = [];
     for (const candidate of candidates) {
       chosenLabel = '';
@@ -1983,7 +2048,7 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
       const knownLabel = labels[valueIds[candidate]] || candidate;
       if (selectedTexts.some((text) => attributeOptionMatchScore(knownLabel, text) >= minimumScore)) { committed.push(knownLabel); continue; }
       if (await locator.getAttribute('aria-expanded').catch(() => '') !== 'true') {
-        await locator.click({ force: true, timeout: 4000 }).catch(() => {});
+        await locator.click({ timeout: 4000 }).catch(() => {});
       }
       await page.waitForTimeout(180);
       // Opening an option menu can replace its input during a category rerender.
@@ -1996,6 +2061,18 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
       }
       let chose = await chooseVisibleOption(candidate);
       if (!chose && acceptsCustom) await locator.fill('').catch(() => {});
+      if (!chose) {
+        // Search may have hidden Other. Restore the unfiltered menu before
+        // looking for its genuine custom-value entry.
+        const search = page.locator('.sell-o-select-options:visible input:not([readonly]), .next-select-popup:visible input:not([readonly])').first();
+        if (await search.count()) { await search.fill(''); await page.waitForTimeout(200); }
+        chose = await chooseVisibleOption(candidate, true);
+      }
+      if (chose && isOtherOption(chosenLabel) && !isOtherOption(candidate)) {
+        chose = await fillOtherAttributeText(locator, candidate);
+        if (chose) chosenLabel = candidate;
+        else { await closePostingAttributeMenus(page); return false; }
+      }
       // The click can return before React commits the selection, especially
       // on remote/low-memory desktops. Read the actual value before closing
       // the menu or starting the next selection; a fixed 180ms is not enough.
@@ -2015,7 +2092,8 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
     }
     await locator.evaluate((node) => node.blur()).catch(() => {});
     const finalValues = await selectedValues();
-    return selected && committed.every((candidate) => finalValues.some((text) => attributeOptionMatchScore(candidate, text) >= minimumScore));
+    return selected && committed.every((candidate) => finalValues.some((text) => attributeOptionMatchScore(candidate, text) >= minimumScore))
+      && finalValues.every((text) => committed.some((candidate) => attributeOptionMatchScore(candidate, text) >= minimumScore));
   }
   for (let attempt = 0; attempt < 2; attempt += 1) {
     // A stale or category-specific control must fail quickly. The outer
@@ -3077,7 +3155,8 @@ export function attributeFieldMatchesValue(field, value, { valueIds = {}, labels
   if (requiredAttributeKey(field.label) === requiredAttributeKey('产地')) {
     return values.some((selected) => originCountry(selected) && originCountry(selected) === originCountry(value));
   }
-  return candidates.length > 0 && candidates.every((item) => values.some((selected) => attributeOptionMatchScore(labels[valueIds[item]] || item, selected) >= minimumScore));
+  return candidates.length > 0 && candidates.every((item) => values.some((selected) => attributeOptionMatchScore(labels[valueIds[item]] || item, selected) >= minimumScore))
+    && values.every((selected) => candidates.some((item) => attributeOptionMatchScore(labels[valueIds[item]] || item, selected) >= minimumScore));
 }
 
 export async function fillCategoryAttributes(page, product, onProgress = () => {}) {
@@ -3093,6 +3172,7 @@ export async function fillCategoryAttributes(page, product, onProgress = () => {
       let field = current.find((entry) => initial.id ? entry.id === initial.id : entry.label === initial.label);
       if (!field || field.disabled || isOriginRegionAttribute(field.label) || (field.saleSpecification && !field.required)) continue;
       const source = sourceAttributeForField(product, field);
+      if (source?.conflict) continue;
       const value = source?.value ?? inferRequiredAttributeValue(product, ...field.labels);
       if (value == null || value === '') continue;
       field = await ensureCategoryFieldControl(page, field);
@@ -3128,6 +3208,7 @@ export async function requireCategoryAttributes(page, product) {
     if (!field.required || field.disabled || field.saleSpecification || isOriginRegionAttribute(field.label)) return false;
     if (!field.hasValue) return true;
     const source = sourceAttributeForField(product, field);
+    if (source?.conflict) return true;
     const value = source?.value;
     return value != null && value !== '' && !attributeFieldMatchesValue(field, value, {
       valueIds: source?.matchedById ? source.valueIds : {}, labels: optionLabels(page, field),
@@ -3141,6 +3222,10 @@ export async function requireCategoryAttributes(page, product) {
 
 export function requiredLabelsFromError(message) {
   const labels = [];
+  for (const match of String(message || '').matchAll(/(?:商品属性|属性)\s*[:：]?\s*[\[【]([^\]】\r\n]{1,60})[\]】]\s*(?:必须填写|必填|不能为空|is required)/gi)) {
+    const label = cleanRequiredLabel(match[1]);
+    if (label) labels.push(label);
+  }
   for (const match of String(message || '').matchAll(/(?:^|[；;，,：:\s])\s*([^；;，,：:\s]{1,48}?)(?:必填项)?不能为空/gi)) {
     const label = cleanRequiredLabel(match[1]);
     if (label && !/^(?:属性值|商品图片项?|图片|image)$/i.test(label)) labels.push(label);
@@ -3164,6 +3249,7 @@ export async function recoverRequiredAttributes(page, product, labels, onProgres
     let descriptor = schema.find((field) => field.labels.some((label) => requiredAttributeKey(label) === requiredAttributeKey(rawLabel)));
     if (descriptor?.saleSpecification && !descriptor.required) continue;
     const source = descriptor && sourceAttributeForField(product, descriptor);
+    if (source?.conflict) continue;
     if (descriptor && source?.value != null && source.value !== '') descriptor = await ensureCategoryFieldControl(page, descriptor);
     const field = descriptor ? (descriptor.inputIndex < 0 ? null : categoryFieldLocator(page, descriptor)) : await fieldByAnyLabel(page, aliases);
     if (!field) continue;
@@ -3230,17 +3316,20 @@ export async function emptyRequiredSpecificationLabels(page, includeCategory = f
 
 export async function requiredAttributeFailure(page, product, labels) {
   const schema = await page.evaluate(readPostingAttributeSchema);
-  const missing = [], unmatched = [];
+  const missing = [], unmatched = [], conflicts = [];
   for (const label of labels) {
     const field = schema.find((field) => field.label === label) || { label };
-    const value = sourceAttributeForField(product, field)?.value ?? inferRequiredAttributeValue(product, label);
+    const source = sourceAttributeForField(product, field);
+    if (source?.conflict) { conflicts.push(label); continue; }
+    const value = source?.value ?? inferRequiredAttributeValue(product, label);
     (value == null || value === '' || (Array.isArray(value) && !value.length) ? missing : unmatched).push(label);
   }
   const reasons = [];
+  if (conflicts.length) reasons.push(`同一属性存在冲突值，请确认：${conflicts.join('、')}`);
   if (missing.length) reasons.push(`来源缺少必填资料：${missing.join('、')}；请补充这些字段或重新采集`);
   if (unmatched.length) reasons.push(`已采集但发布页未接受：${unmatched.join('、')}；请检查对应选项或控件是否加载完成`);
   return Object.assign(new Error(reasons.join('；')), {
-    code: 'PUBLISH_REQUIRED_DATA_MISSING', requiredFields: labels, missingSourceFields: missing, unmatchedSourceFields: unmatched,
+    code: 'PUBLISH_REQUIRED_DATA_MISSING', requiredFields: labels, missingSourceFields: missing, unmatchedSourceFields: unmatched, conflictingSourceFields: conflicts,
   });
 }
 
@@ -3836,6 +3925,18 @@ export class SellerPublisher {
     return this.page;
   }
 
+  async captureCurrentReference() {
+    if (globalThis.__KUA_YIPU_SELLER_BRIDGE?.captureReference) return globalThis.__KUA_YIPU_SELLER_BRIDGE.captureReference();
+    const page = await this.findPostingFormPage({ reveal: true });
+    if (!page || !isProductPostingUrl(page.url()) || !isAlibabaInternationalUrl(page.url())) throw new Error('请先在卖家窗口打开已有商品的编辑表单');
+    const url = new URL(page.url());
+    const productId = url.searchParams.get('productId') || url.searchParams.get('itemId') || '';
+    const categoryId = categoryIdFromUrl(page.url()) || await page.locator('input[name="catId"], input[name="categoryId"]').first().inputValue().catch(() => '');
+    const titleField = await findPostingTitle(page);
+    const title = titleField ? await titleField.inputValue() : '';
+    return readSellerReference(page, { productId, categoryId, title });
+  }
+
   async bindCurrentPage() {
     if (globalThis.__KUA_YIPU_SELLER_BRIDGE?.bind) {
       return globalThis.__KUA_YIPU_SELLER_BRIDGE.bind();
@@ -4100,7 +4201,7 @@ export class SellerPublisher {
         if (typeof options.shouldStop === 'function' && options.shouldStop()) { const error = new Error('COLLECT_PAUSED'); error.code = 'COLLECT_PAUSED'; throw error; }
         let enrichedProduct;
         try {
-          enrichedProduct = await withSourceLocale(context, () => this.readSourceProduct(page, products[index]), options);
+          enrichedProduct = await withSourceLocale(context, () => this.readSourceProduct(page, products[index], 0, options), options);
         } catch (error) {
           if (error?.code === 'HUMAN_VERIFICATION_REQUIRED') {
             if (Number(options.verificationRecoveries || 0) >= 2) throw Object.assign(new Error('验证后页面仍未恢复，任务已暂停并保留断点，请稍后继续'), { code: 'COLLECT_PAUSED' });
@@ -4125,10 +4226,10 @@ export class SellerPublisher {
     }
   }
 
-  async readSourceProduct(page, base, retry = 0) {
+  async readSourceProduct(page, base, retry = 0, options = {}) {
     page.setDefaultTimeout(5000);
     await page.setExtraHTTPHeaders(SOURCE_LANGUAGE_HEADERS);
-    await page.goto(base.sourceUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    if (!retry) await page.goto(base.sourceUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
     await page.waitForTimeout(400);
     await waitForHumanVerification(page);
@@ -4157,6 +4258,9 @@ export class SellerPublisher {
     }
     await page.waitForTimeout(350);
     await waitForHumanVerification(page);
+    const sourceAttributes = await collectSourceAttributeSections(page, {
+      verify: () => waitForHumanVerification(page), shouldStop: options.shouldStop,
+    });
     const detailDataScript = await page.evaluate(() => [...document.scripts]
       .map((script) => script.textContent || '')
       .find((text) => /(?:window\.)?detailData\s*=\s*\{/.test(text)) || '').catch(() => '');
@@ -4172,7 +4276,8 @@ export class SellerPublisher {
       waitForFrame: !inlineDetail && !structuredDescription.html && /ssr/i.test(detailData?.nodeMap?.module_description?.renderType || ''),
       verify: () => waitForHumanVerification(page)
     });
-    const collectedAttributes = mergeSourceAttributes(extractAlibabaAttributes(detailData), await page.evaluate(readAlibabaAttributeRows));
+    const collectedAttributes = mergeSourceAttributes(extractAlibabaAttributes(detailData), sourceAttributes.attributes,
+      await page.evaluate(readAlibabaAttributeRows), iframeDetail?.attributes || []);
     const categoryDocument = await page.evaluate(readAlibabaCategoryDocument);
     const detail = await page.evaluate(({ descriptionSelector, categoryDocument, collectedAttributes }) => {
       const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
@@ -4256,6 +4361,19 @@ export class SellerPublisher {
         .map((row) => [...row.cells].map((cell) => clean(cell.textContent))).filter((row) => row.length > 1);
       const attrMap = Object.fromEntries(attributes.map((item) => [item.name.toLowerCase(), item.value]));
       const video = jsonObjects.find((item) => item['@type'] === 'VideoObject');
+      const videos = [...document.querySelectorAll('video')].flatMap((node) => {
+        if (node.closest('[data-module-name*="recommend" i], [data-module-name*="related" i], [class*="recommend" i]')) return [];
+        const url = [node.currentSrc, node.getAttribute('src'), node.querySelector('source')?.getAttribute('src')]
+          .filter(Boolean).map(absolute).find((url) => /^https?:\/\//i.test(url));
+        if (!url) return [];
+        const role = node.closest(descriptionSelector) ? 'detail'
+          : node.closest('[data-module-name*="gallery" i], [data-testid*="gallery" i], [class*="product-gallery" i]') ? 'main' : 'unclassified';
+        return [{ role, url, poster: absolute(node.getAttribute('poster')), source: 'dom' }];
+      });
+      const jsonVideoUrl = absolute(video?.contentUrl || '');
+      if (/^https?:\/\//i.test(jsonVideoUrl) && !videos.some((item) => item.url === jsonVideoUrl)) {
+        videos.push({ role: 'main', url: jsonVideoUrl, source: 'json-ld' });
+      }
       const productJson = jsonObjects.find((item) => item['@type'] === 'Product');
       const priceText = clean([
         document.querySelector('[data-module-name="module_price"]')?.textContent,
@@ -4315,7 +4433,7 @@ export class SellerPublisher {
         salesUnit, paymentMethod, shippingText, services: { sourceTexts: sourceServices, customizations }, certificates,
         descriptionHtml,
         description: highlights.join('\n') || clean(descriptionModule?.textContent).slice(0, 12000),
-        videoUrl: absolute(video?.contentUrl || ''),
+        videoUrl: videos.find((item) => item.role === 'main')?.url || '', videos,
         dataCompleteness: {
           mainImages: mainImages.length, detailImages: detailImages.length,
           sourceDetailImages: sourceDetailImages.length, detailImagesDerived: !sourceDetailImages.length,
@@ -4329,6 +4447,8 @@ export class SellerPublisher {
       };
     }, { descriptionSelector: SOURCE_DESCRIPTION_SELECTOR, categoryDocument, collectedAttributes });
     detail.packaging = packagingFromAttributes(collectedAttributes);
+    detail.videos = [...new Map([...detail.videos, ...(structuredDescription.videos || []), ...(iframeDetail?.videos || [])]
+      .map((item) => [`${item.role}:${item.url}`, item])).values()];
     detail.origin = productOrigin({ attributes: collectedAttributes });
     // Alibaba defers attributes/description until the corresponding section
     // enters the viewport. If the first snapshot contains only the gallery,
@@ -4341,7 +4461,7 @@ export class SellerPublisher {
     if (needsLazyRetry) {
       await page.evaluate(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'instant' })).catch(() => {});
       await page.waitForTimeout(1400);
-      return this.readSourceProduct(page, base, retry + 1);
+      return this.readSourceProduct(page, base, retry + 1, options);
     }
     if (structuredDescription.html && (!detail.descriptionHtml || !detail.detailImages.length)) {
       detail.descriptionHtml = structuredDescription.html.slice(0, 90000);
@@ -4403,6 +4523,7 @@ export class SellerPublisher {
       detailImages: detail.detailImages,
       attributes: detail.attributes,
       sourceAttributeSchemaVersion: SOURCE_ATTRIBUTE_SCHEMA_VERSION,
+      sourceAttributeCapture: sourceAttributes.evidence,
       variantGroups,
       skus,
       price: structuredSource?.price ?? base.price,
@@ -4437,6 +4558,7 @@ export class SellerPublisher {
       categoryId: base.categoryId || structuredSource?.sourceCategoryId || detail.categoryId || base.sourceCategoryId || '',
       description: detail.description,
       videoUrl: detail.videoUrl,
+      videos: detail.videos,
       dataCompleteness: {
         ...detail.dataCompleteness,
         structuredDetailData: Boolean(structuredSource),
@@ -5756,7 +5878,8 @@ export class SellerPublisher {
     await enterPostingForm(page, publishPageUrl, expectedCategoryId);
     await requirePostingPageAvailable(page);
     await waitForPostingTitle(page, { verify: () => waitForHumanVerification(page), onProgress: reportStage });
-    product = bindSourceAttributesToPostingSchema(product, await page.evaluate(readPostingAttributeSchema));
+    const initialSchema = await page.evaluate(readPostingAttributeSchema);
+    product = bindSourceAttributesToPostingSchema(product, initialSchema);
     await ensureSimplifiedChinese(page, {
       onProgress: reportStage, verify: () => waitForHumanVerification(page),
       beforeSwitch: () => requireClearPostingOverlays(page), signal: connection.signal,
@@ -5777,6 +5900,11 @@ export class SellerPublisher {
     if (visibleMismatch) {
       throw new Error(`国际站发布表单实际类目为“${visibleCategory}”：${visibleMismatch}`);
     }
+    // Capture the untouched baseline only. Conditional fields mounted by this
+    // product's values must not become mandatory for all products in the leaf.
+    const baselineSchema = (await page.evaluate(readPostingAttributeSchema)).map((field) => ({ ...field,
+      labels: [...new Set([...(field.labels || [field.label]), ...(initialSchema.find((initial) => field.id && initial.id === field.id)?.labels || [])])] }));
+    await options.onCategorySchema?.(categoryRequirementSchema(expectedCategoryId || actualCategoryId, baselineSchema));
     if (options.sellerGroup) {
       reportStage('检查国际站目标分组');
       await applySellerGroup(page, options.sellerGroup);

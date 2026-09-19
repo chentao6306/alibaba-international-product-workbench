@@ -1,3 +1,5 @@
+import { readAlibabaAttributeRows } from './category-attributes.js';
+
 export async function readSourceDescriptionFrame(page, { selector, waitForFrame = false, timeoutMs = 15000, verify } = {}) {
   let deadline = performance.now() + timeoutMs;
   let nextVerification = 0;
@@ -25,9 +27,21 @@ export async function readSourceDescriptionFrame(page, { selector, waitForFrame 
           image.setAttribute('src', src);
           return { src, alt: clean(image.alt) };
         }).filter(Boolean);
-        return { html: root.innerHTML, text: clean(root.textContent), images };
+        const videos = [...root.querySelectorAll('video')].flatMap((video) => {
+          const value = video.getAttribute('src') || video.querySelector('source')?.getAttribute('src');
+          if (!value) return [];
+          let url = '';
+          try { url = new URL(value, location.href).href; } catch {}
+          if (!/^https?:\/\//i.test(url)) return [];
+          video.setAttribute('src', url);
+          return [{ role: 'detail', url, source: 'description-iframe' }];
+        });
+        return { html: root.innerHTML, text: clean(root.textContent), images, videos };
       }).catch(() => null);
-      if (result) last = result;
+      if (result) {
+        result.attributes = await frame.evaluate(readAlibabaAttributeRows).catch(() => []);
+        last = result;
+      }
       if (result?.images.length || (result?.text.length > 120 && !/^(?:loading|加载中|正在加载)/i.test(result.text))) return result;
     }
     if (!frames.length && !waitForFrame) return null;

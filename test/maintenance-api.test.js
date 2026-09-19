@@ -26,8 +26,14 @@ test('reference API replaces category attributes and complete SKUs, preserves ta
     const response = await fetch(`http://127.0.0.1:${listener.address().port}${route}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     return { status: response.status, data: await response.json() };
   };
+  const referenceRequest = async (body) => {
+    body = { ...body, options: { scope: 'full', includeLogistics: true, preserveSkuStock: false } };
+    const preview = await request('/api/products/reference/preview', body);
+    assert.equal(preview.status, 200);
+    return request('/api/products/reference', { ...body, previewToken: preview.data.token });
+  };
   try {
-    const result = await request('/api/products/reference', { ids: ['target'], referenceId: 'reference' });
+    const result = await referenceRequest({ ids: ['target'], referenceId: 'reference' });
     assert.equal(result.status, 200);
     assert.equal(result.data.changed.length, 1);
     const after = JSON.parse(fs.readFileSync(path.join(root, 'workspace.json'))).products[0];
@@ -40,13 +46,13 @@ test('reference API replaces category attributes and complete SKUs, preserves ta
     const plan = await request('/api/publish/plan', { ids: ['target'] });
     assert.equal(plan.status, 200);
     assert.equal(plan.data.groups[0].categoryId, '201346401');
-    assert.equal((await request('/api/products/reference', { ids: ['target'], referenceId: 'reference' })).status, 200);
+    assert.equal((await referenceRequest({ ids: ['target'], referenceId: 'reference' })).status, 200);
     const repeated = JSON.parse(fs.readFileSync(path.join(root, 'workspace.json'))).products[0];
     assert.deepEqual(repeated.skus, after.skus);
     assert.deepEqual(after.packaging, { length: 20, weight: 1, width: 8, height: 5 });
     assert.equal(after.origin, 'China'); assert.equal(after.status, 'ready'); assert.equal(after.publishResult, undefined);
     assert.equal(verifySourceIntegrity(after).valid, true);
-    assert.equal((await request('/api/products/reference', { ids: ['uncategorized'], referenceId: 'reference' })).status, 200);
+    assert.equal((await referenceRequest({ ids: ['uncategorized'], referenceId: 'reference' })).status, 200);
     const filled = JSON.parse(fs.readFileSync(path.join(root, 'workspace.json'))).products.find((item) => item.id === 'uncategorized');
     assert.equal(filled.categoryId, '201346401');
     assert.deepEqual(filled.categoryPath, reference.categoryPath);

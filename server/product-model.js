@@ -4,6 +4,7 @@ import { requiredAttributeKey } from './publish-reference.js';
 import { attributeId } from './category-attributes.js';
 import { synchronizeProductOrigin } from './origin-country.js';
 import { stockValuesChanged } from './publish-policy.js';
+import { categoryReadiness } from './category-readiness.js';
 
 export const PRODUCT_SCHEMA_VERSION = 5;
 
@@ -83,7 +84,7 @@ export function mergeSourceDataForPublish(target, source) {
   const next = { ...clone(source), ...clone(target) };
   const templateFields = new Set(['categoryId', 'categoryPath', 'attributes', 'origin', 'variantGroups', 'skus']);
   for (const field of ['sourceCategoryId', 'sourceCategoryPath', 'categoryId', 'categoryPath', 'attributes', 'origin',
-    'description', 'descriptionHtml', 'structuredDescription', 'mainImage', 'mainImages', 'images', 'detailImages',
+    'description', 'descriptionHtml', 'structuredDescription', 'mainImage', 'mainImages', 'images', 'detailImages', 'videos', 'videoUrl',
     'packaging', 'stock', 'price', 'variantGroups', 'skus']) {
     if (target.categoryReference && templateFields.has(field)) continue;
     if (isBlank(target[field]) && !isBlank(source[field])) next[field] = clone(source[field]);
@@ -357,7 +358,7 @@ function snapshotFields(product) {
   return structuredClone({
     ...Object.fromEntries(['province', 'brandName', 'compatibleBrand', 'compatibleBrands', 'privateMold', 'compatibleModel',
       'compatibleModels', 'material', 'type', 'color', 'colorImages', 'modelImages', 'specifications', 'platformAttributes',
-      'internationalAttributes', 'targetAttributes', 'categoryReference', 'stockProvenance'].filter((key) => Object.hasOwn(product, key)).map((key) => [key, product[key]])),
+      'internationalAttributes', 'targetAttributes', 'categoryReference', 'referenceRecovery', 'stockProvenance'].filter((key) => Object.hasOwn(product, key)).map((key) => [key, product[key]])),
     sourceId: product.sourceId || '', sourceUrl: product.sourceUrl || '', sourceTitle: product.sourceTitle || '',
     sourceOriginalTitle: product.sourceOriginalTitle || '', sourceLanguage: product.sourceLanguage || '',
     sourceCaptureLocale: product.sourceCaptureLocale || '', sourceLanguageEvidence: product.sourceLanguageEvidence || null,
@@ -365,6 +366,7 @@ function snapshotFields(product) {
     sourcePriceRange: product.sourcePriceRange || null, sourceTradeAvailability: product.sourceTradeAvailability || null,
     sourceStructuredEvidence: product.sourceStructuredEvidence || null,
     collectedDetailAt: product.collectedDetailAt || '', dataCompleteness: product.dataCompleteness || null,
+    ...(product.sourceAttributeCapture ? { sourceAttributeCapture: product.sourceAttributeCapture } : {}),
     title: product.title || '', subtitle: product.subtitle || '', keywords: list(product.keywords),
     categoryPath: list(product.categoryPath || product.sourceCategoryPath), categoryId: product.categoryId || '',
     sourceCategoryPath: list(product.sourceCategoryPath), sourceCategoryId: product.sourceCategoryId || '',
@@ -422,6 +424,7 @@ export function auditProduct(product) {
   const packaging = product.packaging || {};
   const sourceLanguage = text(product.sourceLanguage).toLowerCase();
   const sourceIntegrity = verifySourceIntegrity(product);
+  const category = categoryReadiness(product);
 
   if (sourceIntegrity.present && !sourceIntegrity.valid) {
     add('source.snapshot.tampered', 'source', 'error', 'source.snapshot', '来源快照指纹不一致，禁止将工作数据当作来源原数据');
@@ -436,6 +439,9 @@ export function auditProduct(product) {
   if (!detailImages.length) add('media.detail.missing', 'media', 'error', 'detailImages', '缺少详情图片');
   if (attributes.length < 2) add('attributes.insufficient', 'attributes', 'warning', 'attributes', `商品属性较少（当前${attributes.length}项），上架时按类目核对必填项`);
   if (!text(product.origin)) add('attributes.origin.missing', 'attributes', 'warning', 'origin', '缺少产地，上架时按类目核对');
+  for (const label of category.missing) add(`category.required.${label}`, 'attributes', 'warning', 'attributes', `目标类目必填资料待补充：${label}`);
+  for (const label of category.conflicts) add(`category.conflict.${label}`, 'attributes', 'error', 'attributes', `同一属性存在冲突值，请确认：${label}`);
+  if (product.sourceAttributeCapture?.settled === false) add('attributes.capture.unsettled', 'attributes', 'warning', 'attributes', '来源属性区域仍在加载，采集结果需要核对');
   if (groups.length && !skus.length) add('sku.rows.missing', 'variants', 'error', 'skus', '存在规格但缺少SKU明细');
   const expectedSkuCount = groups.reduce((count, group) => count * Math.max(1, list(group.options).length), groups.length ? 1 : 0);
   const sourceSkuCount = Number(product.sourceStructuredEvidence?.skuCount || product.dataCompleteness?.structuredSkus || 0);
@@ -484,7 +490,7 @@ export function auditProduct(product) {
     status: errors ? 'blocked' : warnings ? 'review' : 'complete', score, errors, warnings,
     issues, checkedAt: nowIso(),
     counts: { mainImages: mainImages.length, detailImages: detailImages.length, attributes: attributes.length, variantGroups: groups.length, skus: skus.length, expectedSkus: expectedSkuCount, priceTiers: tiers.length, sourcePriceRange: hasValidSourceRange ? 1 : 0 },
-    sourceIntegrity
+    sourceIntegrity, categoryReadiness: category,
   };
 }
 

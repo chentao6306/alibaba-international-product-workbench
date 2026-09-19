@@ -2,7 +2,7 @@ import { requiredAttributeKey } from './publish-reference.js';
 
 const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
 export const attributeId = (item) => clean(item?.attributeId ?? item?.propertyId ?? item?.attrId ?? item?.propId ?? item?.id).replace(/^(?:struct-)?p-/, '');
-export const SOURCE_ATTRIBUTE_SCHEMA_VERSION = 3;
+export const SOURCE_ATTRIBUTE_SCHEMA_VERSION = 4;
 
 export function needsSourceAttributeRefresh(product) {
   if (product.categoryReference || Number(product.sourceAttributeSchemaVersion) >= SOURCE_ATTRIBUTE_SCHEMA_VERSION) return false;
@@ -51,9 +51,13 @@ export function extractAlibabaAttributes(detailData) {
       : { value: clean(value), id: '' }).filter((value) => value.value);
     if (name && entries.length && name.length <= 100 && entries.every((value) => value.value.length <= 2000 && value.value !== '[object Object]')) {
       const id = attributeId(node);
-      const ids = entries.map((entry) => entry.id || clean(node.valueId ?? node.attributeValueId));
-      result.push({ name, value: entries.length === 1 ? entries[0].value : entries.map((entry) => entry.value),
-        ...(id ? { id } : {}), ...(ids.every(Boolean) ? { valueIds: Object.fromEntries(entries.map((entry, i) => [entry.value, ids[i]])) } : {}),
+      const ids = entries.map((entry) => entry.id || (entries.length === 1 ? clean(node.valueId ?? node.attributeValueId) : ''));
+      const unit = clean(node.unitName ?? node.unit ?? node.valueUnit);
+      const values = entries.map((entry) => unit && /^-?\d+(?:\.\d+)?$/.test(entry.value) ? `${entry.value} ${unit}` : entry.value);
+      const valueIds = Object.fromEntries(values.flatMap((value, i) => ids[i] ? [[value, ids[i]]] : []));
+      result.push({ name, value: values.length === 1 ? values[0] : values,
+        ...(unit ? { unit, rawValue: entries.length === 1 ? entries[0].value : entries.map((entry) => entry.value) } : {}),
+        ...(id ? { id } : {}), ...(Object.keys(valueIds).length ? { valueIds } : {}),
         section, source: 'detailData.attributes' });
       return;
     }
@@ -76,7 +80,7 @@ export function extractAlibabaAttributes(detailData) {
 export function readAlibabaAttributeRows() {
   const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
   const excluded = '[data-module-name*="recommend" i], [data-module-name*="related" i], [data-module-name*="similar" i], [class*="recommend" i], [data-testid*="recommend" i]';
-  const scopes = '[data-testid="module-attribute-group"], [data-module-name*="attribute" i], [data-module-name*="specification" i], [data-module-name*="packaging" i], [class*="product-attribute" i]';
+  const scopes = '[data-testid="module-attribute-group"], [data-module-name*="attribute" i], [data-module-name*="specification" i], [data-module-name*="packaging" i], [data-module-name*="productPackInfo" i], [class*="product-attribute" i]';
   const result = [];
   const readRow = (row) => {
     if (row.closest(excluded)) return;
@@ -105,7 +109,12 @@ export function readAlibabaAttributeRows() {
     if (!name || !value || name.length > 100 || value.length > 2000 || /[\r\n]/.test(name)
       || /^(?:key attributes|other attributes|product attributes|关键属性|其他属性|商品属性)$/i.test(name)) return;
     const id = row.getAttribute('data-attribute-id') || row.getAttribute('data-property-id') || '';
-    result.push({ name, value, ...(id ? { id } : {}), source: 'dom',
+    const valueSelector = '[data-value-id], [data-attribute-value-id], [data-property-value-id]';
+    const values = valueNode ? [...(valueNode.matches(valueSelector) ? [valueNode] : []), ...valueNode.querySelectorAll(valueSelector)] : [];
+    const valueIds = Object.fromEntries(values.map((node) => [clean(node.getAttribute('title') || node.textContent),
+      node.getAttribute('data-value-id') || node.getAttribute('data-attribute-value-id') || node.getAttribute('data-property-value-id')]).filter(([label, id]) => label && id));
+    result.push({ name, value: values.length ? values.map((node) => clean(node.getAttribute('title') || node.textContent)).filter(Boolean) : value,
+      ...(Object.keys(valueIds).length ? { valueIds } : {}), ...(id ? { id } : {}), source: 'dom',
       section: clean(row.closest('[data-testid="module-attribute-group"]')?.querySelector('[data-testid="module-attribute-group-title"]')?.textContent) || 'Product Attributes' });
   };
   const rows = new Set(document.querySelectorAll('[data-testid="module-attribute-row"], table tr, dl > dt'));
@@ -200,11 +209,16 @@ export function readPostingAttributeSchema() {
       : node.tagName === 'SELECT' ? [...node.selectedOptions].filter((option) => option.value).map((option) => clean(option.textContent))
         : (node.getAttribute('role') !== 'combobox' || node.readOnly) && clean(node.value) ? [clean(node.value)] : []);
     values.push(...[...row.querySelectorAll('.next-select-values em, .next-tag-body, [class*="selected-value"]')].map((node) => clean(node.textContent)).filter(Boolean));
+    const customValues = enabled.filter((node) => ['INPUT', 'TEXTAREA'].includes(node.tagName) && !['checkbox', 'radio'].includes(node.type)
+      && !node.readOnly && node.getAttribute('role') !== 'combobox').map((node) => clean(node.value)).filter(Boolean);
+    // "Other" selects the input mechanism; the following text is the actual
+    // product value. Keep concrete selections alongside custom text.
+    const committedValues = customValues.length ? values.filter((value) => !/^(?:other|others|其他|其它|自定义)$/i.test(value)) : values;
     const controlType = field?.tagName === 'SELECT' ? (field.multiple ? 'multiSelect' : 'select')
       : field?.getAttribute('role') === 'combobox' || field?.readOnly ? 'combobox' : field?.type || '';
     row.setAttribute('data-posting-attribute-row', String(index));
     return [{ id, label, labels: [...new Set(labels)], rowId: row.id, rowIndex: index, inputIndex: controls.indexOf(field), controlType,
-      disabled: controls.length > 0 && enabled.length === 0, values: [...new Set(values)],
+      disabled: controls.length > 0 && enabled.length === 0, values: [...new Set(committedValues)],
       saleSpecification: Boolean(row.closest('#struct-specification')),
       required: row.getAttribute('aria-required') === 'true' || row.getAttribute('data-required') === 'true'
         || Boolean(row.querySelector('label.required, .label.required, .next-form-item-label.required, [aria-required="true"], [required]')), hasValue }];
@@ -214,16 +228,24 @@ export function readPostingAttributeSchema() {
 export function sourceAttributeForField(product, field) {
   const items = [...(product.attributes || []), ...(product.customAttributes || [])].filter((item) => item?.name && item.value != null && clean(item.value));
   if (field.id) {
-    const exact = items.find((item) => attributeId(item) === field.id);
-    if (exact) return { ...exact, matchedById: true };
+    const exact = items.filter((item) => attributeId(item) === field.id);
+    if (exact.length) return consistentAttribute(exact, true);
   }
   const compatible = items.filter((item) => !field.id || !attributeId(item) || attributeId(item) === field.id);
   const normalizeName = (name) => clean(name).normalize('NFKC').toLowerCase();
   const exactNames = new Set((field.labels || [field.label]).map(normalizeName));
   const names = new Set((field.labels || [field.label]).map(requiredAttributeKey));
-  const item = compatible.find((item) => exactNames.has(normalizeName(item.name)))
-    || compatible.find((item) => names.has(requiredAttributeKey(item.name)));
-  return item ? { ...item, matchedById: false } : null;
+  const exact = compatible.filter((item) => exactNames.has(normalizeName(item.name)));
+  return consistentAttribute(exact.length ? exact : compatible.filter((item) => names.has(requiredAttributeKey(item.name))), false);
+}
+
+function consistentAttribute(items, matchedById) {
+  if (!items.length) return null;
+  const valueKey = (value) => JSON.stringify([value].flat().map((item) => clean(item).normalize('NFKC').toLowerCase()).sort());
+  if (new Set(items.map((item) => valueKey(item.value))).size > 1) {
+    return { name: items[0].name, value: null, conflict: true, candidates: items.map((item) => ({ name: item.name, value: item.value, id: attributeId(item) })) };
+  }
+  return { ...items[0], matchedById };
 }
 
 // Keep the relationship between the seller's initial language and the Chinese

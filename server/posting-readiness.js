@@ -92,7 +92,7 @@ export function postingPageProblem(url, text = '') {
     login = /(?:^|[./-])(?:login|passport|signin|sign-in)(?:[./-]|$)/i.test(parsed.hostname + parsed.pathname);
   } catch {}
   if (login) return Object.assign(new Error('阿里巴巴国际站登录状态已失效，请在卖家窗口重新登录后继续任务'), { code: 'LOGIN_REQUIRED' });
-  if (/该类目不在线上经营类目范围内|(?:category|categorization).{0,100}(?:not within|outside).{0,50}(?:business|operating) categor/i.test(text)) {
+  if (/(?:该|当前商品)?类目不在线上经营类目范围内|(?:category|categorization).{0,100}(?:not within|outside).{0,50}(?:business|operating) categor/i.test(text)) {
     return Object.assign(new Error('当前卖家账号未开通该商品的经营类目；请在国际站“店铺管理 → 管理公司信息”核对经营类目后重试'), { code: 'PUBLISH_CATEGORY_NOT_AUTHORIZED' });
   }
   if (/The category does not exist or has become invalid|类目(?:不存在|已失效|已经失效)|该类目已删除/i.test(text)) {
