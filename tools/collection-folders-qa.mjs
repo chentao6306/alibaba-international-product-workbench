@@ -69,6 +69,24 @@ try {
   assert.equal(payload.sellerGroup.id, '100');
   assert.equal(payload.ids.length, 1);
   assert.equal(payload.listingMode, 'inquiry');
+  // Exercise an upgraded/paused job through the UI, not only a new job.
+  const saved = JSON.parse(fs.readFileSync(path.join(root, 'workspace.json'), 'utf8'));
+  saved.jobs.unshift({ id: 'qa-paused', type: 'publish', status: 'paused', progress: 1, total: 2,
+    metadata: { mode: 'submit', listingMode: 'complete-logistics', productIds: payload.ids, collectionFolderId: a },
+    results: { finished: { status: 'published' } }, message: 'QA paused' });
+  fs.writeFileSync(path.join(root, 'workspace.json'), JSON.stringify(saved));
+  await page.reload();
+  await nav('上架任务');
+  await page.getByRole('button', { name: '继续处理剩余 1 件', exact: true }).waitFor();
+  assert.equal(await page.getByLabel('销售方式', { exact: true }).inputValue(), 'complete-logistics');
+  await page.getByLabel('销售方式', { exact: true }).selectOption('inquiry');
+  let resumePayload;
+  await page.route('**/api/jobs/qa-paused/resume', async (route) => { resumePayload = route.request().postDataJSON(); await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }); });
+  await page.getByRole('button', { name: '继续处理剩余 1 件', exact: true }).click();
+  await page.getByText('任务已继续执行', { exact: true }).waitFor();
+  assert.equal(resumePayload.listingMode, 'inquiry');
+  saved.jobs = saved.jobs.filter((job) => job.id !== 'qa-paused');
+  fs.writeFileSync(path.join(root, 'workspace.json'), JSON.stringify(saved));
   await page.getByLabel('采集分组', { exact: true }).selectOption(b);
   await page.getByText('上架队列为空', { exact: true }).waitFor();
   await page.getByLabel('采集分组', { exact: true }).selectOption(a);

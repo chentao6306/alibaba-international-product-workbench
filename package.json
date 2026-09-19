@@ -1,6 +1,6 @@
 {
   "name": "alibaba-international-product-workbench",
-  "version": "1.4.27",
+  "version": "1.4.28",
   "main": "electron/main.js",
   "description": "抄得快 Alibaba.com 国际站商品采集与发布工作台",
   "author": "抄得快",

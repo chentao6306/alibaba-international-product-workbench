@@ -123,7 +123,8 @@ test('fills toy category controls by IDs or bilingual aliases and keeps unknown 
       { name: 'Age Range', value: ['3-6 years', '7-12 years'] }, { name: 'Place of Origin', value: 'Guangdong, China' },
       { name: 'Is Customized', value: false }, { name: 'Remote Control Distance', value: '20 m' },
     ] };
-    assert.equal((await fillCategoryAttributes(page, product)).length, 5);
+    const mapped = await fillCategoryAttributes(page, product);
+    assert.equal(mapped.length, 5, JSON.stringify({ mapped, fields: await page.evaluate(readPostingAttributeSchema) }));
     assert.equal(await page.locator('#struct-p-900 select').inputValue(), '901');
     assert.deepEqual(await page.locator('#age input').evaluateAll((nodes) => nodes.map((node) => node.checked)), [true, true, false]);
     assert.equal(await page.locator('#origin select').inputValue(), 'CN');

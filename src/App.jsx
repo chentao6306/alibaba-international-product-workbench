@@ -836,6 +836,12 @@ function PublishView({ state, refresh, notify, onMenu, platform, setPlatform, fo
   const pausedJob = !publishing && state.jobs.find((job) => job.type === 'publish' && job.status === 'paused');
   const currentJob = publishing || pausedJob;
   useEffect(() => {
+    if (currentJob) {
+      setListingMode(currentJob.metadata?.listingMode || 'complete-logistics');
+      setMode(currentJob.metadata?.mode === 'submit' ? 'submit' : 'draft');
+    }
+  }, [currentJob?.id, currentJob?.metadata?.listingMode]);
+  useEffect(() => {
     let active = true;
     setPlanLoading(true); setPlanError('');
     api('/api/publish/plan', { method: 'POST', body: JSON.stringify({ ids: selected.map((item) => item.id) }) })
@@ -873,7 +879,7 @@ function PublishView({ state, refresh, notify, onMenu, platform, setPlatform, fo
     run(() => api(`/api/jobs/${job.id}/pause`, { method: 'POST' }), '暂停请求已发送');
   }
   function resume(job) {
-    run(() => api(`/api/jobs/${job.id}/resume`, { method: 'POST' }), '任务已继续执行');
+    run(() => api(`/api/jobs/${job.id}/resume`, { method: 'POST', body: JSON.stringify({ listingMode }) }), '任务已继续执行');
   }
   function cancel(job) {
     run(() => api(`/api/jobs/${job.id}/cancel`, { method: 'POST' }), '任务已取消，已完成数据会保留');
@@ -902,7 +908,7 @@ function PublishView({ state, refresh, notify, onMenu, platform, setPlatform, fo
       <aside className="publish-side"><section className="panel launch-panel"><h2>执行方式</h2><div className="mode-picker"><button className={mode === 'draft' ? 'active' : ''} onClick={() => setMode('draft')}><ClipboardList size={18} /><span><strong>保存草稿</strong><small>逐条填充并保存</small></span>{mode === 'draft' && <Check size={17} />}</button><button className={mode === 'submit' ? 'active warning' : ''} onClick={() => setMode('submit')}><CloudUpload size={18} /><span><strong>直接提交</strong><small>填充后自动发布</small></span>{mode === 'submit' && <Check size={17} />}</button></div>
           <dl><div><dt>已选择</dt><dd>{selected.length} 件</dd></div><div><dt>来源平台</dt><dd>{platform === 'all' ? '全部平台' : sourcePlatformLabel({ sourcePlatform: platform })}</dd></div><div><dt>类目任务</dt><dd>{planLoading ? '读取中' : planError ? '预览失败' : plan.groups.length ? `${plan.groups.length} 组` : '启动后检查'}</dd></div><div><dt>执行模式</dt><dd>{mode === 'draft' ? '保存草稿' : '直接提交'}</dd></div></dl>
           <div className="seller-group-picker"><label htmlFor="seller-group">国际站目标分组</label><div><select id="seller-group" disabled={groupsLoading || Boolean(currentJob)} value={currentJob?.metadata?.sellerGroup?.id || sellerGroupId} onChange={(event) => setSellerGroupId(event.target.value)}><option value="">不指定分组</option>{currentJob?.metadata?.sellerGroup && !sellerGroups.some((group) => group.id === currentJob.metadata.sellerGroup.id) && <option value={currentJob.metadata.sellerGroup.id}>{currentJob.metadata.sellerGroup.path}</option>}{sellerGroups.map((group) => <option key={group.id} value={group.id}>{group.path}</option>)}</select><button className="icon-button" title="读取国际站分组" disabled={groupsLoading || Boolean(publishing)} onClick={loadSellerGroups}><RefreshCw size={18} className={groupsLoading ? 'spin' : ''} /></button></div></div>
-          <div className="seller-group-picker"><label htmlFor="listing-mode">销售方式</label><select id="listing-mode" disabled={Boolean(currentJob)} value={currentJob ? currentJob.metadata?.listingMode || 'complete-logistics' : listingMode} onChange={(event) => setListingMode(event.target.value)}><option value="inquiry">询盘展示（商机品）</option><option value="complete-logistics">填写完整物流资料</option></select><p className="batch-help">询盘展示保留包装资料在商品详情中，运输方式由买卖双方询价确认；直接交易需填写实际物流属性和运费设置。</p><p className="batch-help">{(currentJob?.metadata?.stockPolicy || state.settings.stockPolicy || 'minimum-order') === 'minimum-order' ? '未公开库存时，默认可售数量按起订量设置；保留手工库存。' : '使用已保存的库存和默认库存规则。'}</p></div>
+          <div className="seller-group-picker"><label htmlFor="listing-mode">销售方式</label><select id="listing-mode" disabled={Boolean(publishing) || busy} value={listingMode} onChange={(event) => setListingMode(event.target.value)}><option value="inquiry">询盘展示（商机品）</option><option value="complete-logistics">填写完整物流资料</option></select><p className="batch-help">询盘展示会正式发布商品，包装资料保留在详情中，运费由买卖双方询价确认。填写完整物流时，需同时提供包装、实际物流属性及运费设置。</p>{pausedJob && <p className="batch-help">暂停期间可调整销售方式，继续后仅用于剩余商品，已成功的商品不会重新发布。</p>}<p className="batch-help">{(currentJob?.metadata?.stockPolicy || state.settings.stockPolicy || 'minimum-order') === 'minimum-order' ? '未公开库存时，默认可售数量按起订量设置；保留手工库存。' : '使用已保存的库存和默认库存规则。'}</p></div>
           {pausedJob
             ? <><button className="primary-button publish-button" disabled={busy} onClick={() => resume(pausedJob)}><Play size={18} />继续处理剩余 {Math.max(0, pausedJob.total - pausedJob.progress)} 件</button><button className="secondary-button pause-button" disabled={busy} onClick={() => cancel(pausedJob)}><X size={17} />取消任务</button></>
             : <button className="primary-button publish-button" disabled={busy || groupsLoading || !selected.length || Boolean(publishing)} onClick={publish}>{publishing || busy ? <LoaderCircle className="spin" size={18} /> : <CloudUpload size={18} />}{publishing ? '任务执行中' : `开始处理 ${selected.length} 件`}</button>}

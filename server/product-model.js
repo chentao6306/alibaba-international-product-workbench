@@ -395,8 +395,14 @@ export function sourceSnapshotFingerprint(productOrSnapshot) {
 export function verifySourceIntegrity(product) {
   const snapshot = product?.source?.snapshot;
   if (!snapshot) return { present: false, valid: false, expected: '', actual: '' };
-  const actual = sourceSnapshotFingerprint(snapshot);
   const expected = product.source.snapshotHash || '';
+  // Older captures contain exactly the fields present when they were saved.
+  // Extending snapshotFields must not invalidate those immutable bytes. Some
+  // earlier migrations hashed the normalized projection, so accept that hash
+  // too for legacy captures; never replace an existing hash to hide a mismatch.
+  const stored = fingerprint(snapshot);
+  const actual = product.source.snapshotHashVersion === 2 || stored === expected
+    ? stored : sourceSnapshotFingerprint(snapshot);
   return { present: true, valid: !expected || expected === actual, expected, actual };
 }
 
@@ -484,7 +490,6 @@ export function auditProduct(product) {
 
 export function syncProductModel(product, options = {}) {
   product.sourcePlatform = sourcePlatform(product);
-  const previousSchemaVersion = Number(product.schemaVersion || 0);
   product.schemaVersion = PRODUCT_SCHEMA_VERSION;
   product.source = product.source || {
     platform: product.sourcePlatform,
@@ -498,14 +503,11 @@ export function syncProductModel(product, options = {}) {
   product.source.languageEvidence = product.sourceLanguageEvidence || product.source.languageEvidence || null;
   if (options.captureSource || !product.source.snapshot) {
     product.source.snapshot = snapshotFields(options.sourceSnapshot || product);
-    product.source.snapshotHash = sourceSnapshotFingerprint(product.source.snapshot);
+    product.source.snapshotHash = fingerprint(product.source.snapshot);
+    product.source.snapshotHashVersion = 2;
   } else if (!product.source.snapshotHash) {
-    product.source.snapshotHash = sourceSnapshotFingerprint(product.source.snapshot);
-  }
-  // Schema v4 extends the immutable snapshot with structured pricing fields.
-  // Re-hash once during the model migration; later changes are still detected.
-  if (product.source.snapshot && previousSchemaVersion > 0 && previousSchemaVersion < PRODUCT_SCHEMA_VERSION) {
-    product.source.snapshotHash = sourceSnapshotFingerprint(product.source.snapshot);
+    product.source.snapshotHash = fingerprint(product.source.snapshot);
+    product.source.snapshotHashVersion = 2;
   }
   product.working = snapshotFields(product);
   product.sourceIntegrity = verifySourceIntegrity(product);

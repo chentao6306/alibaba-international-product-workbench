@@ -1742,36 +1742,43 @@ export async function fillOriginCountry(page, value) {
   }
 }
 
-export async function fillChoice(page, locator, value, { valueIds = {}, minimumScore = 70 } = {}) {
+export async function fillChoice(page, locator, value, { valueIds = {}, minimumScore = 70, labels = {}, onValueCommitted = () => {} } = {}) {
   if (!locator || value == null || value === '') return false;
   if (!await locator.count().catch(() => 0)) return false;
   const expected = String(value).trim();
   const kind = await locator.evaluate((node) => ({ tag: node.tagName, type: node.type })).catch(() => null);
   if (!kind) return false;
   if (kind.tag === 'SELECT') {
-    const values = [value].flat().map(String);
     const options = await locator.locator('option').evaluateAll((nodes) => nodes.map((node) => ({ value: node.value, label: node.textContent })));
+    const multiple = await locator.evaluate((node) => node.multiple);
+    // A DOM capture joins multi-select labels into one string; keep a literal
+    // comma when that complete label is itself an available option.
+    const values = [value].flat().flatMap((item) => multiple && !options.some((option) => attributeOptionMatchScore(item, option.label) >= 90)
+      ? String(item).split(/\s*[,;，；]\s*/).filter(Boolean) : [String(item)]);
     const targets = values.map((item) => options.find((option) => option.value && (valueIds[item] != null
       ? String(valueIds[item]) === option.value : attributeOptionMatchScore(item, option.label) >= 90)));
-    if (targets.some((item) => !item) || (targets.length > 1 && !await locator.getAttribute('multiple').then((value) => value !== null))) return false;
-    return locator.selectOption(targets.map((item) => item.value), { timeout: 4000 }).then(() => true).catch(() => false);
+    if (targets.some((item) => !item) || (targets.length > 1 && !multiple)) return false;
+    await locator.selectOption(targets.map((item) => item.value), { timeout: 4000 });
+    const committed = await locator.evaluate((node, expected) => expected.every((value) => [...node.selectedOptions].some((option) => option.value === value)), targets.map((item) => item.value));
+    if (committed) targets.forEach((option, index) => { if (valueIds[values[index]] != null) onValueCommitted(String(option.value), option.label); });
+    return committed;
   }
   if (['checkbox', 'radio'].includes(kind.type)) {
     const values = Array.isArray(value) ? value : expected.split(/\s*[,;，；]\s*/).filter(Boolean);
     if (values.length > 1) {
       let filled = true;
       if (kind.type === 'radio') return false;
-      for (const item of values) filled = await fillChoice(page, locator, item, { valueIds, minimumScore }) && filled;
+      for (const item of values) filled = await fillChoice(page, locator, item, { valueIds, minimumScore, labels, onValueCommitted }) && filled;
       return filled;
     }
     const row = locator.locator('xpath=ancestor::*[@data-posting-attribute-row or starts-with(@id,"p-") or contains(concat(" ", normalize-space(@class), " "), " sell-catProp-item ")][1]');
-    const labels = row.locator('label').filter({ has: page.locator('input[type="checkbox"], input[type="radio"]') });
+    const checkboxLabels = row.locator('label').filter({ has: page.locator('input[type="checkbox"], input[type="radio"]') });
     const findOption = async () => {
-      const texts = await labels.allTextContents();
-      const ids = await labels.evaluateAll((nodes) => nodes.map((node) => node.querySelector('input')?.value));
+      const texts = await checkboxLabels.allTextContents();
+      const ids = await checkboxLabels.evaluateAll((nodes) => nodes.map((node) => node.querySelector('input')?.value));
       const index = valueIds[expected] != null ? ids.findIndex((id) => id === String(valueIds[expected]))
         : texts.findIndex((text) => attributeOptionMatchScore(expected, text) >= 90);
-      return index < 0 ? null : labels.nth(index);
+      return index < 0 ? null : checkboxLabels.nth(index);
     };
     let label = await findOption();
     if (!label) {
@@ -1792,7 +1799,13 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
     if (!await input.isChecked().catch(() => false)) await label.click({ timeout: 4000 });
     return input.waitFor({ state: 'attached', timeout: 2000 }).then(async () => {
       const deadline = Date.now() + 2000;
-      do { if (await input.isChecked().catch(() => false)) return true; await page.waitForTimeout(100); } while (Date.now() < deadline);
+      do {
+        if (await input.isChecked().catch(() => false)) {
+          if (valueIds[expected] != null) onValueCommitted(String(valueIds[expected]), await label.textContent());
+          return true;
+        }
+        await page.waitForTimeout(100);
+      } while (Date.now() < deadline);
       return false;
     }, () => false);
   }
@@ -1857,10 +1870,12 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
       return [...(root?.querySelectorAll('.next-select-values em, .next-tag-body, [class*="selected-value"]') || [])]
         .map((item) => item.textContent).concat(node.readOnly && node.value ? [node.value] : []);
     }).catch(() => []);
+    const committed = [];
     for (const candidate of candidates) {
       chosenLabel = '';
       const selectedTexts = await selectedValues();
-      if (selectedTexts.some((text) => attributeOptionMatchScore(candidate, text) >= minimumScore)) continue;
+      const knownLabel = labels[valueIds[candidate]] || candidate;
+      if (selectedTexts.some((text) => attributeOptionMatchScore(knownLabel, text) >= minimumScore)) { committed.push(knownLabel); continue; }
       if (await locator.getAttribute('aria-expanded').catch(() => '') !== 'true') {
         await locator.click({ force: true, timeout: 4000 }).catch(() => {});
       }
@@ -1875,14 +1890,26 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
       }
       let chose = await chooseVisibleOption(candidate);
       if (!chose && acceptsCustom) await locator.fill('').catch(() => {});
+      // The click can return before React commits the selection, especially
+      // on remote/low-memory desktops. Read the actual value before closing
+      // the menu or starting the next selection; a fixed 180ms is not enough.
+      const wanted = chosenLabel || candidate;
+      const deadline = Date.now() + 2500;
+      do {
+        chose = (await selectedValues()).some((text) => attributeOptionMatchScore(wanted, text) >= minimumScore);
+        if (chose) break;
+        await page.waitForTimeout(100);
+      } while (Date.now() < deadline);
       await page.keyboard.press('Escape');
-      await page.waitForTimeout(180);
-      const actual = await selectedValues();
-      chose = actual.some((text) => attributeOptionMatchScore(chosenLabel || candidate, text) >= minimumScore);
+      if (chose) {
+        committed.push(wanted);
+        if (chosenLabel && valueIds[candidate] != null) onValueCommitted(String(valueIds[candidate]), chosenLabel);
+      }
       selected &&= chose;
     }
     await locator.evaluate((node) => node.blur()).catch(() => {});
-    return selected;
+    const finalValues = await selectedValues();
+    return selected && committed.every((candidate) => finalValues.some((text) => attributeOptionMatchScore(candidate, text) >= minimumScore));
   }
   for (let attempt = 0; attempt < 2; attempt += 1) {
     // A stale or category-specific control must fail quickly. The outer
@@ -2921,40 +2948,89 @@ async function ensureCategoryFieldControl(page, field) {
   return (await page.evaluate(readPostingAttributeSchema)).find((entry) => field.id ? entry.id === field.id : entry.rowIndex === field.rowIndex);
 }
 
+// Learn display labels only after an exact option-ID click was verified.
+// The cache never substitutes for reading current chips and is scoped to the
+// live page and property ID, so translated labels survive subsequent passes.
+const committedOptionLabels = new WeakMap();
+function optionLabels(page, field) {
+  let fields = committedOptionLabels.get(page);
+  if (!fields) { fields = new Map(); committedOptionLabels.set(page, fields); }
+  const key = field.id || field.rowId || field.label;
+  if (!fields.has(key)) fields.set(key, {});
+  return fields.get(key);
+}
+
+export function attributeFieldMatchesValue(field, value, { valueIds = {}, labels = {} } = {}) {
+  const values = field.values || [];
+  const minimumScore = ['Age', 'Age Range'].some((name) => requiredAttributeKey(field.label) === requiredAttributeKey(name)) ? 90 : 70;
+  const candidates = [value].flat().flatMap((item) => {
+    if (values.some((selected) => attributeOptionMatchScore(item, selected) >= minimumScore)) return [item];
+    return ['combobox', 'multiSelect', 'checkbox'].includes(field.controlType)
+      ? String(item).split(/\s*[,;，；]\s*/).filter(Boolean) : [item];
+  });
+  if (requiredAttributeKey(field.label) === requiredAttributeKey('产地')) {
+    return values.some((selected) => originCountry(selected) && originCountry(selected) === originCountry(value));
+  }
+  return candidates.length > 0 && candidates.every((item) => values.some((selected) => attributeOptionMatchScore(labels[valueIds[item]] || item, selected) >= minimumScore));
+}
+
 export async function fillCategoryAttributes(page, product, onProgress = () => {}) {
   const mapped = new Set();
-  const completed = new Set();
   // Selecting one field can mount dependent fields or replace entire rows.
   // Refresh descriptors after every edit, and bound cascading passes.
   for (let pass = 0; pass < 4; pass += 1) {
     let changed = false;
+    let pending = 0;
     const fields = await page.evaluate(readPostingAttributeSchema);
     for (const initial of fields) {
       const current = await page.evaluate(readPostingAttributeSchema);
       let field = current.find((entry) => initial.id ? entry.id === initial.id : entry.label === initial.label);
       if (!field || field.disabled || isOriginRegionAttribute(field.label) || (field.saleSpecification && !field.required)) continue;
-      const key = field.id || field.rowId || field.label;
-      if (completed.has(key) && field.hasValue) continue;
       const source = sourceAttributeForField(product, field);
       const value = source?.value ?? inferRequiredAttributeValue(product, ...field.labels);
       if (value == null || value === '') continue;
       field = await ensureCategoryFieldControl(page, field);
       if (!field || field.inputIndex < 0) continue;
-      if (field.hasValue && [value].flat().every((item) => field.values.some((selected) => attributeOptionMatchScore(item, selected) >= 90))) {
-        mapped.add(source?.name || field.label); completed.add(key); continue;
+      const choiceOptions = { valueIds: source?.matchedById ? source.valueIds : {}, labels: optionLabels(page, field) };
+      if (field.hasValue && attributeFieldMatchesValue(field, value, choiceOptions)) {
+        mapped.add(source?.name || field.label); continue;
       }
+      pending++;
       onProgress(`填写类目属性：${field.label}`);
       const filled = requiredAttributeKey(field.label) === requiredAttributeKey('产地')
         ? await fillOriginCountry(page, product.origin || value)
         : await fillChoice(page, categoryFieldLocator(page, field), value, {
-          valueIds: source?.matchedById ? source.valueIds : {},
+          ...choiceOptions,
+          onValueCommitted: (id, label) => { choiceOptions.labels[id] = label; },
           minimumScore: ['Age', 'Age Range'].some((name) => requiredAttributeKey(field.label) === requiredAttributeKey(name)) ? 90 : 70,
         }).catch(() => false);
-      if (filled) { mapped.add(source?.name || field.label); completed.add(key); changed = true; }
+      if (filled) { mapped.add(source?.name || field.label); changed = true; }
     }
-    if (!changed) break;
+    if (!pending) break;
+    // One field may reset an earlier field or mount a dependent field after
+    // its event returns. Verify all values on the next pass, not merely that
+    // the control has any value. Give an initially empty option list a retry.
+    if (!changed && pass >= 1) break;
+    await page.waitForTimeout(350);
   }
   return [...mapped];
+}
+
+export async function requireCategoryAttributes(page, product) {
+  const schema = await page.evaluate(readPostingAttributeSchema);
+  const incomplete = schema.filter((field) => {
+    if (!field.required || field.disabled || field.saleSpecification || isOriginRegionAttribute(field.label)) return false;
+    if (!field.hasValue) return true;
+    const source = sourceAttributeForField(product, field);
+    const value = source?.value;
+    return value != null && value !== '' && !attributeFieldMatchesValue(field, value, {
+      valueIds: source?.matchedById ? source.valueIds : {}, labels: optionLabels(page, field),
+    });
+  });
+  if (!incomplete.length) return;
+  const error = await requiredAttributeFailure(page, product, incomplete.map((field) => field.label));
+  error.diagnostics = { fields: incomplete.map((field) => ({ id: field.id, label: field.label, values: field.values, controlType: field.controlType })) };
+  throw error;
 }
 
 export function requiredLabelsFromError(message) {
@@ -5581,11 +5657,7 @@ export class SellerPublisher {
     }
     reportStage('按当前类目预检必填属性');
     await fillCategoryAttributes(page, product, reportStage);
-    if (mode === 'submit') {
-      const schema = await page.evaluate(readPostingAttributeSchema);
-      const missing = schema.filter((field) => field.required && !field.disabled && !field.saleSpecification && !field.hasValue).map((field) => field.label);
-      if (missing.length) throw await requiredAttributeFailure(page, product, missing);
-    }
+    if (mode === 'submit') await requireCategoryAttributes(page, product);
     // Switching Alibaba's detail editor can rebuild the entire form. Do it
     // before filling prices, specifications and images so a late editor-mode
     // transition cannot silently erase already completed fields.
@@ -5775,7 +5847,17 @@ export class SellerPublisher {
       }
     }
 
+    // Media/specification updates can reset category fields after the initial
+    // preflight. Reconcile against the complete source value set before the
+    // final action, including partially retained multi-select values.
+    reportStage('逐项复核类目属性');
+    await fillCategoryAttributes(page, product, reportStage);
     const readinessWarnings = [];
+    try { await requireCategoryAttributes(page, product); }
+    catch (error) {
+      if (mode === 'submit') throw error;
+      readinessWarnings.push(error.message);
+    }
     const unresolvedAttributes = await emptyRequiredSpecificationLabels(page, true);
     if (mode !== 'submit' && unresolvedAttributes.length) readinessWarnings.push(`草稿待补充必填属性：${unresolvedAttributes.join('、')}`);
     try { await requireLogisticsReady(page, product); }

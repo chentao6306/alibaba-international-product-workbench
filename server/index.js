@@ -1028,6 +1028,8 @@ async function runPublishJob(jobId) {
           const target = draft.products.find((item) => item.id === product.id);
           if (target) {
             const result = { status: 'failed', message, code: error.code || '',
+              listingMode: normalizeListingMode(job.metadata?.listingMode),
+              ...(error.diagnostics ? { diagnostics: error.diagnostics } : {}),
               requiredFields: error.requiredFields || [], missingSourceFields: error.missingSourceFields || [],
               unmatchedSourceFields: error.unmatchedSourceFields || [] };
             Object.assign(target, { status: 'publish_failed', publishResult: result, updatedAt: new Date().toISOString() });
@@ -1184,8 +1186,15 @@ app.post('/api/jobs/:id/resume', (request, response, next) => {
     return next(Object.assign(new Error('当前任务不能继续'), { status: 409 }));
   }
   if (job.type === 'publish' && readingSellerGroups) return next(Object.assign(new Error('正在读取国际站分组，请稍后继续任务'), { status: 409 }));
+  const metadata = { ...job.metadata };
+  if (job.type === 'publish' && Object.hasOwn(request.body || {}, 'listingMode')) {
+    if (!['inquiry', 'complete-logistics'].includes(request.body.listingMode)) return next(Object.assign(new Error('不支持的销售方式'), { status: 400 }));
+    // Apply a deliberate policy change only to unfinished products. Completed
+    // receipts and the current cursor remain intact; never replay successes.
+    metadata.listingMode = request.body.listingMode;
+  }
   const updated = store.patchJob(job.id, { status: 'queued', message: job.type === 'collect' && job.collectionStage === 'listing'
-    ? `等待从断点继续，已发现 ${job.discovered || 0} 件` : `等待继续，已处理 ${job.progress}/${job.total} 件` });
+    ? `等待从断点继续，已发现 ${job.discovered || 0} 件` : `等待继续，已处理 ${job.progress}/${job.total} 件`, metadata });
   response.json(updated);
   setImmediate(() => job.type === 'collect' ? queueCollection(job.id) : runPublishJob(job.id));
 });

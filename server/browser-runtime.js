@@ -199,14 +199,22 @@ export async function launchPersistent(profileDir, options = {}) {
 
 async function setWindowState(page, windowState, bounds = {}) {
   if (!page || page.isClosed()) return false;
+  let session;
   try {
-    const session = await page.context().newCDPSession(page);
+    session = await page.context().newCDPSession(page);
     const target = await session.send('Browser.getWindowForTarget');
+    // Chromium rejects maximizing a minimized/fullscreen window directly on
+    // some Windows/RDP sessions. Restore it first; do not discard a working
+    // seller session merely because its native window was minimized.
+    if (windowState === 'maximized' && ['minimized', 'fullscreen'].includes(target.bounds?.windowState)) {
+      await session.send('Browser.setWindowBounds', { windowId: target.windowId, bounds: { windowState: 'normal' } });
+    }
     await session.send('Browser.setWindowBounds', { windowId: target.windowId, bounds: { windowState, ...bounds } });
-    await session.detach().catch(() => {});
     return true;
   } catch {
     return false;
+  } finally {
+    await session?.detach().catch(() => {});
   }
 }
 
@@ -222,7 +230,7 @@ export async function hidePage(page) {
   // Keep a real viewport while moving the native window off-screen. Resizing
   // to 1x1 (the old implementation) makes Playwright reject normal clicks as
   // "outside of the viewport" during publishing.
-  return setWindowState(page, 'normal', { x: -32000, y: -32000, width: 1280, height: 900 });
+  return setWindowState(page, 'normal', { left: -32000, top: -32000, width: 1280, height: 900 });
 }
 
 const HUMAN_CHALLENGE_TEXT = /请完成验证|请拖动滑块|滑动验证|滑块验证|人机验证|安全验证|安全校验|security verification|slide to verify|drag (?:the )?slider to verify|verify you are human|complete (?:the )?captcha|unusual traffic/i;

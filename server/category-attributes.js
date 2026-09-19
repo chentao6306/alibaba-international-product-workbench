@@ -200,7 +200,8 @@ export function readPostingAttributeSchema() {
       : node.tagName === 'SELECT' ? [...node.selectedOptions].filter((option) => option.value).map((option) => clean(option.textContent))
         : (node.getAttribute('role') !== 'combobox' || node.readOnly) && clean(node.value) ? [clean(node.value)] : []);
     values.push(...[...row.querySelectorAll('.next-select-values em, .next-tag-body, [class*="selected-value"]')].map((node) => clean(node.textContent)).filter(Boolean));
-    const controlType = field?.tagName === 'SELECT' ? (field.multiple ? 'multiSelect' : 'select') : field?.type || '';
+    const controlType = field?.tagName === 'SELECT' ? (field.multiple ? 'multiSelect' : 'select')
+      : field?.getAttribute('role') === 'combobox' || field?.readOnly ? 'combobox' : field?.type || '';
     row.setAttribute('data-posting-attribute-row', String(index));
     return [{ id, label, labels: [...new Set(labels)], rowId: row.id, rowIndex: index, inputIndex: controls.indexOf(field), controlType,
       disabled: controls.length > 0 && enabled.length === 0, values: [...new Set(values)],
