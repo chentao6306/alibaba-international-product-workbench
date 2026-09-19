@@ -14,7 +14,7 @@ import CollectionTasks from './CollectionTasks.jsx';
 import OriginCountrySelect from './OriginCountrySelect.jsx';
 import { productOrigin, synchronizeProductOrigin } from '../server/origin-country.js';
 import AuthorizationConnection from './AuthorizationConnection.jsx';
-import { publishCounts } from '../server/publish-progress.js';
+import { publishCounts, productPublishDisplay } from '../server/publish-progress.js';
 import { createPublishedReferenceTemplate } from '../server/publish-reference.js';
 
 const EMPTY = { shops: [], groups: [], collectionFolders: [], products: [], jobs: [], settings: {}, browser: {}, collectorBrowser: {} };
@@ -141,6 +141,7 @@ async function api(url, options = {}) {
 const STATUS = {
   ready: ['待上架', 'neutral'], drafted: ['已存草稿', 'blue'], published: ['已发布', 'green'],
   publishing: ['正在上架', 'blue'],
+  publish_paused: ['上架已暂停', 'amber'], publish_pausing: ['正在暂停', 'amber'], publish_queued: ['等待处理', 'neutral'],
   needs_review: ['需确认', 'amber'], publish_failed: ['上架失败', 'red']
 };
 
@@ -383,9 +384,9 @@ function ProductsView({ state, refresh, notify, onMenu, platform, setPlatform, n
   const platformProducts = useMemo(() => folderProducts.filter((product) => platform === 'all' || sourcePlatform(product) === platform), [folderProducts, platform]);
   const products = useMemo(() => platformProducts.filter((product) => {
     const matchesQuery = !query || product.title?.toLowerCase().includes(query.toLowerCase()) || product.sourceId?.includes(query);
-    const matchesFilter = filter === 'all' || (filter === 'selected' ? product.selected : filter === 'incomplete' ? !productCompleteness(product).complete : product.status === filter);
+    const matchesFilter = filter === 'all' || (filter === 'selected' ? product.selected : filter === 'incomplete' ? !productCompleteness(product).complete : productPublishDisplay(product, state.jobs).status === filter);
     return matchesQuery && matchesFilter;
-  }), [platformProducts, query, filter]);
+  }), [platformProducts, query, filter, state.jobs]);
   const pageCount = Math.max(1, Math.ceil(products.length / pageSize));
   const pagedProducts = products.slice((page - 1) * pageSize, page * pageSize);
   const allChecked = pagedProducts.length > 0 && pagedProducts.every((item) => item.selected);
@@ -452,7 +453,7 @@ function ProductsView({ state, refresh, notify, onMenu, platform, setPlatform, n
     <PlatformTabs products={folderProducts} value={platform} onChange={setPlatform} />
     <div className="toolbar">
       <div className="input-with-icon search-box"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索标题或商品 ID" /></div>
-      <div className="segmented">{[['all', '全部'], ['selected', '已选择'], ['incomplete', '资料待补'], ['ready', '待上架'], ['drafted', '已存草稿'], ['published', '上架成功'], ['publish_failed', '上架失败']].map(([value, label]) => <button key={value} className={filter === value ? 'active' : ''} onClick={() => setFilter(value)}>{label}</button>)}</div>
+      <div className="segmented">{[['all', '全部'], ['selected', '已选择'], ['incomplete', '资料待补'], ['ready', '待上架'], ['publish_paused', '上架已暂停'], ['drafted', '已存草稿'], ['published', '上架成功'], ['publish_failed', '上架失败']].map(([value, label]) => <button key={value} className={filter === value ? 'active' : ''} onClick={() => setFilter(value)}>{label}</button>)}</div>
       <button className="secondary-button" disabled={!products.length} onClick={() => selectAllProducts(!allProductsSelected)}><Check size={15} />{allProductsSelected ? '取消全选' : `全选当前结果 ${products.length}`}</button>
       {selectedProducts.length > 0 && <button className="primary-button" onClick={() => navigate('publish', platform)}><CloudUpload size={15} />选中商品上架 {selectedProducts.length}</button>}
       <button className="secondary-button" disabled={!platformProducts.length} onClick={() => setFindReplaceOpen(true)}><Search size={15} />查找替换</button>
@@ -467,11 +468,11 @@ function ProductsView({ state, refresh, notify, onMenu, platform, setPlatform, n
     <section className="panel product-panel">
       {!products.length ? <EmptyState icon={Boxes} title="当前分组暂无匹配商品" text="" /> : <div className="table-wrap"><table className="product-table">
         <thead><tr><th className="check-cell"><input type="checkbox" checked={allChecked} onChange={(event) => select(pagedProducts.map((item) => item.id), event.target.checked)} title="勾选本页商品" /></th><th>商品</th><th>资料</th><th>售价</th><th>库存</th><th>状态</th><th className="action-cell">操作</th></tr></thead>
-        <tbody>{pagedProducts.map((product) => { const completeness = productCompleteness(product); return <tr key={product.id} className={product.selected ? 'selected-row' : ''}>
+        <tbody>{pagedProducts.map((product) => { const completeness = productCompleteness(product); const display = productPublishDisplay(product, state.jobs); return <tr key={product.id} className={product.selected ? 'selected-row' : ''}>
           <td className="check-cell"><input type="checkbox" checked={Boolean(product.selected)} onChange={(event) => select([product.id], event.target.checked)} /></td>
           <td><div className="product-main"><div className="thumb">{product.mainImage ? <img src={product.mainImage} alt="" /> : <Boxes size={20} />}</div><div><strong>{product.title || '未命名商品'}</strong><small><span className={`platform-label platform-${sourcePlatform(product).replace('.', '-')}`}>{sourcePlatformLabel(product)}</span> ID {product.sourceId}</small></div></div></td>
           <td><span className={`data-status ${completeness.complete ? 'complete' : ''}`} title={completeness.missing.length ? `阻断项：${completeness.missing.join('、')}` : completeness.review ? '来源未公开部分逐SKU数据，需要发布前确认' : '可进入发布检查'}>{!completeness.complete ? `资料阻断 ${completeness.score}` : completeness.review ? `资料待确认 ${completeness.score}` : `可发布 ${completeness.score}`}</span><small className="data-counts">主 {completeness.main} · 详 {completeness.detail} · 属 {completeness.attributes} · SKU {completeness.skus} · 价 {completeness.tiers || (completeness.hasPriceRange ? '区间' : 0)}</small>{completeness.warnings > 0 && <small className="data-warning">另有 {completeness.warnings} 项待确认</small>}{!completeness.complete && <small className="data-missing">{completeness.missing.join('；')}</small>}</td>
-          <td><b className="price">{!product.priceConversion && product.sourcePriceRange?.formattedText || `${product.currencySymbol || '¥'}${product.price || '-'}`}</b></td><td>{product.stock ?? '-'}</td><td><StatusBadge status={product.status} message={product.publishResult?.message} />{product.status === 'publish_failed' && <small className="data-missing" title={product.publishResult?.message || ''}>{product.publishResult?.message || '未记录失败原因'}</small>}</td>
+          <td><b className="price">{!product.priceConversion && product.sourcePriceRange?.formattedText || `${product.currencySymbol || '¥'}${product.price || '-'}`}</b></td><td>{product.stock ?? '-'}</td><td><StatusBadge status={display.status} message={display.message} />{(display.jobId || display.status === 'publish_failed') && <small className="data-missing" title={display.message}>{display.message || '未记录失败原因'}</small>}</td>
           <td className="action-cell"><button className="icon-button" disabled={refreshingId === product.id} onClick={() => refreshDetail(product)} title="重新采集完整资料">{refreshingId === product.id ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}</button><button className="icon-button" onClick={() => setEditing(product)} title="编辑完整资料"><Pencil size={17} /></button><button className="icon-button danger" onClick={() => remove(product)} title="删除商品"><Trash2 size={17} /></button></td>
         </tr>; })}</tbody>
       </table></div>}
@@ -898,9 +899,8 @@ function PublishView({ state, refresh, notify, onMenu, platform, setPlatform, fo
         </section>
         <section className="panel queue-panel"><div className="section-title"><div><h2>待上架商品</h2></div><strong className="queue-count">{selected.length} 件</strong></div>
           {!selected.length ? <EmptyState icon={PackageCheck} title="上架队列为空" text="" /> : <div className="queue-list">{selected.slice((page - 1) * 30, page * 30).map((product) => {
-            const isProcessing = publishing?.status === 'running' && publishing.currentProductId === product.id;
-            const message = isProcessing ? '正在处理当前商品' : product.publishResult?.message;
-            return <div className="queue-item" key={product.id}><div className="mini-thumb">{product.mainImage ? <img src={product.mainImage} alt="" /> : <Boxes size={18} />}</div><div><strong>{product.title}</strong><small><span className="platform-label">{sourcePlatformLabel(product)}</span> {message || `${product.currencySymbol || '¥'}${product.price} · 库存 ${product.stock ?? '-'}`}</small></div><StatusBadge status={isProcessing ? 'publishing' : product.status} message={message} /></div>;
+            const display = productPublishDisplay(product, state.jobs);
+            return <div className="queue-item" key={product.id}><div className="mini-thumb">{product.mainImage ? <img src={product.mainImage} alt="" /> : <Boxes size={18} />}</div><div><strong>{product.title}</strong><small><span className="platform-label">{sourcePlatformLabel(product)}</span> {display.message || `${product.currencySymbol || '¥'}${product.price} · 库存 ${product.stock ?? '-'}`}</small></div><StatusBadge status={display.status} message={display.message} /></div>;
           })}</div>}
           {pageCount > 1 && <Pagination page={page} pageCount={pageCount} onPage={setPage} label={`第 ${page}/${pageCount} 页`} />}
         </section>

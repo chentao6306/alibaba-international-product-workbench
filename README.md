@@ -1,6 +1,6 @@
 # 抄得快 · 阿里巴巴国际站商品工作台
 
-**当前完整源码：1.4.31，2026-09-19 修订。** 分支为 [`codex/publish-blockers-1.4.31`](https://github.com/chentao6306/alibaba-international-product-workbench/tree/codex/publish-blockers-1.4.31)。修复慢加载的属性下拉框；图片银行、上传权限和弹窗阻挡现在保留批量任务进度，避免连续误记失败。见 [本次验证记录](docs/verification-1.4.31.md)。
+**当前完整源码：1.4.32，2026-09-19 修订。** 分支为 [`codex/publish-status-1.4.32`](https://github.com/chentao6306/alibaba-international-product-workbench/tree/codex/publish-status-1.4.32)。修复重试期间商品行仍显示旧错误的问题；商品工作台、待上架列表和筛选统一显示当前任务的暂停原因与处理进度，保留历史回执。见 [本次验证记录](docs/verification-1.4.32.md)。
 
 **1.4.29：** 自动判断物流填写方式，保留包装事实；完整物流统一检查全空和部分缺项，记录实际执行方式。见 [1.4.29 验证记录](docs/verification-1.4.29.md)。
 
@@ -22,13 +22,13 @@
 
 采集列表中途暂停后，点击“采集已发现的 N 件商品”即可停止继续翻页、转为读取这些商品的详情；点击原来的继续按钮则接着翻页。详情采集仍支持断点继续。上架时遇到登录失效或发布表单反复加载不完整，任务暂停并保留当前商品；重新登录或处理页面问题后点击继续。国际站明确提示类目不存在或失效时，仅当类目未经用户修改或引用、原商品的新旧类目路径完全一致时，自动更新过期的来源类目 ID 一次；其他情况暂停，需选择有效类目后继续。
 
-Windows 桌面客户端，提供国际站、1688、速卖通商品采集、资料编辑、引用成功商品、批量保存草稿与提交上架。授权管理后台部署在 Linux 服务器。`Stable` 分支保留为 **1.4.17 历史归档**，当前版本请使用上面的 1.4.31 分支。
+Windows 桌面客户端，提供国际站、1688、速卖通商品采集、资料编辑、引用成功商品、批量保存草稿与提交上架。授权管理后台部署在 Linux 服务器。`Stable` 分支保留为 **1.4.17 历史归档**，当前版本请使用上面的 1.4.32 分支。
 
 客户端通过 Playwright 操作真实浏览器页面，不是 Alibaba 官方发布 API。验证码需要用户完成；平台审核、账号权限和类目必填规则仍由 Alibaba 决定。
 
 ## 下载与完整备份
 
-- [当前 1.4.31 完整源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/codex/publish-blockers-1.4.31)
+- [当前 1.4.32 完整源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/codex/publish-status-1.4.32)
 - [1.4.17 Stable 历史源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/Stable)
 - [1.4.17 安装包与加密数据备份](https://github.com/chentao6306/alibaba-international-product-workbench/releases/tag/v1.4.17-stable)
 - [1.4.17 修复和验证记录](docs/verification-1.4.17.md)
@@ -58,7 +58,7 @@ Release 另存安装包和加密数据备份，覆盖项目本地数据、当前
 以下命令在 Windows PowerShell 执行。私有仓库需要已获授权的 GitHub SSH 身份。
 
 ```powershell
-git clone --branch codex/publish-blockers-1.4.31 git@github.com:chentao6306/alibaba-international-product-workbench.git
+git clone --branch codex/publish-status-1.4.32 git@github.com:chentao6306/alibaba-international-product-workbench.git
 cd alibaba-international-product-workbench
 node --version
 npm --version
@@ -91,11 +91,11 @@ npm run desktop
 
 桌面界面更改后需 `npm run build` 并重新打开桌面端。`start.bat` 会按需安装依赖、构建并启动浏览器版；`dev.bat` 启动开发服务。关闭命令窗口或按 `Ctrl+C` 停止对应服务。
 
-更新当前 1.4.31 分支后：
+更新当前 1.4.32 分支后：
 
 ```powershell
-git switch codex/publish-blockers-1.4.31
-git pull --ff-only origin codex/publish-blockers-1.4.31
+git switch codex/publish-status-1.4.32
+git pull --ff-only origin codex/publish-status-1.4.32
 npm ci
 node node_modules/playwright-core/cli.js install chromium
 npm run prepare:chromium
@@ -113,14 +113,14 @@ npm run desktop
 
 ## 生成 Windows EXE
 
-首次先完成 `npm ci` 和 Chromium 下载。确认 `package.json` 与锁文件版本均为 `1.4.31`，然后执行：
+首次先完成 `npm ci` 和 Chromium 下载。确认 `package.json` 与锁文件版本均为 `1.4.32`，然后执行：
 
 ```powershell
 npm test -- --test-concurrency=2
 npm run dist:win:installer
 ```
 
-输出：`release-installer/chaodekuai-1.4.31-setup.exe`。脚本依次构建前端、准备 Chromium，再执行 Electron Builder NSIS x64 打包。安装包支持选择安装目录、桌面和开始菜单快捷方式。
+输出：`release-installer/chaodekuai-1.4.32-setup.exe`。脚本依次构建前端、准备 Chromium，再执行 Electron Builder NSIS x64 打包。安装包支持选择安装目录、桌面和开始菜单快捷方式。
 
 ```powershell
 npm run dist:win:portable   # 便携 EXE，输出在 release/
@@ -146,8 +146,8 @@ npx electron-builder --win nsis --x64 `
 ```powershell
 node tools/desktop-package-qa.mjs release-installer
 npx electron tools/verification-window-qa.mjs .packaged/electron/human-verification.js
-Get-Item .\release-installer\chaodekuai-1.4.31-setup.exe
-Get-FileHash .\release-installer\chaodekuai-1.4.31-setup.exe -Algorithm SHA256
+Get-Item .\release-installer\chaodekuai-1.4.32-setup.exe
+Get-FileHash .\release-installer\chaodekuai-1.4.32-setup.exe -Algorithm SHA256
 ```
 
 包检查核对版本、打包源码、浏览器、安全开关、登录窗口和未登录 API 鉴权，使用隔离用户目录。当前 EXE 未配置 Authenticode 签名；有证书后按 Electron Builder 签名配置构建。`publish` 地址是占位配置，目前通过 GitHub Release 手工分发，没有启用可用的自动更新服务。
@@ -169,7 +169,7 @@ sudo systemctl restart kua-yipu-auth
 
 正式客户端授权入口由 `server/auth-endpoint.js` 固定。源码桌面可用 `KUA_YIPU_AUTH_URL` 指向本机开发后台；**正式打包客户端忽略此环境变量**。迁移生产地址需要修改该模块默认地址、配置对应有效证书并重新打包。仅设置打包终端环境变量不能改变正式入口。
 
-授权服务 `/health` 中的版本为 `1.4.9`，代表独立授权协议实现；当前桌面版本为 `1.4.31`。本次源码提交包含授权服务完整代码，不执行线上部署。后台可配置 1/3/15 天等断线保持时间，不延长付费授权到期日，在线停用仍立即生效。
+授权服务 `/health` 中的版本为 `1.4.9`，代表独立授权协议实现；当前桌面版本为 `1.4.32`。本次源码提交包含授权服务完整代码，不执行线上部署。后台可配置 1/3/15 天等断线保持时间，不延长付费授权到期日，在线停用仍立即生效。
 
 ## 项目原理
 
@@ -241,17 +241,17 @@ node tools/group-origin-ui-qa.mjs
 npx electron tools/verification-window-qa.mjs
 ```
 
-当前 1.4.31 修订的测试、打包核对和真实账号验证范围见 [验证记录](docs/verification-1.4.31.md)。历史记录不代表当前版本在所有类目均已通过实测。
+当前 1.4.32 修订的测试、打包核对和真实账号验证范围见 [验证记录](docs/verification-1.4.32.md)。历史记录不代表当前版本在所有类目均已通过实测。
 
 源站未公开的 SKU 商业数据无法凭空获得，图片链接可能失效，跨类目引用可能带来不适用属性。带 `live`、`publish` 的工具可能操作真实站点，先阅读脚本并使用隔离数据目录。
 
 ```powershell
-git fetch origin codex/publish-blockers-1.4.31
+git fetch origin codex/publish-status-1.4.32
 git rev-parse HEAD
-git rev-parse origin/codex/publish-blockers-1.4.31
-git diff --exit-code HEAD origin/codex/publish-blockers-1.4.31
+git rev-parse origin/codex/publish-status-1.4.32
+git diff --exit-code HEAD origin/codex/publish-status-1.4.32
 git status --short
-git ls-tree -r --name-only origin/codex/publish-blockers-1.4.31
+git ls-tree -r --name-only origin/codex/publish-status-1.4.32
 ```
 
-首次 Stable 归档从已验收的 `65dc255` 建立并保留全部历史，该历史分支的应用源码保持 1.4.17。当前 1.4.31 分支包含后续修复。历史 Release 的 SHA-256 清单用于下载校验；解密密钥不上传 GitHub。
+首次 Stable 归档从已验收的 `65dc255` 建立并保留全部历史，该历史分支的应用源码保持 1.4.17。当前 1.4.32 分支包含后续修复。历史 Release 的 SHA-256 清单用于下载校验；解密密钥不上传 GitHub。
