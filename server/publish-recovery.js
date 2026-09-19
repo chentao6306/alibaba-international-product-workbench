@@ -1,6 +1,17 @@
+export function publishEnvironmentBlockCode(error) {
+  const codes = ['PUBLISH_EDITOR_NOT_READY', 'PUBLISH_FORM_NOT_READY', 'PUBLISH_FIELD_NOT_READY',
+    'PUBLISH_BROWSER_NOT_READY', 'PUBLISH_LANGUAGE_NOT_READY', 'PUBLISH_ACCOUNT_LIMIT',
+    'PUBLISH_CATEGORY_INVALID', 'PUBLISH_OVERLAY_BLOCKED', 'PUBLISH_IMAGE_BANK_FULL', 'PUBLISH_IMAGE_SERVICE_BLOCKED'];
+  if (codes.includes(error?.code)) return error.code;
+  // Playwright can encounter a dialog between two checked stages. Preserve
+  // this as an environment blocker even when it has no application error code.
+  if (/overlay-backdrop|intercepts pointer events|页面仍有弹窗遮罩/i.test(error?.message || '')) return 'PUBLISH_OVERLAY_BLOCKED';
+  return '';
+}
+
 export function publishRepairPlan(error) {
   const message = String(error?.message || error || '');
-  if (/PUBLISH_ACCOUNT_LIMIT|PUBLISH_POLICY_REVIEW_REQUIRED|HUMAN_VERIFICATION|LOGIN_REQUIRED/.test(error?.code || '')
+  if (/PUBLISH_ACCOUNT_LIMIT|PUBLISH_IMAGE_BANK_FULL|PUBLISH_IMAGE_SERVICE_BLOCKED|PUBLISH_POLICY_REVIEW_REQUIRED|HUMAN_VERIFICATION|LOGIN_REQUIRED/.test(error?.code || '')
     || /禁限售|违禁|风控违规|侵权|发布额度|总量已超出限制|登录状态.*失效|prohibited|restricted product/i.test(message)) return [];
 
   const mainImages = /商品图片|主图.*(?:为空|失败)|请上传.*图片|image.*required/i.test(message);

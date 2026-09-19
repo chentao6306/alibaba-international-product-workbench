@@ -52,8 +52,8 @@ async function createEditor(page, scenario) {
           if (scenario === 'hang') continue;
           setTimeout(() => {
             if (!this.pendingGroup[id]) return;
-            if (scenario === 'capacity' || (scenario === 'retry' && file.name === '1.jpg' && attempt === 1)) {
-              this.showServerError({ errorCode: scenario === 'capacity' ? 'noCapacity' : 'UNKNOWN_ERROR' }, file);
+            if (['capacity', 'quota', 'auth', 'forbidden'].includes(scenario) || (scenario === 'retry' && file.name === '1.jpg' && attempt === 1)) {
+              this.showServerError({ errorCode: ({ capacity: 'noCapacity', quota: 'REQUEST_QUOTA_EXCEEDED', auth: 'UNAUTHORIZED', forbidden: 'FORBIDDEN' })[scenario] || 'UNKNOWN_ERROR', message: 'Platform upload feedback' }, file);
               return;
             }
             file.serverData = { success: true, photobankUrl: `https://example.com/${file.name}`, width: 960, height: 600 };
@@ -104,9 +104,30 @@ test('detail uploads recover individual failures and lost anchors without duplic
     await t.test('permanent capacity errors stop without retrying or counting placeholders', async () => {
       const page = await browser.newPage();
       await createEditor(page, 'capacity');
-      await assert.rejects(uploadEditorDetailImages(page, files, () => {}, { timeoutMs: 1000, pollMs: 30 }), /完成 0\/8 张.*图片银行空间不足/);
+      await assert.rejects(uploadEditorDetailImages(page, files, () => {}, { timeoutMs: 1000, pollMs: 30 }), (error) => {
+        assert.equal(error.code, 'PUBLISH_IMAGE_BANK_FULL');
+        assert.equal(error.diagnostics.platformCode, 'noCapacity');
+        assert.equal(error.diagnostics.platformMessage, 'Platform upload feedback');
+        assert.match(error.message, /完成 0\/8 张.*图片银行空间不足/);
+        return true;
+      });
       assert.equal(await page.locator('#editor img').count(), 1);
       assert.ok(Object.values(await page.evaluate(() => window.uploads)).every((count) => count === 1));
+      assert.ok(Object.keys(await page.evaluate(() => window.uploads)).length <= 3);
+      assert.equal(await page.evaluate(() => Object.keys(window.tinymce.editors[0].plugins.alipicpastedrag.pendingGroup).length), 0);
+      await page.close();
+    });
+    for (const scenario of ['quota', 'auth', 'forbidden']) await t.test(`${scenario} retains its diagnostic without claiming storage is full`, async () => {
+      const page = await browser.newPage();
+      await createEditor(page, scenario);
+      await assert.rejects(uploadEditorDetailImages(page, files, () => {}, { timeoutMs: 1000, pollMs: 30 }), (error) => {
+        assert.equal(error.code, scenario === 'auth' ? 'LOGIN_REQUIRED' : 'PUBLISH_IMAGE_SERVICE_BLOCKED');
+        assert.doesNotMatch(error.message, /空间不足|清理空间/);
+        assert.equal(error.diagnostics.completed, 0);
+        return true;
+      });
+      assert.equal(await page.evaluate(() => Object.keys(window.tinymce.editors[0].plugins.alipicpastedrag.pendingGroup).length), 0);
+      assert.ok(Object.keys(await page.evaluate(() => window.uploads)).length <= 3);
       await page.close();
     });
     await t.test('hung uploads have bounded retries and cancel their remaining tasks', async () => {

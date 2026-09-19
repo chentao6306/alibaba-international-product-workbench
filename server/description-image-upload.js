@@ -38,7 +38,10 @@ function editorUploadAction({ action, id, files, timeoutMs, maxAttempts, concurr
     const state = { id, items, originalError: plugin.showServerError };
     state.errorHandler = function (error, file) {
       const item = items.find((entry) => entry.file === file);
-      if (item) item.code = String(error?.errorCode || 'UNKNOWN_ERROR');
+      if (item) {
+        item.code = String(error?.errorCode || 'UNKNOWN_ERROR');
+        item.message = String(error?.errorMsg || error?.message || '').slice(0, 300);
+      }
       return state.originalError?.apply(this, arguments);
     };
     plugin.showServerError = state.errorHandler;
@@ -112,6 +115,7 @@ function editorUploadAction({ action, id, files, timeoutMs, maxAttempts, concurr
     if (item.status !== 'pending') continue;
     item.attempts++;
     item.code = '';
+    item.message = '';
     item.startedAt = now;
     // A fresh File/UUID keeps late callbacks from an aborted attempt separate.
     item.file = new File([item.file], item.file.name, { type: item.file.type });
@@ -135,7 +139,7 @@ function editorUploadAction({ action, id, files, timeoutMs, maxAttempts, concurr
   return {
     completed: state.items.filter((item) => item.status === 'success').length,
     attempts: state.items.map((item) => item.attempts),
-    fatal: fatal ? { index: fatal.index, code: fatal.code } : null
+    fatal: fatal ? { index: fatal.index, code: fatal.code, message: fatal.message || '' } : null
   };
 }
 
@@ -170,11 +174,24 @@ export async function uploadEditorDetailImages(page, imagePaths, onProgress = ()
         return completed;
       }
       if (status.fatal) {
-        const { index, code } = status.fatal;
-        const reason = /capacity|quota/i.test(code) ? '图片银行空间不足，请清理空间后重试'
-          : /UNAUTHORIZED|FORBIDDEN|login|csrf/i.test(code) ? '图片上传授权失效，请重新登录国际站'
-            : `第 ${index + 1} 张：${code}`;
-        throw new Error(`详情图片上传失败（完成 ${completed}/${files.length} 张）：${reason}`);
+        const { index, code, message } = status.fatal;
+        let failureCode = 'DETAIL_IMAGE_UPLOAD_FAILED';
+        let reason = `第 ${index + 1} 张：${code}`;
+        if (/^(?:noCapacity|CAPACITY_EXCEEDED|STORAGE_FULL|INSUFFICIENT_STORAGE)$/i.test(code)) {
+          failureCode = 'PUBLISH_IMAGE_BANK_FULL';
+          reason = '图片银行空间不足，任务已保留；请在国际站确认图片空间，处理后继续';
+        } else if (/UNAUTHORIZED|login|csrf/i.test(code)) {
+          failureCode = 'LOGIN_REQUIRED';
+          reason = '图片上传授权失效，请重新登录国际站后继续';
+        } else if (/capacity|quota|FORBIDDEN/i.test(code)) {
+          // A request quota or permission limit is not proof of full storage.
+          failureCode = 'PUBLISH_IMAGE_SERVICE_BLOCKED';
+          reason = `图片上传服务受限（平台代码：${code}），请检查国际站提示后继续`;
+        }
+        throw Object.assign(new Error(`详情图片上传失败（完成 ${completed}/${files.length} 张）：${reason}`), {
+          code: failureCode,
+          diagnostics: { section: 'detail-images', completed, total: files.length, index, platformCode: code, platformMessage: message },
+        });
       }
       await page.waitForTimeout(options.pollMs ?? 400);
     }

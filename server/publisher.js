@@ -1860,6 +1860,11 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
   }
   let chosenLabel = '';
   const chooseVisibleOption = async (candidate) => {
+    // On slow desktops the trigger expands before the portal/search input
+    // mounts. Wait for the actual popup before binding its options and search.
+    const popups = '.sell-o-select-options:visible, .next-select-popup:visible, [role="listbox"]:visible';
+    if (!await page.locator(`${popups}, [role="option"]:visible, .next-menu-item:visible`).first()
+      .waitFor({ state: 'visible', timeout: 5000 }).then(() => true, () => false)) return false;
     let menu = page.locator('.sell-o-select-options:visible, .next-select-popup:visible').last();
     if (!await menu.count()) menu = page.locator('[role="listbox"]:visible').last();
     const options = await menu.count()
@@ -1884,20 +1889,24 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
       if (index >= 0) { chosenLabel = loaded[index]; return options.nth(index).click({ timeout: 4000 }).then(() => true).catch(() => false); }
       // Text remains usable when an option is virtualized or exposes no ID.
     }
-    const exactIndex = loaded.findIndex((text) => attributeOptionMatchScore(candidate, text) >= 90);
+    const exactIndex = loaded.map((text, index) => ({ index, score: attributeOptionMatchScore(candidate, text) }))
+      .filter((item) => item.score >= minimumScore).sort((a, b) => b.score - a.score)[0]?.index ?? -1;
     if (exactIndex >= 0) {
       return options.nth(exactIndex).click({ timeout: 4000 }).then(() => true).catch(() => false);
     }
     // The menu virtualizes its options. Search reveals values outside the
     // first nine rows, including 6.6-inch screens and 6000-6999mAh batteries.
     let search = menu.locator('input:not([readonly]):visible').first();
+    if (!await search.count() && await locator.getAttribute('readonly') !== null) {
+      await search.waitFor({ state: 'visible', timeout: 1500 }).catch(() => {});
+    }
     if (!await search.count()) search = locator;
     const searchable = await search.evaluateAll((nodes) => Boolean(nodes[0] && !nodes[0].readOnly && !nodes[0].disabled));
     if (searchable && await search.isVisible().catch(() => false)) {
       await search.fill(candidate.match(/\d+(?:\.\d+)?/)?.[0] || candidate);
       await page.waitForTimeout(300);
     }
-    const deadline = Date.now() + 1800;
+    const deadline = Date.now() + 5000;
     do {
       const texts = await options.allTextContents();
       const ranked = texts.map((text, index) => ({ index, score: attributeOptionMatchScore(candidate, text) }))
@@ -1943,7 +1952,7 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
       // on remote/low-memory desktops. Read the actual value before closing
       // the menu or starting the next selection; a fixed 180ms is not enough.
       const wanted = chosenLabel || candidate;
-      const deadline = Date.now() + 2500;
+      const deadline = Date.now() + 5000;
       do {
         chose = (await selectedValues()).some((text) => attributeOptionMatchScore(wanted, text) >= minimumScore);
         if (chose) break;

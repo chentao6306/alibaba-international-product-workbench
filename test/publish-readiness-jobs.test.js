@@ -43,7 +43,9 @@ test('login and unavailable forms pause at the same product without counting fai
       assert.equal(product.skus[0].code, 'KEPT');
       assert.deepEqual(product.detailImages, ['https://example.com/recovered-detail.jpg']);
     }
-    if (product.id === '1' && blockingCode) throw Object.assign(new Error(blockingCode), { code: blockingCode });
+    if (product.id === '1' && blockingCode) throw blockingCode === 'raw-overlay'
+      ? new Error('locator.click: Timeout 5000ms exceeded. next-overlay-backdrop intercepts pointer events')
+      : Object.assign(new Error(blockingCode), { code: blockingCode });
     if (product.id === '2') assert.equal(product.attributes.find((item) => item.name === 'Age Range')?.value, '3-6 years');
     if (product.id === '2' && !categoryCorrected) throw Object.assign(new Error('当前类目不可用，请重新选择有效类目'), { code: 'PUBLISH_CATEGORY_INVALID' });
     return { status: 'drafted', message: 'Saved receipt', productId: product.id };
@@ -62,7 +64,8 @@ test('login and unavailable forms pause at the same product without counting fai
   };
   try {
     const task = await api('/api/publish', { ids: ['1', '2', '3'], collectionFolderId: 'folder', mode: 'draft' });
-    for (const code of ['LOGIN_REQUIRED', 'PUBLISH_EDITOR_NOT_READY', 'PUBLISH_FORM_NOT_READY', 'PUBLISH_FIELD_NOT_READY', 'PUBLISH_BROWSER_NOT_READY', 'PUBLISH_LANGUAGE_NOT_READY']) {
+    const blockers = ['LOGIN_REQUIRED', 'PUBLISH_EDITOR_NOT_READY', 'PUBLISH_FORM_NOT_READY', 'PUBLISH_FIELD_NOT_READY', 'PUBLISH_BROWSER_NOT_READY', 'PUBLISH_LANGUAGE_NOT_READY', 'PUBLISH_IMAGE_BANK_FULL', 'PUBLISH_IMAGE_SERVICE_BLOCKED', 'PUBLISH_OVERLAY_BLOCKED', 'raw-overlay'];
+    for (const code of blockers) {
       blockingCode = code;
       if (code !== 'LOGIN_REQUIRED') await api(`/api/jobs/${task.id}/resume`, {});
       await until(() => store.read().jobs[0].status === 'paused');
@@ -72,6 +75,7 @@ test('login and unavailable forms pause at the same product without counting fai
       assert.equal(state.products[0].publishHistory?.length || 0, 0);
       assert.notEqual(state.products[0].status, 'publish_failed');
       assert.equal(attempts.every((id) => id === '1'), true);
+      assert.equal(state.jobs[0].diagnostics.stage, code === 'raw-overlay' ? 'PUBLISH_OVERLAY_BLOCKED' : code);
     }
     blockingCode = '';
     await api(`/api/jobs/${task.id}/resume`, {});
@@ -83,7 +87,7 @@ test('login and unavailable forms pause at the same product without counting fai
     await api(`/api/jobs/${task.id}/resume`, {});
     await until(() => store.read().jobs[0].status === 'completed');
     const state = store.read();
-    assert.deepEqual(attempts, ['1', '1', '1', '1', '1', '1', '1', '2', '2', '3']);
+    assert.deepEqual(attempts, [...blockers.map(() => '1'), '1', '2', '2', '3']);
     assert.equal(state.products[0].publishHistory.length, 1);
     assert.equal(state.products[0].status, 'drafted');
     assert.equal(state.products[1].status, 'drafted');

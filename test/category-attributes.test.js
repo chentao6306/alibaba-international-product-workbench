@@ -4,7 +4,39 @@ import { chromium } from 'playwright-core';
 import { findChromium } from '../server/browser-runtime.js';
 import { extractAlibabaAttributes, mergeSourceAttributes, needsSourceAttributeRefresh, packagingFromAttributes, readAlibabaAttributeRows, readPostingAttributeSchema, sourceAttributeForField, SOURCE_ATTRIBUTE_SCHEMA_VERSION } from '../server/category-attributes.js';
 import { auditProduct, mergeSourceDataForPublish } from '../server/product-model.js';
-import { attributeOptionMatchScore, emptyRequiredSpecificationLabels, fillCategoryAttributes, preparePublishProduct, recoverRequiredAttributes, requiredAttributeFailure, validateProductData } from '../server/publisher.js';
+import { attributeOptionMatchScore, emptyRequiredSpecificationLabels, fillCategoryAttributes, fillChoice, preparePublishProduct, recoverRequiredAttributes, requiredAttributeFailure, requireCategoryAttributes, validateProductData } from '../server/publisher.js';
+
+test('commits a battery range when its virtualized popup, search results and selected chip load slowly', { skip: !findChromium() }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<div class="sell-catProp-item" id="struct-p-210190640"><div class="label required">电池容量</div>
+      <span class="next-select"><span class="next-select-values"></span><input readonly role="combobox" aria-expanded="false"></span></div>
+      <script>
+      const trigger = document.querySelector('[role=combobox]');
+      trigger.onclick = () => {
+        trigger.setAttribute('aria-expanded', 'true');
+        setTimeout(() => {
+          const popup = document.createElement('div'); popup.className = 'sell-o-select-options';
+          popup.innerHTML = '<div class="options-search"><input></div><div class="options-content"><div class="options-item">5000-5999mAh</div></div>';
+          document.body.append(popup);
+          popup.querySelector('input').oninput = () => setTimeout(() => {
+            popup.querySelector('.options-content').innerHTML = '<div class="options-item">6000-6999mAh</div>';
+          }, 2200);
+          popup.querySelector('.options-content').onclick = (event) => {
+            if (!event.target.classList.contains('options-item')) return;
+            const value = event.target.textContent; popup.remove();
+            setTimeout(() => { document.querySelector('.next-select-values').innerHTML = '<em>' + value + '</em>'; trigger.setAttribute('aria-expanded', 'false'); }, 2800);
+          };
+        }, 600);
+      };
+      </script>`);
+    const value = '6000-6999mAh';
+    assert.equal(await fillChoice(page, page.getByRole('combobox'), value), true);
+    assert.equal(await page.locator('.next-select-values em').textContent(), value);
+    await requireCategoryAttributes(page, { attributes: [{ name: 'battery capacity', value }] });
+  } finally { await browser.close(); }
+});
 
 test('collects arbitrary structured properties with IDs, multiple options and false values while excluding recommendations', () => {
   assert.deepEqual(extractAlibabaAttributes(null), []);
