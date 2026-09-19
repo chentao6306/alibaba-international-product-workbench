@@ -1791,6 +1791,30 @@ export async function fillOriginCountry(page, value) {
   }
 }
 
+// Attribute menus sometimes ignore Escape. Close them through the same blur
+// or click-away actions a user can perform, without changing option values.
+export async function closePostingAttributeMenus(page) {
+  const menus = page.locator('.sell-o-select-options:visible, .next-select-popup:visible')
+    .filter({ hasNot: page.locator('[aria-modal="true"]') });
+  if (!await menus.count()) return true;
+  // Never click through a modal prompt that contains a select control.
+  if (await page.locator('.next-dialog:visible, [aria-modal="true"]:visible, .mce-window:visible').count()) return false;
+  await page.keyboard.press('Escape');
+  if (!await menus.count()) return true;
+  await page.keyboard.press('Tab');
+  if (!await menus.count()) return true;
+  const labels = page.locator('.sell-catProp-item > .label:visible, .sell-catProp-item label:visible, .next-form-item-label:visible');
+  for (let index = 0; index < Math.min(await labels.count(), 12); index++) {
+    const label = labels.nth(index);
+    const safe = await label.evaluate((node) => !node.matches('label[for]') && !node.querySelector('input, button, select, a, textarea')
+      && !node.closest('[role="dialog"], .sell-o-select-options, .next-select-popup')).catch(() => false);
+    if (!safe) continue;
+    if (!await label.click({ timeout: 500 }).then(() => true, () => false)) continue;
+    if (await menus.first().waitFor({ state: 'hidden', timeout: 500 }).then(() => true, () => false)) return true;
+  }
+  return !await menus.count();
+}
+
 export async function fillChoice(page, locator, value, { valueIds = {}, minimumScore = 70, labels = {}, onValueCommitted = () => {} } = {}) {
   if (!locator || value == null || value === '') return false;
   if (!await locator.count().catch(() => 0)) return false;
@@ -1958,7 +1982,7 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
         if (chose) break;
         await page.waitForTimeout(100);
       } while (Date.now() < deadline);
-      await page.keyboard.press('Escape');
+      await closePostingAttributeMenus(page);
       if (chose) {
         committed.push(wanted);
         if (chosenLabel && valueIds[candidate] != null) onValueCommitted(String(valueIds[candidate]), chosenLabel);
@@ -3413,13 +3437,14 @@ const POSTING_BLOCKERS = `.next-overlay-backdrop:visible, .next-dialog:visible, 
 
 export async function dismissPostingOverlays(page) {
   requireNoPolicyWarning(await visibleFeedback(page));
+  await closePostingAttributeMenus(page);
   const harmlessActions = [
     /^(?:我知道了|知道了|关闭|取消|稍后再说|暂不|以后再说|Got it|Close|Cancel)$/i,
     /^(?:继续返回旧版|确认返回旧版)$/i
   ];
   for (let pass = 0; pass < 4; pass += 1) {
     if (!await page.locator(POSTING_BLOCKERS).count()) return true;
-    const overlays = page.locator(`.next-overlay-wrapper.opened, .next-dialog:visible, ${POSTING_DIALOG}:visible, .mce-window:visible`);
+    const overlays = page.locator(`.next-dialog:visible, ${POSTING_DIALOG}:visible, .mce-window:visible`);
     let acted = false;
     for (let index = (await overlays.count().catch(() => 0)) - 1; index >= 0; index -= 1) {
       const overlay = overlays.nth(index);

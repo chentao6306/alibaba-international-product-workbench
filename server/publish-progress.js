@@ -17,7 +17,7 @@ export function productPublishDisplay(product, jobs = []) {
     const prefix = `${job.status === 'paused' ? '已暂停：' : `正在处理 ${progress + 1}/${job.total}：`}${product.title} - `;
     const message = String(job.message || '');
     return {
-      status: job.status === 'paused' ? 'publish_paused' : job.status === 'pause_requested' ? 'publish_pausing' : 'publishing',
+      status: job.status === 'paused' ? 'publish_paused' : job.status === 'pause_requested' ? 'publish_pausing' : job.waitingForDelay ? 'publish_waiting' : 'publishing',
       message: message.startsWith(prefix) ? message.slice(prefix.length) : message || (job.status === 'paused' ? '任务已暂停，处理后可继续' : '正在处理当前商品'),
       jobId: job.id,
     };

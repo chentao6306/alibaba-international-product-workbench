@@ -16,6 +16,8 @@ const EMPTY_STATE = {
     defaultStock: 100,
     stockPolicy: 'minimum-order',
     listingMode: 'auto',
+    publishDelayMinSeconds: 0,
+    publishDelayMaxSeconds: 0,
     priceMarkup: 0,
     publishMode: 'submit'
   }

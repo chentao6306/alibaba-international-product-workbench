@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { chromium } from 'playwright-core';
 import { findChromium } from '../server/browser-runtime.js';
-import { dismissPostingOverlays, waitForActionResult } from '../server/publisher.js';
+import { dismissPostingOverlays, fillChoice, waitForActionResult } from '../server/publisher.js';
 
 // Alibaba's TinyMCE table toolbar is labelled as a dialog, although it is
 // non-modal and remains mounted far below the submission controls.
@@ -42,6 +42,34 @@ test('still closes real editor dialogs and blocks unknown or modal prompts besid
       assert.equal(await page.evaluate(() => Boolean(window.confirmed)), false);
     }
     await page.setContent(`${inlineToolbar}<div class="next-overlay-backdrop" style="position:fixed;inset:0"></div>`);
+    assert.equal(await dismissPostingOverlays(page), false);
+  } finally { await browser.close(); }
+});
+
+test('closes an attribute menu that ignores Escape and preserves selected values before the next field', { skip: !findChromium() }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<div class="sell-catProp-item"><div class="label">操作系统</div>
+      <input id="os" readonly role="combobox"><button id="next">Next field</button></div>
+      <div class="sell-o-select-options" role="dialog" style="display:none;position:fixed;inset:60px 0 0;background:white;z-index:100">
+        <div role="listbox"><div class="options-item" role="option">Android 14</div></div></div>
+      <script>
+        const input=document.querySelector('#os'), menu=document.querySelector('.sell-o-select-options');
+        input.onclick=()=>{menu.style.display='block';input.setAttribute('aria-expanded','true')};
+        document.querySelector('.options-item').onclick=()=>{input.value='Android 14'};
+        document.querySelector('.label').onclick=()=>{menu.style.display='none';input.setAttribute('aria-expanded','false')};
+        document.querySelector('#next').onclick=()=>{window.nextClicked=true};
+      </script>`);
+    assert.equal(await fillChoice(page, page.locator('#os'), 'Android 14'), true);
+    assert.equal(await page.locator('.sell-o-select-options').isVisible(), false);
+    assert.equal(await page.locator('#os').inputValue(), 'Android 14');
+    await page.locator('#next').click({ timeout: 1000 });
+    assert.equal(await page.evaluate(() => window.nextClicked), true);
+    await page.locator('#os').click();
+    assert.equal(await dismissPostingOverlays(page), true);
+    assert.equal(await page.locator('.sell-o-select-options').isVisible(), false);
+    await page.setContent('<div role="dialog" aria-modal="true"><h2>Confirm publishing</h2><div role="listbox"><div role="option">A</div></div></div>');
     assert.equal(await dismissPostingOverlays(page), false);
   } finally { await browser.close(); }
 });

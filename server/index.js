@@ -18,6 +18,7 @@ import {
 } from './publisher.js';
 import { applyPublishedProductReference, copyMissingProductData, createPublishSnapshot, findAndReplaceProduct, mergeSourceDataForPublish, recordProductMutation, syncProductModel } from './product-model.js';
 import { publishCounts, recordPublishOutcome } from './publish-progress.js';
+import { publishDelayFromRequest, waitForPublishDelay } from './publish-delay.js';
 import { publishEnvironmentBlockCode } from './publish-recovery.js';
 import { buildAlibabaPublishUrl, canRefreshSourceCategory, createPublishPlan, normalizeCategoryId, productCategory, publishBindings, refreshedSourceCategoryPatch, rememberPublishBinding, resolvePublishRoute } from './category-routing.js';
 import { createPublishedReferenceTemplate, findPublishedReferenceRepair } from './publish-reference.js';
@@ -814,9 +815,18 @@ app.post('/api/products/process', async (request, response, next) => {
 app.patch('/api/settings', (request, response, next) => {
   if (Object.hasOwn(request.body, 'stockPolicy') && !['minimum-order', 'fixed'].includes(request.body.stockPolicy)) return next(Object.assign(new Error('不支持的默认库存规则'), { status: 400 }));
   if (Object.hasOwn(request.body, 'listingMode') && !['auto', 'inquiry', 'complete-logistics'].includes(request.body.listingMode)) return next(Object.assign(new Error('不支持的销售方式'), { status: 400 }));
-  const allowed = ['publishPageUrl', 'publishCategory', 'publishBindings', 'defaultStock', 'priceMarkup', 'publishMode', 'stockPolicy', 'listingMode'];
+  let delay;
+  try {
+    const settings = store.read().settings;
+    delay = publishDelayFromRequest(request.body, { minSeconds: settings.publishDelayMinSeconds, maxSeconds: settings.publishDelayMaxSeconds });
+  } catch (error) { return next(error); }
+  const allowed = ['publishPageUrl', 'publishCategory', 'publishBindings', 'defaultStock', 'priceMarkup', 'publishMode', 'stockPolicy', 'listingMode', 'publishDelayMinSeconds', 'publishDelayMaxSeconds'];
   const settings = store.update((state) => {
     for (const key of allowed) if (Object.hasOwn(request.body, key)) state.settings[key] = request.body[key];
+    if (Object.hasOwn(request.body, 'publishDelayMinSeconds') || Object.hasOwn(request.body, 'publishDelayMaxSeconds')) {
+      state.settings.publishDelayMinSeconds = delay.minSeconds;
+      state.settings.publishDelayMaxSeconds = delay.maxSeconds;
+    }
     return state.settings;
   });
   response.json(settings);
@@ -870,15 +880,31 @@ async function runPublishJob(jobId) {
     const productIds = job.metadata?.productIds || [];
     const mode = job.metadata?.mode === 'submit' ? 'submit' : 'draft';
     const total = productIds.length;
+    const waitedIndices = new Set();
     store.patchJob(jobId, { status: 'running', total, message: '正在连接阿里巴巴国际站卖家后台' });
 
     for (let index = Number(job.progress || 0); index < total; index += 1) {
       state = store.read();
       job = state.jobs.find((item) => item.id === jobId);
-      if (!job) return;
+      if (!job || job.status === 'cancelled') return;
       if (['pause_requested', 'paused'].includes(job.status)) {
         store.patchJob(jobId, { status: 'paused', progress: index, total, message: `已暂停，已处理 ${index}/${total} 件` });
         return;
+      }
+
+      if (index > 0 && !waitedIndices.has(index)) {
+        const continued = await waitForPublishDelay(job.metadata?.publishDelay, {
+          shouldStop: () => store.read((state) => state.jobs.find((item) => item.id === jobId)?.status) !== 'running',
+          onWaiting: (seconds) => store.patchJob(jobId, { currentProductId: productIds[index], waitingForDelay: true,
+            message: `上架间隔等待，还剩 ${seconds} 秒后处理第 ${index + 1}/${total} 件` }),
+        });
+        if (!continued) {
+          if (store.read((state) => state.jobs.find((item) => item.id === jobId)?.status) !== 'cancelled') {
+            store.patchJob(jobId, { status: 'paused', progress: index, total, waitingForDelay: false, message: `已暂停，已处理 ${index}/${total} 件` });
+          }
+          return;
+        }
+        waitedIndices.add(index);
       }
 
       let product = state.products.find((item) => item.id === productIds[index]);
@@ -892,7 +918,7 @@ async function runPublishJob(jobId) {
         const target = draft.products.find((item) => item.id === product.id);
         if (target) Object.assign(target, product, { updatedAt: new Date().toISOString() });
       });
-      store.patchJob(jobId, { status: 'running', progress: index, total, currentProductId: product.id, message: `正在处理 ${index + 1}/${total}：${product.title}` });
+      store.patchJob(jobId, { status: 'running', progress: index, total, waitingForDelay: false, currentProductId: product.id, message: `正在处理 ${index + 1}/${total}：${product.title}` });
       try {
         if (sourcePlatform(product) === 'alibaba.com' && (!hasCompleteSourceData(product) || needsSourceAttributeRefresh(product) || !resolvePublishRoute(product, state.settings).url)) {
           store.patchJob(jobId, { message: `正在补全商品资料 ${index + 1}/${total}：${product.title}` });
@@ -1131,10 +1157,14 @@ app.post('/api/publish', (request, response, next) => {
     if (products.some((product) => product.collectionFolderId !== folderId)) throw Object.assign(new Error('请在同一个采集分组内选择上架商品'), { status: 400 });
   } catch (error) { return next(error); }
   const mode = request.body.mode === 'submit' ? 'submit' : 'draft';
+  let publishDelay;
+  try { publishDelay = publishDelayFromRequest(request.body, { minSeconds: state.settings.publishDelayMinSeconds, maxSeconds: state.settings.publishDelayMaxSeconds }); }
+  catch (error) { return next(error); }
   const plan = createPublishPlan(products, state.settings);
   const job = store.createJob('publish', {
     productIds: products.map((item) => item.id), mode,
     listingMode: normalizeListingMode(request.body.listingMode || state.settings.listingMode || 'auto'),
+    publishDelay,
     stockPolicy: state.settings.stockPolicy || 'minimum-order',
     defaultStock: state.settings.defaultStock,
     collectionFolderId: folderId, sellerGroup,
@@ -1142,6 +1172,10 @@ app.post('/api/publish', (request, response, next) => {
     categoryGroups: plan.map((group) => ({ sourcePlatform: group.sourcePlatform, categoryId: group.categoryId, category: group.category, productIds: group.products.map((item) => item.id) }))
   });
   store.patchJob(job.id, { total: products.length });
+  store.update((state) => {
+    state.settings.publishDelayMinSeconds = publishDelay.minSeconds;
+    state.settings.publishDelayMaxSeconds = publishDelay.maxSeconds;
+  });
   response.status(202).json({ ...job, total: products.length });
   setImmediate(() => runPublishJob(job.id));
 });
@@ -1194,8 +1228,16 @@ app.post('/api/jobs/:id/resume', (request, response, next) => {
     // receipts and the current cursor remain intact; never replay successes.
     metadata.listingMode = request.body.listingMode;
   }
+  if (job.type === 'publish' && (Object.hasOwn(request.body || {}, 'publishDelayMinSeconds') || Object.hasOwn(request.body || {}, 'publishDelayMaxSeconds'))) {
+    try { metadata.publishDelay = publishDelayFromRequest(request.body, metadata.publishDelay); }
+    catch (error) { return next(error); }
+  }
   const updated = store.patchJob(job.id, { status: 'queued', message: job.type === 'collect' && job.collectionStage === 'listing'
     ? `等待从断点继续，已发现 ${job.discovered || 0} 件` : `等待继续，已处理 ${job.progress}/${job.total} 件`, metadata });
+  if (job.type === 'publish' && metadata.publishDelay) store.update((state) => {
+    state.settings.publishDelayMinSeconds = metadata.publishDelay.minSeconds;
+    state.settings.publishDelayMaxSeconds = metadata.publishDelay.maxSeconds;
+  });
   response.json(updated);
   setImmediate(() => job.type === 'collect' ? queueCollection(job.id) : runPublishJob(job.id));
 });

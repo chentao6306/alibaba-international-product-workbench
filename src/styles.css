@@ -416,6 +416,8 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--orange); }
 .seller-group-picker > div { display: flex; gap: 6px; min-width: 0; }
 .seller-group-picker select { min-width: 0; width: 100%; height: 42px; }
 .seller-group-picker small { overflow-wrap: anywhere; }
+.seller-group-picker .inline-fields { align-items: center; }
+.seller-group-picker .inline-fields input { width: 0; min-width: 0; flex: 1; height: 42px; font: inherit; color: var(--ink); padding: 8px 10px; border: 1px solid #cbd5da; border-radius: 5px; }
 @media (max-width: 600px) { .collection-folder-bar { flex-wrap: wrap; } .collection-folder-bar > label { flex: 1; } .collection-folder-bar select { width: 100%; } }
 .announcement-item { border-bottom: 1px solid #dce3e6; }
 .announcement-row { display: flex; align-items: center; gap: 12px; background: transparent; border: 0; text-align: left; padding: 18px 0; width: 100%; color: inherit; }

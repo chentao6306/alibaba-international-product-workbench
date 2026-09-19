@@ -142,6 +142,7 @@ const STATUS = {
   ready: ['待上架', 'neutral'], drafted: ['已存草稿', 'blue'], published: ['已发布', 'green'],
   publishing: ['正在上架', 'blue'],
   publish_paused: ['上架已暂停', 'amber'], publish_pausing: ['正在暂停', 'amber'], publish_queued: ['等待处理', 'neutral'],
+  publish_waiting: ['间隔等待中', 'blue'],
   needs_review: ['需确认', 'amber'], publish_failed: ['上架失败', 'red']
 };
 
@@ -821,6 +822,8 @@ function PublishView({ state, refresh, notify, onMenu, platform, setPlatform, fo
   const selected = allSelected.filter((item) => platform === 'all' || sourcePlatform(item) === platform);
   const [mode, setMode] = useState(state.settings.publishMode || 'submit');
   const [listingMode, setListingMode] = useState(state.settings.listingMode || 'auto');
+  const [publishDelayMinSeconds, setPublishDelayMinSeconds] = useState(Number(state.settings.publishDelayMinSeconds || 0));
+  const [publishDelayMaxSeconds, setPublishDelayMaxSeconds] = useState(Number(state.settings.publishDelayMaxSeconds || 0));
   const [busy, setBusy] = useState(false);
   const [plan, setPlan] = useState({ groups: [], bindings: [] });
   const [planError, setPlanError] = useState('');
@@ -836,12 +839,18 @@ function PublishView({ state, refresh, notify, onMenu, platform, setPlatform, fo
   const publishing = state.jobs.find((job) => job.type === 'publish' && ['queued', 'running', 'pause_requested'].includes(job.status));
   const pausedJob = !publishing && state.jobs.find((job) => job.type === 'publish' && job.status === 'paused');
   const currentJob = publishing || pausedJob;
+  const delayValid = String(publishDelayMinSeconds).trim() !== '' && String(publishDelayMaxSeconds).trim() !== ''
+    && Number.isFinite(Number(publishDelayMinSeconds)) && Number.isFinite(Number(publishDelayMaxSeconds))
+    && Number(publishDelayMinSeconds) >= 0 && Number(publishDelayMaxSeconds) <= 300
+    && Number(publishDelayMaxSeconds) >= Number(publishDelayMinSeconds);
   useEffect(() => {
     if (currentJob) {
       setListingMode(currentJob.metadata?.listingMode || 'complete-logistics');
+      setPublishDelayMinSeconds(Number(currentJob.metadata?.publishDelay?.minSeconds || 0));
+      setPublishDelayMaxSeconds(Number(currentJob.metadata?.publishDelay?.maxSeconds || 0));
       setMode(currentJob.metadata?.mode === 'submit' ? 'submit' : 'draft');
     }
-  }, [currentJob?.id, currentJob?.metadata?.listingMode]);
+  }, [currentJob?.id, currentJob?.metadata?.listingMode, currentJob?.metadata?.publishDelay?.minSeconds, currentJob?.metadata?.publishDelay?.maxSeconds]);
   useEffect(() => {
     let active = true;
     setPlanLoading(true); setPlanError('');
@@ -862,9 +871,10 @@ function PublishView({ state, refresh, notify, onMenu, platform, setPlatform, fo
     finally { setBusy(false); }
   }
   async function publish() {
+    if (!delayValid) return notify('上架间隔须为 0 至 300 秒，最长时间不能小于最短时间', 'error');
     if (mode === 'submit' && !window.confirm(`将自动提交 ${selected.length} 件商品到阿里巴巴国际站，确定继续吗？`)) return;
     if (groupsLoading) return;
-    run(() => api('/api/publish', { method: 'POST', body: JSON.stringify({ ids: selected.map((item) => item.id), mode, listingMode, collectionFolderId: folderId, sellerGroup }) }), '批量上架任务已开始');
+    run(() => api('/api/publish', { method: 'POST', body: JSON.stringify({ ids: selected.map((item) => item.id), mode, listingMode, publishDelayMinSeconds, publishDelayMaxSeconds, collectionFolderId: folderId, sellerGroup }) }), '批量上架任务已开始');
   }
   async function loadSellerGroups() {
     setGroupsLoading(true);
@@ -880,7 +890,8 @@ function PublishView({ state, refresh, notify, onMenu, platform, setPlatform, fo
     run(() => api(`/api/jobs/${job.id}/pause`, { method: 'POST' }), '暂停请求已发送');
   }
   function resume(job) {
-    run(() => api(`/api/jobs/${job.id}/resume`, { method: 'POST', body: JSON.stringify({ listingMode }) }), '任务已继续执行');
+    if (!delayValid) return notify('上架间隔须为 0 至 300 秒，最长时间不能小于最短时间', 'error');
+    run(() => api(`/api/jobs/${job.id}/resume`, { method: 'POST', body: JSON.stringify({ listingMode, publishDelayMinSeconds, publishDelayMaxSeconds }) }), '任务已继续执行');
   }
   function cancel(job) {
     run(() => api(`/api/jobs/${job.id}/cancel`, { method: 'POST' }), '任务已取消，已完成数据会保留');
@@ -909,6 +920,7 @@ function PublishView({ state, refresh, notify, onMenu, platform, setPlatform, fo
           <dl><div><dt>已选择</dt><dd>{selected.length} 件</dd></div><div><dt>来源平台</dt><dd>{platform === 'all' ? '全部平台' : sourcePlatformLabel({ sourcePlatform: platform })}</dd></div><div><dt>类目任务</dt><dd>{planLoading ? '读取中' : planError ? '预览失败' : plan.groups.length ? `${plan.groups.length} 组` : '启动后检查'}</dd></div><div><dt>执行模式</dt><dd>{mode === 'draft' ? '保存草稿' : '直接提交'}</dd></div></dl>
           <div className="seller-group-picker"><label htmlFor="seller-group">国际站目标分组</label><div><select id="seller-group" disabled={groupsLoading || Boolean(currentJob)} value={currentJob?.metadata?.sellerGroup?.id || sellerGroupId} onChange={(event) => setSellerGroupId(event.target.value)}><option value="">不指定分组</option>{currentJob?.metadata?.sellerGroup && !sellerGroups.some((group) => group.id === currentJob.metadata.sellerGroup.id) && <option value={currentJob.metadata.sellerGroup.id}>{currentJob.metadata.sellerGroup.path}</option>}{sellerGroups.map((group) => <option key={group.id} value={group.id}>{group.path}</option>)}</select><button className="icon-button" title="读取国际站分组" disabled={groupsLoading || Boolean(publishing)} onClick={loadSellerGroups}><RefreshCw size={18} className={groupsLoading ? 'spin' : ''} /></button></div></div>
           <div className="seller-group-picker"><label htmlFor="listing-mode">销售方式</label><select id="listing-mode" disabled={Boolean(publishing) || busy} value={listingMode} onChange={(event) => setListingMode(event.target.value)}><option value="auto">自动判断（推荐）</option><option value="inquiry">询盘展示（商机品）</option><option value="complete-logistics">填写完整物流资料</option></select><p className="batch-help">{listingMode === 'auto' ? '资料齐全时填写完整物流；缺少运输资料且平台允许商机品时，自动按询盘展示发布，已有包装资料保留在详情中。' : listingMode === 'inquiry' ? '按商机品正式发布，包装资料保留在详情中，运费由询价时确认。无须删除商品中已有的包装重量和尺寸。' : '完整物流会检查包装、物流属性和运费设置；全部留空也不能视为完整。资料不足可改选自动判断，保留已有包装资料。'}</p>{pausedJob && <p className="batch-help">暂停期间可调整销售方式，继续后仅用于剩余商品，已成功的商品不会重新发布。</p>}<p className="batch-help">{(currentJob?.metadata?.stockPolicy || state.settings.stockPolicy || 'minimum-order') === 'minimum-order' ? '未公开库存时，默认可售数量按起订量设置；保留手工库存。' : '使用已保存的库存和默认库存规则。'}</p></div>
+          <div className="seller-group-picker"><label>商品间随机上架间隔（秒）</label><div className="inline-fields"><input aria-label="随机间隔最短秒数" type="number" min="0" max="300" step="0.5" disabled={Boolean(publishing) || busy} value={publishDelayMinSeconds} onChange={(event) => setPublishDelayMinSeconds(event.target.value)} /><span>至</span><input aria-label="随机间隔最长秒数" type="number" min="0" max="300" step="0.5" disabled={Boolean(publishing) || busy} value={publishDelayMaxSeconds} onChange={(event) => setPublishDelayMaxSeconds(event.target.value)} /></div><p className="batch-help">0 至 0 表示关闭；相同数值为固定间隔，最多 300 秒。开始或继续任务时会记住设置，暂停后可调整。验证码仍需人工完成。</p>{!delayValid && <p className="data-missing">最长时间须大于或等于最短时间，且都在 0 至 300 秒内。</p>}</div>
           {pausedJob
             ? <><button className="primary-button publish-button" disabled={busy} onClick={() => resume(pausedJob)}><Play size={18} />继续处理剩余 {Math.max(0, pausedJob.total - pausedJob.progress)} 件</button><button className="secondary-button pause-button" disabled={busy} onClick={() => cancel(pausedJob)}><X size={17} />取消任务</button></>
             : <button className="primary-button publish-button" disabled={busy || groupsLoading || !selected.length || Boolean(publishing)} onClick={publish}>{publishing || busy ? <LoaderCircle className="spin" size={18} /> : <CloudUpload size={18} />}{publishing ? '任务执行中' : `开始处理 ${selected.length} 件`}</button>}
