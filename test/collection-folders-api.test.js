@@ -20,7 +20,7 @@ test('collection stays in its job folder and publishing captures only that folde
   let published;
   ShopCollector.prototype.collectLinks = async function (links, progress) {
     if (++requests === 1) { started(); await gate; }
-    const product = { sourceId: links[0].sourceId, sourceUrl: links[0].url, sourcePlatform: 'alibaba.com', title: 'Original product', price: 12, categoryId: '201346401', categoryPath: ['Consumer Electronics', 'Camera, Photo & Accessories', 'Drones Accessories'], mainImages: ['https://example.com/product.jpg'] };
+    const product = { sourceId: links[0].sourceId, sourceUrl: links[0].url, sourcePlatform: 'alibaba.com', title: 'Original product', price: 12, stock: null, minOrder: 180, categoryId: '201346401', categoryPath: ['Consumer Electronics', 'Camera, Photo & Accessories', 'Drones Accessories'], mainImages: ['https://example.com/product.jpg'] };
     progress({ stage: 'detail', current: 1, total: 1, key: `alibaba.com:${product.sourceId}`, product });
     return [product];
   };
@@ -56,14 +56,22 @@ test('collection stays in its job folder and publishing captures only that folde
     assert.notEqual(products[0].id, products[1].id);
     assert.equal((await request('/api/publish', { ids: products.map((p) => p.id), collectionFolderId: a.id })).status, 400);
     const target = products.find((p) => p.collectionFolderId === b.id);
+    assert.equal(target.stock, 180);
+    assert.equal(target.source.snapshot.stock, null);
+    assert.equal((await request(`/api/products/${target.id}`, { stock: 75 }, 'PATCH')).status, 200);
     const group = { id: '912305019', name: 'dev', path: 'dev' };
     const result = await request('/api/publish', { ids: [target.id], collectionFolderId: b.id, sellerGroup: group, mode: 'draft' });
     assert.equal(result.status, 202);
     await wait(() => state().jobs.every((job) => job.status === 'completed'));
-    assert.deepEqual(published[6], { sellerGroup: group });
+    assert.deepEqual(published[6], { sellerGroup: group, listingMode: 'inquiry', stockPolicy: 'minimum-order', defaultStock: 100 });
     assert.equal(published[0].collectionFolderId, b.id);
+    assert.equal(published[0].stock, 75);
+    assert.equal(published[0].stockProvenance.stock, 'manual');
     assert.equal(state().products.find((p) => p.collectionFolderId === a.id).status, 'ready');
     assert.deepEqual(result.data.metadata.sellerGroup, group);
+    assert.equal(result.data.metadata.listingMode, 'inquiry');
+    assert.equal(result.data.metadata.stockPolicy, 'minimum-order');
+    assert.equal(result.data.metadata.defaultStock, 100);
   } finally {
     release(); await server.shutdownServer();
     ShopCollector.prototype.collectLinks = originalCollect;

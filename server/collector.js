@@ -397,7 +397,7 @@ export class ShopCollector {
             title: cleanText(item.title), mainImage: absoluteUrl(item.image, sourceUrl),
             images: (item.images || []).map((image) => absoluteUrl(image, sourceUrl)),
             sourcePrice: price, price, currencySymbol: item.currencySymbol || '¥', moq: item.moq || '',
-            stock: 100, description: '', attributes: [], skus: []
+            stock: null, description: '', attributes: [], skus: []
           });
         }
         let next = '';

@@ -3,6 +3,7 @@ import { crossPlatformPublishErrors, sourcePlatform } from './source-platform.js
 import { requiredAttributeKey } from './publish-reference.js';
 import { attributeId } from './category-attributes.js';
 import { synchronizeProductOrigin } from './origin-country.js';
+import { stockValuesChanged } from './publish-policy.js';
 
 export const PRODUCT_SCHEMA_VERSION = 5;
 
@@ -356,7 +357,7 @@ function snapshotFields(product) {
   return structuredClone({
     ...Object.fromEntries(['province', 'brandName', 'compatibleBrand', 'compatibleBrands', 'privateMold', 'compatibleModel',
       'compatibleModels', 'material', 'type', 'color', 'colorImages', 'modelImages', 'specifications', 'platformAttributes',
-      'internationalAttributes', 'targetAttributes', 'categoryReference'].filter((key) => Object.hasOwn(product, key)).map((key) => [key, product[key]])),
+      'internationalAttributes', 'targetAttributes', 'categoryReference', 'stockProvenance'].filter((key) => Object.hasOwn(product, key)).map((key) => [key, product[key]])),
     sourceId: product.sourceId || '', sourceUrl: product.sourceUrl || '', sourceTitle: product.sourceTitle || '',
     sourceOriginalTitle: product.sourceOriginalTitle || '', sourceLanguage: product.sourceLanguage || '',
     sourceCaptureLocale: product.sourceCaptureLocale || '', sourceLanguageEvidence: product.sourceLanguageEvidence || null,
@@ -518,6 +519,13 @@ export function recordProductMutation(product, patch, context = {}) {
   const before = snapshotFields(product);
   patch = synchronizeProductOrigin(product, patch);
   if (patch.packaging && typeof patch.packaging === 'object') patch = { ...patch, packaging: { ...product.packaging, ...patch.packaging } };
+  if ((context.actor || 'user') !== 'system') {
+    for (const field of ['stock', 'skus']) {
+      if (Object.hasOwn(patch, field) && stockValuesChanged(product[field], patch[field], field)) {
+        patch = { ...patch, stockProvenance: { ...product.stockProvenance, ...patch.stockProvenance, [field]: 'manual' } };
+      }
+    }
+  }
   Object.assign(product, patch);
   product.updatedAt = nowIso();
   product.auditTrail = list(product.auditTrail);

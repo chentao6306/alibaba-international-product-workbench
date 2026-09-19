@@ -133,7 +133,8 @@ export function createPublishedReferenceTemplate(candidate, snapshot) {
   const template = { ...reference, ...repair?.patch, requiredAttributes };
   const acceptedLogistics = (snapshot?.result || candidate.publishResult)?.acceptedLogistics;
   for (const field of ['packaging', 'logisticsAttributes', 'freightTemplate']) {
-    if (acceptedLogistics && Object.hasOwn(acceptedLogistics, field)) template[field] = structuredClone(acceptedLogistics[field]);
+    if ((snapshot?.result || candidate.publishResult)?.listingMode !== 'inquiry'
+      && acceptedLogistics && Object.hasOwn(acceptedLogistics, field)) template[field] = structuredClone(acceptedLogistics[field]);
   }
   // Successful form values also belong to specification groups. Leaving the
   // old group options alongside repaired attributes makes the publisher select

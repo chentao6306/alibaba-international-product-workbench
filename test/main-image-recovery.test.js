@@ -114,5 +114,21 @@ test('failed main-image records can be removed and source order restored without
     assert.equal(batches, 2);
     assert.deepEqual((await mainImageUploadRecords(page)).map((file) => file.name), filenames);
     assert.deepEqual(await page.evaluate(() => window.files.slice(2).map((file) => file.uid)), ['third', 'fourth']);
+    // A portal can disappear before receiving files while previously uploaded
+    // records remain valid. Re-enter it without deleting those server records.
+    await page.evaluate(() => { window.files = window.files.slice(0, 2); window.render(); });
+    let attempts = 0;
+    publisher.uploadMainImageBatch = async () => {
+      if (++attempts === 1) throw Object.assign(new Error('Portal remounted'), { code: 'IMAGE_UPLOAD_TIMEOUT' });
+      assert.deepEqual((await mainImageUploadRecords(page)).map((file) => file.name), ['first.jpg', 'second.jpg']);
+      await page.evaluate(() => {
+        window.files.push(...['third', 'fourth'].map((name) => ({ uid: `${name}-fresh`, fileName: `${name}.jpg`, status: 'done', fileURL: `https://example.com/${name}.jpg` })));
+        window.render();
+      });
+      return 2;
+    };
+    await publisher.uploadMainImages(page, {});
+    assert.equal(attempts, 2);
+    assert.deepEqual((await mainImageUploadRecords(page)).map((file) => file.name), filenames);
   } finally { await browser.close(); }
 });

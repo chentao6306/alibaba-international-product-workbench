@@ -11,6 +11,7 @@ import { REQUIRED_ATTRIBUTE_ALIASES, requiredAttributeKey } from './publish-refe
 import { sourcePlatform, crossPlatformPublishErrors } from './source-platform.js';
 import { submitWithRepairs } from './publish-recovery.js';
 import { readPostingLogistics, logisticsControlValue, missingLogisticsFields, fillLogisticsAttributes, sourceLogisticsAttributes, capturePostingLogistics } from './posting-logistics.js';
+import { applyStockPolicy, normalizeListingMode, packagingDisplayRows } from './publish-policy.js';
 import { readSellerGroups, applySellerGroup } from './seller-groups.js';
 import { ImageDownloadQueue } from './image-download-queue.js';
 import { ORIGIN_COUNTRIES, originCountry, isOriginRegionAttribute, productOrigin, synchronizeProductOrigin } from './origin-country.js';
@@ -948,7 +949,7 @@ export function sanitizeSourceDescriptionHtml(value) {
 }
 
 export function buildLegacyDescriptionHtml(product) {
-  const attributes = (product.attributes || []).slice(0, 24).map((item, index) => ({
+  const attributes = [...(product.attributes || []), ...packagingDisplayRows(product.packaging)].map((item, index) => ({
     name: englishAttributeName(item.name, index),
     value: englishSpecText(item.value, 'See product images')
   }));
@@ -1101,7 +1102,8 @@ export function validateProductData(product, { mode = 'submit' } = {}) {
 // Alibaba form. The editor may display a value while its controlled state is
 // empty; materializing every SKU value here gives the browser layer a complete
 // set of values to commit and verify.
-export function preparePublishProduct(product) {
+export function preparePublishProduct(product, options = {}) {
+  product = applyStockPolicy(product, options);
   const next = { ...product };
   const collectedAttributes = [...(product.attributes || []), ...(product.customAttributes || [])];
   next.origin = productOrigin(product);
@@ -1126,14 +1128,14 @@ export function preparePublishProduct(product) {
   }
   if (!next.description && next.descriptionHtml) next.description = load(next.descriptionHtml).text().replace(/\s+/g, ' ').trim();
   const fallbackPrice = numericValue(product.price) || numericValue(product.sourcePriceRange?.minPrice) || 1;
-  const fallbackStock = numericValue(product.stock) || 100;
+  const fallbackStock = product.stock != null && product.stock !== '' ? Number(product.stock) : 100;
   const groups = Array.isArray(product.variantGroups) ? product.variantGroups : [];
   if (groups.length && Array.isArray(product.skus)) {
     next.skus = product.skus.map((sku, index) => ({
       ...sku,
       price: numericValue(sku.price) > 0 ? Number(sku.price).toFixed(2) : fallbackPrice.toFixed(2),
       stock: product.categoryReference && sku.stock != null && sku.stock !== '' ? Number(sku.stock)
-        : numericValue(sku.stock) > 0 ? Number(sku.stock) : fallbackStock,
+        : sku.stock != null && sku.stock !== '' ? Number(sku.stock) : fallbackStock,
       code: String(sku.code || sku.skuCode || (product.categoryReference ? '' : `${product.sourceId || product.id || 'SKU'}-${index + 1}`)).trim()
     }));
   }
@@ -1556,6 +1558,30 @@ export async function forceClearLogisticsSection(page) {
     await input.fill('');
     await input.press('Tab');
   }
+}
+
+export async function applyPostingLogistics(page, product, { listingMode } = {}) {
+  if (normalizeListingMode(listingMode) !== 'inquiry') {
+    const filled = await fillLogisticsFields(page, product.packaging || {});
+    await fillLogisticsAttributes(page, product);
+    await fillFreightTemplate(page, product);
+    return filled;
+  }
+  const body = await page.locator('body').innerText();
+  if (!/(?:当前商品类型\s*[：:]\s*商机品|Current\s+Item\s+Type\s*:\s*Business\s+opportunity\s+product)/i.test(body)) {
+    throw Object.assign(new Error('当前发布页未确认是商机品，不能按询盘展示发布；请切换销售方式后继续'), { code: 'PUBLISH_SALES_MODE_MISMATCH' });
+  }
+  // Inquiry listings show factual packaging in the description. Transactional
+  // transport configuration remains optional; do not invent battery/cargo data.
+  const fields = await page.evaluate(readPostingLogistics);
+  if (fields.some((field) => field.required)) {
+    throw Object.assign(new Error('当前类目要求完整运输资料，不能使用询盘展示省略物流信息'), { code: 'PUBLISH_SALES_MODE_MISMATCH' });
+  }
+  await forceClearLogisticsSection(page);
+  if ((await page.evaluate(readPostingLogistics)).some((field) => String(field.value).trim())) {
+    throw Object.assign(new Error('询盘展示的物流设置未生效，已停止提交'), { code: 'PUBLISH_FIELD_NOT_READY' });
+  }
+  return false;
 }
 
 export async function fillLogisticsFields(page, packaging = {}) {
@@ -4339,11 +4365,12 @@ export class SellerPublisher {
     return paths.filter(Boolean).slice(0, limit);
   }
 
-  async uploadMainImages(page, product) {
+  async uploadMainImages(page, product, onProgress = () => {}) {
     const urls = product.mainImages?.length ? product.mainImages : [product.mainImage, ...(product.images || [])];
     const downloaded = await this.downloadImageSet(product, urls, 'main', 6);
     if (downloaded.length < 4) throw new Error(`主图资料不足：仅下载到 ${downloaded.length} 张，至少需要 4 张`);
     for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt) onProgress(`重新定位主图上传入口并补传（第 ${attempt} 次恢复）`);
       try {
         const result = await this.uploadMainImageBatch(page, downloaded);
         if (attempt && !await restoreMainImageOrder(page, downloaded.map((file) => path.basename(file)))) {
@@ -4352,6 +4379,13 @@ export class SellerPublisher {
         return result;
       }
       catch (error) {
+        if (error.code === 'IMAGE_UPLOAD_TIMEOUT' && attempt < 2) {
+          // A form rerender can hide/remove the portal after its input was
+          // located. Resolve the current slot again; the next batch retains
+          // accepted server records and waits for in-flight uploads.
+          await page.locator('.image-uploader:visible').first().scrollIntoViewIfNeeded({ timeout: 5000 });
+          continue;
+        }
         if (error.code !== 'MAIN_IMAGE_UPLOAD_RETRYABLE' || attempt === 2) throw error;
         // Remove only confirmed failed files through the uploader's own
         // handler. Accepted files retain their server IDs and are not resent.
@@ -4372,18 +4406,19 @@ export class SellerPublisher {
     }
   }
 
-  async reconcileMainImages(page, product) {
+  async reconcileMainImages(page, product, onProgress = () => {}) {
     const state = await mainImageFormState(page);
     if (state.occupied >= 4 && !state.uploading) return;
     if (state.modelKnown && state.remotePreviews > state.occupied && !state.uploading) {
       if (!await clearMainImagesForRetry(page)) throw new Error('国际站主图预览与表单记录不一致，未能重新打开上传槽位；当前商品未提交');
     }
-    await this.uploadMainImages(page, product);
+    await this.uploadMainImages(page, product, onProgress);
     const confirmed = await mainImageFormState(page);
     if (confirmed.occupied < 4 || confirmed.uploading) throw new Error('国际站主图提交前复核失败：表单尚未确认至少 4 张图片');
   }
 
   async uploadMainImageBatch(page, downloaded) {
+    await page.locator('.image-uploader:visible').first().scrollIntoViewIfNeeded({ timeout: 5000 });
     const records = await mainImageUploadRecords(page);
     const pendingDeadline = Date.now() + 60000;
     let pending = records.some((file) => file.status === 'uploading');
@@ -4652,12 +4687,12 @@ export class SellerPublisher {
     throw new Error(`国际站主图上传超过 60 秒仍未完成（已确认 ${state.occupied} 张，需上传 ${expectedCount} 张，空槽位 ${remainingSlots}）`);
   }
 
-  async fillProductFields(page, product, onProgress = () => {}) {
+  async fillProductFields(page, product, onProgress = () => {}, options = {}) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const originalUrl = page.url();
       let result;
       try {
-        result = await this.fillStableProductFields(page, product, onProgress);
+        result = await this.fillStableProductFields(page, product, onProgress, options);
         if (page.url() === originalUrl) return result;
       } catch (error) {
         if (!/Execution context was destroyed|Cannot find context|navigation/i.test(error.message) || page.isClosed()) throw error;
@@ -4672,7 +4707,7 @@ export class SellerPublisher {
     }
   }
 
-  async fillStableProductFields(page, product, onProgress = () => {}) {
+  async fillStableProductFields(page, product, onProgress = () => {}, options = {}) {
     // References and manual category edits update the working category while
     // sourceCategory* remains immutable traceability data. Publishing must
     // therefore use the working category first.
@@ -4858,8 +4893,7 @@ export class SellerPublisher {
     markSourceAttributes(['颜色', 'color', 'colour'], Boolean(colorValues.length) && colorFilled);
 
     onProgress('填写包装和物流属性');
-    const logisticsFilled = await fillLogisticsFields(page, product.packaging || {});
-    await fillLogisticsAttributes(page, product);
+    const logisticsFilled = await applyPostingLogistics(page, product, options);
     markSourceAttributes(['单个产品毛重', 'single gross weight'], logisticsFilled);
     markSourceAttributes(['单个包装尺寸', 'single package size'], logisticsFilled);
 
@@ -5444,7 +5478,7 @@ export class SellerPublisher {
       try { onStage(stage); } catch {}
     };
     reportStage('检查商品资料');
-    product = preparePublishProduct(product);
+    product = preparePublishProduct(product, options);
     if (!publishPageUrl) throw new Error('尚未绑定阿里巴巴国际站商品发布页面');
     if (!isProductPostingUrl(publishPageUrl)) throw new Error('绑定地址不是阿里巴巴国际站商品发布页');
     const mismatch = categoryMismatchMessage(product, publishCategory);
@@ -5579,7 +5613,7 @@ export class SellerPublisher {
       '[class*="stock"] input[type="text"]', '[class*="stock"] input[type="number"]'
     ], product.stock);
     reportStage('填写类目属性和产品规格');
-    const fieldMapping = await this.fillProductFields(page, product, reportStage);
+    const fieldMapping = await this.fillProductFields(page, product, reportStage, options);
     if (mode === 'submit') {
       const unmappedRequiredVariant = fieldMapping.blockingUnmapped?.[0]
         || findBlockingUnmappedVariant(product, fieldMapping.unmappedAttributes);
@@ -5588,7 +5622,7 @@ export class SellerPublisher {
       }
     }
     reportStage('上传商品主图');
-    await this.uploadMainImages(page, product);
+    await this.uploadMainImages(page, product, reportStage);
     let videoWarning = '';
     try {
       reportStage('处理商品视频');
@@ -5662,16 +5696,14 @@ export class SellerPublisher {
     // before the final action so stale weight/volume values cannot survive.
     reportStage('复核物流和必填资料');
     await fillDeliveryFields(page, product.deliveryTime);
-    await fillLogisticsFields(page, product.packaging || {});
-    await fillLogisticsAttributes(page, product);
-    await fillFreightTemplate(page, product);
+    await applyPostingLogistics(page, product, options);
     reportStage('复核价格阶梯');
     await this.fillPriceFields(page, product, { onProgress: reportStage });
     await fillReferencedSkuRows(page, product, fillAndVerify, reportStage, { appliedGroups: finalVariantResult.groups, normalizeValue: englishSpecText });
 
     // A specification or uploader rerender may replace the image component.
     // Reconcile against the real preview state immediately before submission.
-    await this.reconcileMainImages(page, product);
+    await this.reconcileMainImages(page, product, reportStage);
 
     // Saving a draft rebuilds Alibaba's entire controlled form. On several
     // categories that rebuild discarded required attributes or the image
@@ -5701,7 +5733,7 @@ export class SellerPublisher {
         const draftImageState = await mainImageFormState(page);
         if (draftImageState.occupied >= 4 && !draftImageState.uploading) {
           const reset = await clearMainImagesForRetry(page);
-          if (reset) await this.uploadMainImages(page, product);
+          if (reset) await this.uploadMainImages(page, product, reportStage);
         }
 
         // Saving a draft rebuilds Alibaba's specification component. Custom
@@ -5786,7 +5818,7 @@ export class SellerPublisher {
         }
         // Recheck after all repairs: specification changes can reset main
         // images even if the preceding image repair itself succeeded.
-        await this.reconcileMainImages(page, product);
+        await this.reconcileMainImages(page, product, reportStage);
         for (const text of buttonTexts) {
           const candidate = page.getByRole('button', { name: text, exact: false }).last();
           if (await candidate.isVisible().catch(() => false) && !await candidate.isDisabled().catch(() => false)) {
@@ -5836,9 +5868,7 @@ export class SellerPublisher {
         },
         logistics: async (error) => {
           const before = await capturePostingLogistics(page);
-          await fillLogisticsFields(page, product.packaging || {});
-          await fillLogisticsAttributes(page, product);
-          await fillFreightTemplate(page, product);
+          await applyPostingLogistics(page, product, options);
           await requireLogisticsReady(page, product);
           const after = await capturePostingLogistics(page);
           // Retry only a verified repair; do not keep submitting unchanged data.
@@ -5846,7 +5876,7 @@ export class SellerPublisher {
         },
         mainImages: async () => {
           if (!await clearMainImagesForRetry(page)) return false;
-          await this.uploadMainImages(page, product);
+          await this.uploadMainImages(page, product, reportStage);
           return true;
         },
       },
@@ -5860,6 +5890,8 @@ export class SellerPublisher {
       feedback: verification.feedback,
       requiredAttributes: verification.requiredAttributes || [],
       acceptedLogistics: verification.acceptedLogistics,
+      listingMode: normalizeListingMode(options.listingMode),
+      stockProvenance: product.stockProvenance,
       fieldMapping,
       warnings: [
         videoWarning,

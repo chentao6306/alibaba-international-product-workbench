@@ -57,6 +57,9 @@ try {
   await page.getByTitle('读取国际站分组', { exact: true }).click();
   await page.locator('#seller-group option[value="100"]').waitFor({ state: 'attached' });
   await page.locator('#seller-group').selectOption('100');
+  assert.equal(await page.getByLabel('销售方式', { exact: true }).inputValue(), 'inquiry');
+  await page.getByLabel('销售方式', { exact: true }).selectOption('complete-logistics');
+  await page.getByLabel('销售方式', { exact: true }).selectOption('inquiry');
   await page.screenshot({ path: path.join(root, 'publish-desktop.png'), fullPage: true });
   let payload;
   await page.route('**/api/publish', async (route) => { payload = route.request().postDataJSON(); await route.fulfill({ status: 202, contentType: 'application/json', body: '{}' }); });
@@ -65,6 +68,7 @@ try {
   assert.equal(payload.collectionFolderId, a);
   assert.equal(payload.sellerGroup.id, '100');
   assert.equal(payload.ids.length, 1);
+  assert.equal(payload.listingMode, 'inquiry');
   await page.getByLabel('采集分组', { exact: true }).selectOption(b);
   await page.getByText('上架队列为空', { exact: true }).waitFor();
   await page.getByLabel('采集分组', { exact: true }).selectOption(a);
@@ -79,6 +83,20 @@ try {
   await page.getByLabel('采集分组', { exact: true }).selectOption(a);
   await page.getByTitle('删除空分组', { exact: true }).click();
   await page.waitForFunction(() => document.querySelectorAll('.collection-folder-bar option').length === 2);
+  await nav('设置');
+  assert.equal(await page.getByLabel('来源未公开库存时', { exact: true }).inputValue(), 'minimum-order');
+  await page.getByLabel('来源未公开库存时', { exact: true }).selectOption('fixed');
+  await page.getByRole('button', { name: '保存规则', exact: true }).click();
+  await page.getByText('默认规则已保存', { exact: true }).waitFor();
+  assert.equal((await getState()).settings.stockPolicy, 'fixed');
+  await page.getByLabel('来源未公开库存时', { exact: true }).selectOption('minimum-order');
+  await Promise.all([
+    page.waitForResponse((response) => new URL(response.url()).pathname === '/api/settings' && response.request().method() === 'PATCH' && response.ok()),
+    page.getByRole('button', { name: '保存规则', exact: true }).click(),
+  ]);
+  assert.equal((await getState()).settings.stockPolicy, 'minimum-order');
+  await page.screenshot({ path: path.join(root, 'inventory-settings.png'), fullPage: true });
+  await nav('商品工作台');
   for (const width of [1280, 430]) {
     await page.setViewportSize({ width, height: 932 });
     await page.screenshot({ path: path.join(root, `products-${width}.png`), fullPage: true, animations: 'disabled' });

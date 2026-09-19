@@ -255,8 +255,8 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--orange); }
 .batch-preview-row { color: #536168; font-size: 11px; }.batch-preview-row strong { color: #2e3b41; font-weight: 600; }.batch-preview-row .pending { color: #b46b20; background: #fff8ee; }
 .edit-form label, .settings-form label { display: flex; flex-direction: column; gap: 7px; position: relative; }
 .edit-form label > span, .settings-form label > span { font-size: 12px; font-weight: 600; color: #465158; }
-.edit-form input, .edit-form textarea, .edit-form select, .settings-form input { border: 1px solid #cfd6da; border-radius: 5px; padding: 10px 11px; outline: none; resize: vertical; color: #20292e; background: #fff; }
-.edit-form input:focus, .edit-form textarea:focus, .edit-form select:focus, .settings-form input:focus { border-color: #7b878e; box-shadow: 0 0 0 3px #edf0f1; }
+.edit-form input, .edit-form textarea, .edit-form select, .settings-form input, .settings-form select { border: 1px solid #cfd6da; border-radius: 5px; padding: 10px 11px; outline: none; resize: vertical; color: #20292e; background: #fff; min-width: 0; }
+.edit-form input:focus, .edit-form textarea:focus, .edit-form select:focus, .settings-form input:focus, .settings-form select:focus { border-color: #7b878e; box-shadow: 0 0 0 3px #edf0f1; }
 .edit-form label > small { position: absolute; right: 9px; top: 95px; font-size: 10px; color: #909a9f; }
 .form-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 13px; }
 .form-grid > label, .batch-field { min-width: 0; }
@@ -373,7 +373,7 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--orange); }
 .muted-row { padding: 35px; text-align: center; color: var(--muted); font-size: 11px; }
 
 .settings-panel { max-width: 760px; }
-.settings-form { display: grid; grid-template-columns: 1fr 1fr auto; align-items: end; gap: 15px; padding: 23px; }
+.settings-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto; align-items: end; gap: 15px; padding: 23px; }
 .settings-form .primary-button { height: 41px; }
 .storage-panel { margin-top: 17px; overflow: hidden; }
 .storage-list { padding: 18px 22px 22px; display: grid; gap: 10px; }

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
 import { needsSourceAttributeRefresh } from './category-attributes.js';
+import { applyStockPolicy, normalizeListingMode, hasManualStock } from './publish-policy.js';
 import { fileURLToPath } from 'node:url';
 import { deleteWorkspaceEntities, findWorkspaceJobs, JsonStore, newId } from './store.js';
 import { ShopCollector, collectionPageRange } from './collector.js';
@@ -353,12 +354,11 @@ function saveCollectedProduct(groupId, raw, options = {}) {
     const priceNumber = Number(raw.price || 0);
     const markup = Number(draft.settings.priceMarkup || 0);
     const normalized = {
-      ...raw,
+      ...applyStockPolicy(raw, { stockPolicy: draft.settings.stockPolicy || 'minimum-order', defaultStock: draft.settings.defaultStock, collected: true }),
       sourcePlatform: platform,
       collectionFolderId: options.collectionFolderId,
       collectionMethod: options.collectionMethod || 'shop',
       price: platform === 'alibaba.com' && markup ? (priceNumber * (1 + markup / 100)).toFixed(2) : raw.price ?? '',
-      stock: raw.stock == null || raw.stock === '' ? Number(draft.settings.defaultStock ?? 100) : Number(raw.stock),
       deliveryCountry: options.destinationCountry || raw.deliveryCountry || '',
       updatedAt: now
     };
@@ -367,6 +367,10 @@ function saveCollectedProduct(groupId, raw, options = {}) {
       draft.products.unshift(product);
     } else {
       if (options.collectionMethod) return product;
+      for (const field of ['stock', 'skus']) {
+        if (hasManualStock(product, field)) normalized[field] = product[field];
+      }
+      normalized.stockProvenance = { ...normalized.stockProvenance, ...product.stockProvenance };
       Object.assign(product, normalized);
       // Re-reading a group updates the working copy, but does not overwrite
       // the immutable source snapshot. An explicit “refresh detail” is the
@@ -806,8 +810,10 @@ app.post('/api/products/process', async (request, response, next) => {
   finally { if (acquired) processingProducts.delete(id); }
 });
 
-app.patch('/api/settings', (request, response) => {
-  const allowed = ['publishPageUrl', 'publishCategory', 'publishBindings', 'defaultStock', 'priceMarkup', 'publishMode'];
+app.patch('/api/settings', (request, response, next) => {
+  if (Object.hasOwn(request.body, 'stockPolicy') && !['minimum-order', 'fixed'].includes(request.body.stockPolicy)) return next(Object.assign(new Error('不支持的默认库存规则'), { status: 400 }));
+  if (Object.hasOwn(request.body, 'listingMode') && !['inquiry', 'complete-logistics'].includes(request.body.listingMode)) return next(Object.assign(new Error('不支持的销售方式'), { status: 400 }));
+  const allowed = ['publishPageUrl', 'publishCategory', 'publishBindings', 'defaultStock', 'priceMarkup', 'publishMode', 'stockPolicy', 'listingMode'];
   const settings = store.update((state) => {
     for (const key of allowed) if (Object.hasOwn(request.body, key)) state.settings[key] = request.body[key];
     return state.settings;
@@ -880,7 +886,7 @@ async function runPublishJob(jobId) {
         store.patchJob(jobId, { progress: index + 1, total, message: `已跳过不存在的商品 ${index + 1}/${total}` });
         continue;
       }
-      product = preparePublishProduct(product);
+      product = preparePublishProduct(product, { stockPolicy: job.metadata.stockPolicy || 'preserve', defaultStock: job.metadata.defaultStock });
       store.update((draft) => {
         const target = draft.products.find((item) => item.id === product.id);
         if (target) Object.assign(target, product, { updatedAt: new Date().toISOString() });
@@ -893,7 +899,7 @@ async function runPublishJob(jobId) {
             onWaiting: (message) => store.patchJob(jobId, { message }),
             shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status))
           }, () => collector.enrichProducts([product]));
-          product = preparePublishProduct(mergeSourceDataForPublish(product, enriched));
+          product = preparePublishProduct(mergeSourceDataForPublish(product, enriched), { stockPolicy: job.metadata.stockPolicy || 'preserve', defaultStock: job.metadata.defaultStock });
           store.update((draft) => {
             const target = draft.products.find((item) => item.id === product.id);
             if (target) Object.assign(target, product, { status: 'ready', updatedAt: new Date().toISOString() });
@@ -916,7 +922,7 @@ async function runPublishJob(jobId) {
           (reportStage) => withVerificationContext({
             onWaiting: reportStage,
             shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status))
-          }, () => publisher.publishProduct(product, route.url, mode, route.category, jobId, reportStage, { sellerGroup: job.metadata?.sellerGroup })),
+          }, () => publisher.publishProduct(product, route.url, mode, route.category, jobId, reportStage, { sellerGroup: job.metadata?.sellerGroup, listingMode: job.metadata?.listingMode, stockPolicy: job.metadata?.stockPolicy || 'preserve', defaultStock: job.metadata?.defaultStock })),
           {
             timeoutMs: stageTimeoutMs,
             initialStage: '启动国际站发布流程',
@@ -1105,6 +1111,7 @@ app.get('/api/seller/product-groups', async (request, response, next) => {
 });
 
 app.post('/api/publish', (request, response, next) => {
+  if (Object.hasOwn(request.body, 'listingMode') && !['inquiry', 'complete-logistics'].includes(request.body.listingMode)) return next(Object.assign(new Error('不支持的销售方式'), { status: 400 }));
   const state = store.read();
   if (readingSellerGroups) return next(Object.assign(new Error('正在读取国际站分组，请稍后开始上架'), { status: 409 }));
   const existing = state.jobs.find((job) => job.type === 'publish' && ['queued', 'running', 'pause_requested', 'paused'].includes(job.status));
@@ -1124,6 +1131,9 @@ app.post('/api/publish', (request, response, next) => {
   const plan = createPublishPlan(products, state.settings);
   const job = store.createJob('publish', {
     productIds: products.map((item) => item.id), mode,
+    listingMode: normalizeListingMode(request.body.listingMode || state.settings.listingMode || 'inquiry'),
+    stockPolicy: state.settings.stockPolicy || 'minimum-order',
+    defaultStock: state.settings.defaultStock,
     collectionFolderId: folderId, sellerGroup,
     sourcePlatforms: [...new Set(products.map(sourcePlatform))],
     categoryGroups: plan.map((group) => ({ sourcePlatform: group.sourcePlatform, categoryId: group.categoryId, category: group.category, productIds: group.products.map((item) => item.id) }))

@@ -818,7 +818,7 @@ test('prepares a complete publish payload from collected SKU data', () => {
     attributes: [{ name: 'screen size', value: '6.8 inch' }, { name: 'battery capacity', value: '5000mAh' }],
     origin: 'China', packaging: { weight: 0.6 },
     variantGroups: [{ name: 'Color', options: ['Black'] }],
-    skus: [{ attributes: { Color: 'Black' }, price: '', stock: 0 }]
+    skus: [{ attributes: { Color: 'Black' }, price: '', stock: null }]
   });
   assert.equal(prepared.descriptionHtml.includes('<script'), false);
   assert.equal(prepared.skus[0].price, '82.50');
