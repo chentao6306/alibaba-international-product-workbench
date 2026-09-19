@@ -41,12 +41,12 @@ test('login and unavailable forms pause at the same product without counting fai
       assert.equal(product.price, 100);
       assert.equal(product.categoryId, '201346401');
       assert.equal(product.skus[0].code, 'KEPT');
-      assert.deepEqual(product.detailImages, ['https://example.com/recovered-detail.jpg']);
+      assert.deepEqual(product.detailImages, []);
     }
     if (product.id === '1' && blockingCode) throw blockingCode === 'raw-overlay'
       ? new Error('locator.click: Timeout 5000ms exceeded. next-overlay-backdrop intercepts pointer events')
       : Object.assign(new Error(blockingCode), { code: blockingCode });
-    if (product.id === '2') assert.equal(product.attributes.find((item) => item.name === 'Age Range')?.value, '3-6 years');
+    if (product.id === '2') assert.equal(product.attributes.find((item) => item.name === 'Age Range'), undefined);
     if (product.id === '2' && !categoryCorrected) throw Object.assign(new Error('当前类目不可用，请重新选择有效类目'), { code: 'PUBLISH_CATEGORY_INVALID' });
     return { status: 'drafted', message: 'Saved receipt', productId: product.id };
   };
@@ -93,7 +93,7 @@ test('login and unavailable forms pause at the same product without counting fai
     assert.equal(state.products[1].status, 'drafted');
     assert.equal(state.products[2].status, 'drafted');
     assert.match(state.jobs[0].message, /成功 3 件，失败 0 件/);
-    assert.equal(enrichmentCalls, 2);
+    assert.equal(enrichmentCalls, 0);
   } finally {
     await server.shutdownServer(); SellerPublisher.prototype.publishProduct = original;
     SellerPublisher.prototype.enrichSourceProducts = originalEnrich;

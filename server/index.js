@@ -1,7 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
-import { needsSourceAttributeRefresh } from './category-attributes.js';
 import { applyStockPolicy, normalizeListingMode, hasManualStock } from './publish-policy.js';
 import { fileURLToPath } from 'node:url';
 import { deleteWorkspaceEntities, findWorkspaceJobs, JsonStore, newId } from './store.js';
@@ -10,17 +9,16 @@ import {
   canonicalizePriceTiers,
   categoryMismatchMessage,
   classifyAlibabaActionResult,
-  hasCompleteSourceData,
   preparePublishProduct,
   requiredLabelsFromError,
   sanitizeCollectedProduct,
   SellerPublisher
 } from './publisher.js';
-import { applyPublishedProductReference, copyMissingProductData, createPublishSnapshot, findAndReplaceProduct, mergeSourceDataForPublish, recordProductMutation, syncProductModel } from './product-model.js';
+import { applyPublishedProductReference, copyMissingProductData, createPublishSnapshot, findAndReplaceProduct, recordProductMutation, syncProductModel } from './product-model.js';
 import { publishCounts, recordPublishOutcome } from './publish-progress.js';
 import { publishDelayFromRequest, waitForPublishDelay } from './publish-delay.js';
 import { publishEnvironmentBlockCode } from './publish-recovery.js';
-import { buildAlibabaPublishUrl, canRefreshSourceCategory, createPublishPlan, normalizeCategoryId, productCategory, publishBindings, refreshedSourceCategoryPatch, rememberPublishBinding, resolvePublishRoute } from './category-routing.js';
+import { buildAlibabaPublishUrl, createPublishPlan, normalizeCategoryId, productCategory, publishBindings, rememberPublishBinding, resolvePublishRoute } from './category-routing.js';
 import { createPublishedReferenceTemplate, findPublishedReferenceRepair } from './publish-reference.js';
 import { userFacingError } from './browser-error.js';
 import { runWithProgressTimeout } from './progress-timeout.js';
@@ -920,18 +918,8 @@ async function runPublishJob(jobId) {
       });
       store.patchJob(jobId, { status: 'running', progress: index, total, waitingForDelay: false, currentProductId: product.id, message: `正在处理 ${index + 1}/${total}：${product.title}` });
       try {
-        if (sourcePlatform(product) === 'alibaba.com' && (!hasCompleteSourceData(product) || needsSourceAttributeRefresh(product) || !resolvePublishRoute(product, state.settings).url)) {
-          store.patchJob(jobId, { message: `正在补全商品资料 ${index + 1}/${total}：${product.title}` });
-          const [enriched] = await withVerificationContext({
-            onWaiting: (message) => store.patchJob(jobId, { message }),
-            shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status))
-          }, () => collector.enrichProducts([product]));
-          product = preparePublishProduct(mergeSourceDataForPublish(product, enriched), { stockPolicy: job.metadata.stockPolicy || 'preserve', defaultStock: job.metadata.defaultStock });
-          store.update((draft) => {
-            const target = draft.products.find((item) => item.id === product.id);
-            if (target) Object.assign(target, product, { status: 'ready', updatedAt: new Date().toISOString() });
-          });
-        }
+        // Publishing consumes saved product data only. Source visits belong to
+        // collection or an explicit refresh, including missing-data repairs.
         const settings = store.read((state) => state.settings);
         if (['pause_requested', 'paused'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status))) {
           throw Object.assign(new Error('任务已暂停，已完成数据已保存'), { code: 'PUBLISH_PAUSED' });
@@ -981,67 +969,6 @@ async function runPublishJob(jobId) {
         publisher.clearPublishStop(jobId);
         store.patchJob(jobId, { progress: index + 1, total, message: `已处理 ${index + 1}/${total}：${product.title}` });
       } catch (error) {
-        // A category's live form may reveal a field absent from an older
-        // capture. Refresh that exact source once before considering it missing.
-        const refreshJob = store.read((state) => state.jobs.find((item) => item.id === jobId));
-        if (error.code === 'PUBLISH_REQUIRED_DATA_MISSING' && error.missingSourceFields?.length
-          && sourcePlatform(product) === 'alibaba.com' && !product.categoryReference
-          && refreshJob?.status === 'running' && !refreshJob.metadata?.attributeRefreshAttempts?.[product.id]) {
-          store.patchJob(jobId, { metadata: { ...refreshJob.metadata,
-            attributeRefreshAttempts: { ...refreshJob.metadata?.attributeRefreshAttempts, [product.id]: true } },
-          message: `正在从原商品重新核对：${error.missingSourceFields.join('、')}` });
-          try {
-            const [fresh] = await withVerificationContext({
-              onWaiting: (message) => store.patchJob(jobId, { message }),
-              shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status)),
-            }, () => collector.enrichProducts([product]));
-            const enriched = preparePublishProduct(mergeSourceDataForPublish(product, fresh));
-            const relevant = (item) => JSON.stringify([item.attributes, item.customAttributes, item.packaging, item.origin]);
-            if (relevant(enriched) !== relevant(product) && store.read((state) => state.jobs.find((item) => item.id === jobId)?.status) === 'running') {
-              store.update((draft) => {
-                const target = draft.products.find((item) => item.id === product.id);
-                if (target) Object.assign(target, enriched, { updatedAt: new Date().toISOString() });
-              });
-              publisher.clearPublishStop(jobId);
-              index -= 1;
-              continue;
-            }
-          } catch (refreshError) {
-            if (['COLLECT_PAUSED', 'LOGIN_REQUIRED'].includes(refreshError.code)) error = refreshError;
-          }
-        }
-        if (error.code === 'PUBLISH_CATEGORY_INVALID' && canRefreshSourceCategory(product)
-          && !store.read((state) => state.jobs.find((item) => item.id === jobId)?.metadata?.categoryRefreshAttempts?.[product.id])) {
-          const current = store.read((state) => state.jobs.find((item) => item.id === jobId));
-          if (current?.status === 'cancelled') return;
-          if (current?.status === 'running') {
-            store.patchJob(jobId, { metadata: { ...current.metadata,
-              categoryRefreshAttempts: { ...current.metadata?.categoryRefreshAttempts, [product.id]: true } },
-            message: '当前类目已失效，正在从原商品核对最新类目' });
-            try {
-              const [fresh] = await withVerificationContext({
-                onWaiting: (message) => store.patchJob(jobId, { message }),
-                shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status))
-              }, () => collector.enrichProducts([product]));
-              const patch = refreshedSourceCategoryPatch(product, fresh);
-              if (patch && store.read((state) => state.jobs.find((item) => item.id === jobId)?.status) === 'running') {
-                const repaired = store.update((draft) => {
-                  const target = draft.products.find((item) => item.id === product.id);
-                  if (!target || target.categoryId !== product.categoryId || !canRefreshSourceCategory(target)) return false;
-                  recordProductMutation(target, patch, { actor: 'system', action: 'refresh-invalid-source-category' });
-                  return true;
-                });
-                if (repaired) {
-                  publisher.clearPublishStop(jobId);
-                  index -= 1;
-                  continue;
-                }
-              }
-            } catch (refreshError) {
-              if (refreshError.code === 'COLLECT_PAUSED' || refreshError.code === 'LOGIN_REQUIRED') error = refreshError;
-            }
-          }
-        }
         const message = userFacingError(error);
         const requiresHuman = error.code === 'LOGIN_REQUIRED' || /captcha|verify|人机验证|安全验证|滑块|登录(?:状态)?(?:已)?失效|人工验证/i.test(message);
         const environmentNotReady = publishEnvironmentBlockCode(error);

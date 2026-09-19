@@ -7,7 +7,7 @@ import { JsonStore } from '../server/store.js';
 import { SellerPublisher } from '../server/publisher.js';
 import { ShopCollector } from '../server/collector.js';
 
-test('refreshes the exact source once for missing requirements without borrowing another product or losing batch progress', async () => {
+test('reports missing saved data without collecting source pages and continues both draft and direct batches', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'required-data-refresh-'));
   process.env.DATA_DIR = root; process.env.PORT = '0';
   const store = new JsonStore(path.join(root, 'workspace.json'));
@@ -41,19 +41,25 @@ test('refreshes the exact source once for missing requirements without borrowing
   try {
     await api('/api/products/ready', { logisticsAttributes: ['普货'] }, 'PATCH');
     assert.deepEqual(store.read().products.find((p) => p.id === 'ready').logisticsAttributes, ['普货']);
-    await api('/api/publish', { ids: ['refresh', 'absent', 'ready'], collectionFolderId: 'folder', mode: 'draft' });
-    const deadline = Date.now() + 10000;
-    while (store.read().jobs[0].status !== 'completed' && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
-    const state = store.read();
-    assert.equal(state.jobs[0].status, 'completed'); assert.equal(state.jobs[0].progress, 3);
-    assert.deepEqual(refreshes, ['refresh', 'absent']);
-    assert.deepEqual(attempts, ['refresh', 'refresh', 'absent', 'ready']);
-    const absent = state.products.find((p) => p.id === 'absent');
-    assert.equal(absent.status, 'publish_failed');
-    assert.deepEqual(absent.publishResult.missingSourceFields, ['比例']);
-    assert.equal(absent.attributes.some((a) => a.name === 'Scale'), false);
-    assert.equal(state.products.find((p) => p.id === 'refresh').price, 10);
-    assert.equal(state.products.find((p) => p.id === 'refresh').title, 'Original refresh');
+    for (const mode of ['draft', 'submit']) {
+      attempts.length = 0;
+      await api('/api/publish', { ids: ['refresh', 'absent', 'ready'], collectionFolderId: 'folder', mode });
+      const deadline = Date.now() + 10000;
+      while (store.read().jobs[0].status !== 'completed' && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+      const state = store.read();
+      assert.equal(state.jobs[0].status, 'completed'); assert.equal(state.jobs[0].progress, 3);
+      assert.deepEqual(refreshes, []);
+      assert.deepEqual(attempts, ['refresh', 'absent', 'ready']);
+      const absent = state.products.find((p) => p.id === 'absent');
+      assert.equal(absent.status, 'publish_failed');
+      assert.deepEqual(absent.publishResult.missingSourceFields, ['比例']);
+      assert.equal(absent.attributes.some((a) => a.name === 'Scale'), false);
+      assert.equal(state.products.find((p) => p.id === 'refresh').price, 10);
+      assert.equal(state.products.find((p) => p.id === 'refresh').title, 'Original refresh');
+    }
+    await api('/api/products/refresh/refresh-detail', {});
+    assert.deepEqual(refreshes, ['refresh'], 'The user can still explicitly refresh a source product');
+    assert.equal(store.read().products.find((p) => p.id === 'refresh').attributes.find((a) => a.name === 'Scale')?.value, '1:16');
   } finally {
     await server.shutdownServer(); SellerPublisher.prototype.publishProduct = originalPublish; ShopCollector.prototype.enrichProducts = originalEnrich;
     fs.rmSync(root, { recursive: true, force: true });

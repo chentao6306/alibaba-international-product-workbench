@@ -94,3 +94,25 @@ test('selected visible mode remains a scroll fallback when structural anchors ar
     assert.equal(await page.evaluate(() => window.clicks), 0);
   } finally { await browser.close(); }
 });
+
+test('waits for an editor mode control moving into a small viewport and clicks it only once', { skip: !findChromium(), timeout: 15000 }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage({ viewport: { width: 800, height: 500 } });
+    await page.setContent(`<div style="height:2400px"></div>
+      <button style="position:fixed;left:-2000px;top:100px">Normal editor</button>
+      <footer style="position:fixed;bottom:0;height:100px;width:100%;background:white">Submit controls</footer>
+      <script>window.clicks=0;
+        const button=document.querySelector('button');
+        button.onclick=()=>{window.clicks++;button.setAttribute('aria-selected','true');
+          const frame=document.createElement('iframe');frame.srcdoc='<body class=mce-content-body contenteditable=true>Ready</body>';
+          document.body.prepend(frame);};
+        setTimeout(()=>{const replacement=button.cloneNode(true);replacement.onclick=button.onclick;
+          replacement.style.left='30px';button.replaceWith(replacement);},700);
+      </script>`);
+    const found = await waitForDescriptionEditor(page, { timeoutMs: 6500, switchMode: () => switchToLegacyDetails(page) });
+    assert.equal(await found.body.innerText(), 'Ready');
+    await switchToLegacyDetails(page);
+    assert.equal(await page.evaluate(() => window.clicks), 1);
+  } finally { await browser.close(); }
+});

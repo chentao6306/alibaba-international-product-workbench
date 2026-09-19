@@ -1799,18 +1799,42 @@ export async function closePostingAttributeMenus(page) {
   if (!await menus.count()) return true;
   // Never click through a modal prompt that contains a select control.
   if (await page.locator('.next-dialog:visible, [aria-modal="true"]:visible, .mce-window:visible').count()) return false;
+  if (await page.locator(`${POSTING_DIALOG}:visible`).evaluateAll((nodes) => nodes.some((node) => !node.closest('.sell-o-select-options, .next-select-popup')))) return false;
   await page.keyboard.press('Escape');
   if (!await menus.count()) return true;
   await page.keyboard.press('Tab');
   if (!await menus.count()) return true;
-  const labels = page.locator('.sell-catProp-item > .label:visible, .sell-catProp-item label:visible, .next-form-item-label:visible');
-  for (let index = 0; index < Math.min(await labels.count(), 12); index++) {
+  // Some portals close only on a document mousedown outside the popup. The
+  // nearest row label can be covered by the popup, so also use section titles.
+  const labels = page.locator('.sell-catProp-item > .label:visible, .sell-catProp-item label:visible, .next-form-item-label:visible, #desc-card-title:visible, h2:visible, h3:visible');
+  for (let index = 0; index < Math.min(await labels.count(), 24); index++) {
     const label = labels.nth(index);
     const safe = await label.evaluate((node) => !node.matches('label[for]') && !node.querySelector('input, button, select, a, textarea')
       && !node.closest('[role="dialog"], .sell-o-select-options, .next-select-popup')).catch(() => false);
     if (!safe) continue;
     if (!await label.click({ timeout: 500 }).then(() => true, () => false)) continue;
     if (await menus.first().waitFor({ state: 'hidden', timeout: 500 }).then(() => true, () => false)) return true;
+  }
+  // A menu may cover every label on a narrow display. Click an observed blank
+  // area only after hit-testing it; never submit, change a field or click an
+  // unknown modal while trying to dismiss an attribute popup.
+  const point = await page.evaluate(() => {
+    const menus = [...document.querySelectorAll('.sell-o-select-options, .next-select-popup')]
+      .filter((node) => node.getClientRects().length && getComputedStyle(node).visibility !== 'hidden');
+    const safeBackground = 'body, main, section, .next-form, .next-form-item, .sell-catProp-item, #struct-desc-card, #desc-card';
+    for (const y of [24, innerHeight / 3, innerHeight / 2, innerHeight - 160]) {
+      for (const x of [24, innerWidth / 4, innerWidth / 2, innerWidth - 24]) {
+        const node = document.elementFromPoint(x, y);
+        if (!node || !node.matches(safeBackground) || menus.some((menu) => menu.contains(node))) continue;
+        if (node.closest('[role="dialog"], [aria-modal="true"], .next-dialog, .next-overlay-backdrop, .mce-window, button, a, label, [role="button"], [onclick]')) continue;
+        return { x, y };
+      }
+    }
+    return null;
+  });
+  if (point) {
+    await page.mouse.click(point.x, point.y);
+    await menus.first().waitFor({ state: 'hidden', timeout: 700 }).catch(() => {});
   }
   return !await menus.count();
 }
@@ -3482,8 +3506,14 @@ export async function dismissPostingOverlays(page) {
 
 async function requireClearPostingOverlays(page) {
   if (await dismissPostingOverlays(page)) return;
-  const error = new Error('国际站页面仍有弹窗遮罩，请关闭提示后重试');
+  const overlays = await page.locator(POSTING_BLOCKERS).evaluateAll((nodes) => nodes.slice(0, 6).map((node) => ({
+    role: node.getAttribute('role') || '', className: node.className || '',
+    text: String(node.innerText || node.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim().slice(0, 200),
+  }))).catch(() => []);
+  const prompt = overlays.find((overlay) => overlay.text)?.text;
+  const error = new Error(`国际站页面仍有弹窗遮罩${prompt ? `（${prompt}）` : ''}，请关闭提示后重试`);
   error.code = 'PUBLISH_OVERLAY_BLOCKED';
+  error.diagnostics = { section: 'overlays', overlays };
   throw error;
 }
 
@@ -3569,13 +3599,23 @@ async function activateEditorControl(page, control, key) {
   const handle = await control.elementHandle().catch(() => null);
   if (!handle) return false;
   try {
-    await handle.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-    await handle.click({ force: true, timeout: 5000 });
+    // Keep the identity handle only for repeat-click prevention. Click through
+    // a locator so layout shifts and replaced nodes are retried by Playwright.
+    // Centering also avoids sticky headers/footers on small remote desktops.
+    await control.evaluate((node) => node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' })).catch(() => {});
+    await control.click({ timeout: 5000 });
+    const clickedHandle = await control.count().then((count) => count ? control.elementHandle() : null).catch(() => null);
     await previous?.handle.dispose().catch(() => {});
-    state.set(key, { handle, attempts: sameControl ? previous.attempts + 1 : 1 });
+    if (clickedHandle) await handle.dispose().catch(() => {});
+    state.set(key, { handle: clickedHandle || handle, attempts: sameControl ? previous.attempts + 1 : 1 });
     return true;
   } catch (error) {
     await handle.dispose().catch(() => {});
+    if (/outside of the viewport|not stable|not attached|Timeout/i.test(error.message || '')) {
+      throw Object.assign(new Error('国际站详情编辑器切换按钮尚未稳定或被遮挡；已保留任务进度，可继续重试'), {
+        code: 'PUBLISH_EDITOR_NOT_READY', diagnostics: { section: 'editor-mode', control: key },
+      });
+    }
     throw error;
   }
 }

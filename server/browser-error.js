@@ -4,6 +4,7 @@ export function userFacingError(error) {
     return '国际站图片上传控件响应超时，请重试该商品';
   }
   if (/overlay-backdrop|intercepts pointer events|页面仍有弹窗遮罩/i.test(raw)) {
+    if (error?.code === 'PUBLISH_OVERLAY_BLOCKED' && /页面仍有弹窗遮罩/.test(raw)) return raw.slice(0, 700);
     return '国际站页面仍有弹窗遮罩，请关闭提示后重试';
   }
   if (/locator\.click/i.test(raw) && /timeout/i.test(raw)) {

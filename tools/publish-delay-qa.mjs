@@ -20,7 +20,7 @@ store.update((state) => {
 });
 const calls = [];
 const originals = { enrich: ShopCollector.prototype.enrichProducts, publish: SellerPublisher.prototype.publishProduct };
-ShopCollector.prototype.enrichProducts = async (products) => products;
+ShopCollector.prototype.enrichProducts = async () => assert.fail('Publishing must not collect source products');
 SellerPublisher.prototype.publishProduct = async (product) => { calls.push(product.id); return { status: 'drafted', message: '模拟草稿回执' }; };
 const server = await import('../server/index.js');
 const listener = await server.serverReady;
@@ -33,6 +33,7 @@ try {
   await page.goto(`http://127.0.0.1:${listener.address().port}`);
   const nav = (name) => page.locator('.sidebar nav button').filter({ hasText: name }).click();
   await nav('上架任务');
+  await page.getByText('上架仅使用已保存的商品资料，不会自动重新采集。缺少资料时，请在商品工作台编辑补充或主动重新采集。', { exact: true }).waitFor();
   await page.getByLabel('采集分组', { exact: true }).selectOption('demo');
   await page.getByRole('button', { name: /保存草稿/ }).click();
   const min = page.getByLabel('随机间隔最短秒数');
