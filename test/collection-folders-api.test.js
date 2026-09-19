@@ -63,13 +63,13 @@ test('collection stays in its job folder and publishing captures only that folde
     const result = await request('/api/publish', { ids: [target.id], collectionFolderId: b.id, sellerGroup: group, mode: 'draft' });
     assert.equal(result.status, 202);
     await wait(() => state().jobs.every((job) => job.status === 'completed'));
-    assert.deepEqual(published[6], { sellerGroup: group, listingMode: 'inquiry', stockPolicy: 'minimum-order', defaultStock: 100 });
+    assert.deepEqual(published[6], { sellerGroup: group, listingMode: 'auto', stockPolicy: 'minimum-order', defaultStock: 100 });
     assert.equal(published[0].collectionFolderId, b.id);
     assert.equal(published[0].stock, 75);
     assert.equal(published[0].stockProvenance.stock, 'manual');
     assert.equal(state().products.find((p) => p.collectionFolderId === a.id).status, 'ready');
     assert.deepEqual(result.data.metadata.sellerGroup, group);
-    assert.equal(result.data.metadata.listingMode, 'inquiry');
+    assert.equal(result.data.metadata.listingMode, 'auto');
     assert.equal(result.data.metadata.stockPolicy, 'minimum-order');
     assert.equal(result.data.metadata.defaultStock, 100);
   } finally {

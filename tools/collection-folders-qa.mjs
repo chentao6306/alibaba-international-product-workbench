@@ -57,9 +57,10 @@ try {
   await page.getByTitle('读取国际站分组', { exact: true }).click();
   await page.locator('#seller-group option[value="100"]').waitFor({ state: 'attached' });
   await page.locator('#seller-group').selectOption('100');
-  assert.equal(await page.getByLabel('销售方式', { exact: true }).inputValue(), 'inquiry');
+  assert.equal(await page.getByLabel('销售方式', { exact: true }).inputValue(), 'auto');
   await page.getByLabel('销售方式', { exact: true }).selectOption('complete-logistics');
-  await page.getByLabel('销售方式', { exact: true }).selectOption('inquiry');
+  await page.getByText('完整物流会检查包装、物流属性和运费设置；全部留空也不能视为完整。资料不足可改选自动判断，保留已有包装资料。', { exact: true }).waitFor();
+  await page.getByLabel('销售方式', { exact: true }).selectOption('auto');
   await page.screenshot({ path: path.join(root, 'publish-desktop.png'), fullPage: true });
   let payload;
   await page.route('**/api/publish', async (route) => { payload = route.request().postDataJSON(); await route.fulfill({ status: 202, contentType: 'application/json', body: '{}' }); });
@@ -68,7 +69,7 @@ try {
   assert.equal(payload.collectionFolderId, a);
   assert.equal(payload.sellerGroup.id, '100');
   assert.equal(payload.ids.length, 1);
-  assert.equal(payload.listingMode, 'inquiry');
+  assert.equal(payload.listingMode, 'auto');
   // Exercise an upgraded/paused job through the UI, not only a new job.
   const saved = JSON.parse(fs.readFileSync(path.join(root, 'workspace.json'), 'utf8'));
   saved.jobs.unshift({ id: 'qa-paused', type: 'publish', status: 'paused', progress: 1, total: 2,
@@ -79,12 +80,12 @@ try {
   await nav('上架任务');
   await page.getByRole('button', { name: '继续处理剩余 1 件', exact: true }).waitFor();
   assert.equal(await page.getByLabel('销售方式', { exact: true }).inputValue(), 'complete-logistics');
-  await page.getByLabel('销售方式', { exact: true }).selectOption('inquiry');
+  await page.getByLabel('销售方式', { exact: true }).selectOption('auto');
   let resumePayload;
   await page.route('**/api/jobs/qa-paused/resume', async (route) => { resumePayload = route.request().postDataJSON(); await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }); });
   await page.getByRole('button', { name: '继续处理剩余 1 件', exact: true }).click();
   await page.getByText('任务已继续执行', { exact: true }).waitFor();
-  assert.equal(resumePayload.listingMode, 'inquiry');
+  assert.equal(resumePayload.listingMode, 'auto');
   saved.jobs = saved.jobs.filter((job) => job.id !== 'qa-paused');
   fs.writeFileSync(path.join(root, 'workspace.json'), JSON.stringify(saved));
   await page.getByLabel('采集分组', { exact: true }).selectOption(b);

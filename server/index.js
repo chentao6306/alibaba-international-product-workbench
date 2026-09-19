@@ -812,7 +812,7 @@ app.post('/api/products/process', async (request, response, next) => {
 
 app.patch('/api/settings', (request, response, next) => {
   if (Object.hasOwn(request.body, 'stockPolicy') && !['minimum-order', 'fixed'].includes(request.body.stockPolicy)) return next(Object.assign(new Error('不支持的默认库存规则'), { status: 400 }));
-  if (Object.hasOwn(request.body, 'listingMode') && !['inquiry', 'complete-logistics'].includes(request.body.listingMode)) return next(Object.assign(new Error('不支持的销售方式'), { status: 400 }));
+  if (Object.hasOwn(request.body, 'listingMode') && !['auto', 'inquiry', 'complete-logistics'].includes(request.body.listingMode)) return next(Object.assign(new Error('不支持的销售方式'), { status: 400 }));
   const allowed = ['publishPageUrl', 'publishCategory', 'publishBindings', 'defaultStock', 'priceMarkup', 'publishMode', 'stockPolicy', 'listingMode'];
   const settings = store.update((state) => {
     for (const key of allowed) if (Object.hasOwn(request.body, key)) state.settings[key] = request.body[key];
@@ -1113,7 +1113,7 @@ app.get('/api/seller/product-groups', async (request, response, next) => {
 });
 
 app.post('/api/publish', (request, response, next) => {
-  if (Object.hasOwn(request.body, 'listingMode') && !['inquiry', 'complete-logistics'].includes(request.body.listingMode)) return next(Object.assign(new Error('不支持的销售方式'), { status: 400 }));
+  if (Object.hasOwn(request.body, 'listingMode') && !['auto', 'inquiry', 'complete-logistics'].includes(request.body.listingMode)) return next(Object.assign(new Error('不支持的销售方式'), { status: 400 }));
   const state = store.read();
   if (readingSellerGroups) return next(Object.assign(new Error('正在读取国际站分组，请稍后开始上架'), { status: 409 }));
   const existing = state.jobs.find((job) => job.type === 'publish' && ['queued', 'running', 'pause_requested', 'paused'].includes(job.status));
@@ -1133,7 +1133,7 @@ app.post('/api/publish', (request, response, next) => {
   const plan = createPublishPlan(products, state.settings);
   const job = store.createJob('publish', {
     productIds: products.map((item) => item.id), mode,
-    listingMode: normalizeListingMode(request.body.listingMode || state.settings.listingMode || 'inquiry'),
+    listingMode: normalizeListingMode(request.body.listingMode || state.settings.listingMode || 'auto'),
     stockPolicy: state.settings.stockPolicy || 'minimum-order',
     defaultStock: state.settings.defaultStock,
     collectionFolderId: folderId, sellerGroup,
@@ -1188,7 +1188,7 @@ app.post('/api/jobs/:id/resume', (request, response, next) => {
   if (job.type === 'publish' && readingSellerGroups) return next(Object.assign(new Error('正在读取国际站分组，请稍后继续任务'), { status: 409 }));
   const metadata = { ...job.metadata };
   if (job.type === 'publish' && Object.hasOwn(request.body || {}, 'listingMode')) {
-    if (!['inquiry', 'complete-logistics'].includes(request.body.listingMode)) return next(Object.assign(new Error('不支持的销售方式'), { status: 400 }));
+    if (!['auto', 'inquiry', 'complete-logistics'].includes(request.body.listingMode)) return next(Object.assign(new Error('不支持的销售方式'), { status: 400 }));
     // Apply a deliberate policy change only to unfinished products. Completed
     // receipts and the current cursor remain intact; never replay successes.
     metadata.listingMode = request.body.listingMode;

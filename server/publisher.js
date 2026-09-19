@@ -1560,21 +1560,76 @@ export async function forceClearLogisticsSection(page) {
   }
 }
 
-export async function applyPostingLogistics(page, product, { listingMode } = {}) {
-  if (normalizeListingMode(listingMode) !== 'inquiry') {
+async function postingLogisticsState(page, product, { complete = false, projectSource = false } = {}) {
+  const fields = await page.evaluate(readPostingLogistics);
+  const accepted = await capturePostingLogistics(page);
+  const sourceAttributes = sourceLogisticsAttributes(product);
+  const controls = await page.evaluate(() => {
+    const visible = (node) => Boolean(node?.getClientRects().length);
+    const inspect = (selector) => {
+      const root = [...document.querySelectorAll(selector)].find(visible);
+      const input = root?.matches('input, select') ? root : root?.querySelector('input, select');
+      return { present: Boolean(root), value: input?.value || '', required: Boolean(root && (root.matches('[required], [aria-required="true"], .required')
+        || root.querySelector('[required], [aria-required="true"], .required'))) };
+    };
+    return { attributes: inspect('#logisticsProperty'), freight: inspect('#shippingTemplateId') };
+  });
+  const expectedFields = projectSource ? fields.map((field) => ({ ...field,
+    value: logisticsControlValue(product.packaging || {}, field) ?? field.value,
+  })) : fields;
+  const missing = missingLogisticsFields(expectedFields, product.packaging || {}, { complete });
+  const active = complete || expectedFields.some((field) => Number(field.value) > 0);
+  const selected = projectSource && sourceAttributes.length ? sourceAttributes : accepted.logisticsAttributes;
+  const normalized = (value) => String(value).normalize('NFKC').replace(/\s+/g, '').toLowerCase();
+  const attributesMatch = selected.some((value) => value.trim())
+    && sourceAttributes.every((value) => selected.some((item) => normalized(item) === normalized(value)));
+  if (controls.attributes.present && (active || controls.attributes.required) && !attributesMatch) {
+    missing.push({ label: '物流属性', reason: sourceAttributes.length ? 'not_committed' : 'missing_source' });
+  }
+  const freight = projectSource && String(product.freightTemplate || '').trim() ? product.freightTemplate : accepted.freightTemplate;
+  const expectedFreight = String(product.freightTemplate || '').trim();
+  const freightMatches = String(freight || '').trim() && (!expectedFreight
+    || (projectSource && expectedFreight) || normalized(expectedFreight) === normalized(freight)
+    || expectedFreight === controls.freight.value);
+  if (controls.freight.present && (active || controls.freight.required) && !freightMatches) {
+    missing.push({ label: '运费模板', reason: String(product.freightTemplate || '').trim() ? 'not_committed' : 'missing_source' });
+  }
+  return { fields, missing, required: fields.some((field) => field.required) || controls.attributes.required || controls.freight.required };
+}
+
+export async function applyPostingLogistics(page, product, options = {}) {
+  const requested = normalizeListingMode(options.listingMode);
+  let effective = requested;
+  let state;
+  let opportunity = false;
+  if (requested === 'auto' || requested === 'inquiry') {
+    const body = await page.locator('body').innerText();
+    opportunity = /(?:当前商品类型\s*[：:]\s*商机品|Current\s+Item\s+Type\s*:\s*Business\s+opportunity\s+product)/i.test(body);
+    state = await postingLogisticsState(page, product, { complete: true, projectSource: true });
+  }
+  if (requested === 'auto') {
+    effective = state.missing.length && opportunity && !state.required ? 'inquiry' : 'complete-logistics';
+    const decision = { requested, effective, missingFields: [...new Set(state.missing.map((field) => field.label))] };
+    if (JSON.stringify(options.logisticsDecision) !== JSON.stringify(decision)) {
+      options.onLogisticsDecision?.(effective === 'inquiry'
+        ? `物流资料缺少${decision.missingFields.join('、')}，按商机品发布，包装资料保留在详情中`
+        : '按完整物流资料填写并核对');
+    }
+    options.logisticsDecision = decision;
+  }
+  options.effectiveListingMode = effective;
+  if (effective !== 'inquiry') {
     const filled = await fillLogisticsFields(page, product.packaging || {});
     await fillLogisticsAttributes(page, product);
     await fillFreightTemplate(page, product);
     return filled;
   }
-  const body = await page.locator('body').innerText();
-  if (!/(?:当前商品类型\s*[：:]\s*商机品|Current\s+Item\s+Type\s*:\s*Business\s+opportunity\s+product)/i.test(body)) {
+  if (!opportunity) {
     throw Object.assign(new Error('当前发布页未确认是商机品，不能按询盘展示发布；请切换销售方式后继续'), { code: 'PUBLISH_SALES_MODE_MISMATCH' });
   }
   // Inquiry listings show factual packaging in the description. Transactional
   // transport configuration remains optional; do not invent battery/cargo data.
-  const fields = await page.evaluate(readPostingLogistics);
-  if (fields.some((field) => field.required)) {
+  if (state.required) {
     throw Object.assign(new Error('当前类目要求完整运输资料，不能使用询盘展示省略物流信息'), { code: 'PUBLISH_SALES_MODE_MISMATCH' });
   }
   await forceClearLogisticsSection(page);
@@ -1620,20 +1675,14 @@ export async function fillDeliveryFields(page, deliveryTime) {
   }
 }
 
-export async function requireLogisticsReady(page, product) {
-  const fields = await page.evaluate(readPostingLogistics);
-  const missing = missingLogisticsFields(fields, product.packaging || {});
-  const active = fields.some((field) => Number(field.value) > 0);
-  const attribute = page.locator('#logisticsProperty:visible').last();
-  // An empty value container can have zero width even though its card and Add
-  // button are visible. Test the card so this missing field is not overlooked.
-  const selected = await attribute.locator('.logistics-property-content').allTextContents();
-  if (active && await attribute.count() && !selected.some((value) => value.trim())) {
-    missing.push({ label: '物流属性', reason: sourceLogisticsAttributes(product).length ? 'not_committed' : 'missing_source' });
-  }
+export async function requireLogisticsReady(page, product, options = {}) {
+  const listingMode = normalizeListingMode(options.effectiveListingMode || options.listingMode);
+  const { missing } = await postingLogisticsState(page, product, { complete: listingMode !== 'inquiry' });
   if (!missing.length) return;
-  throw Object.assign(new Error('发布前需补充物流资料：' + missing.map((item) => item.label).join('、')), {
+  const labels = [...new Set(missing.map((item) => item.label))];
+  throw Object.assign(new Error('完整物流资料待补充：' + labels.join('、') + '；可补齐后重试，或选择自动判断/询盘展示（保留包装资料）'), {
     code: 'PUBLISH_REQUIRED_DATA_MISSING', requiredFields: missing.map((item) => item.label),
+    listingMode, diagnostics: { section: 'logistics', missing },
     missingSourceFields: missing.filter((item) => item.reason === 'missing_source').map((item) => item.label),
     unmatchedSourceFields: missing.filter((item) => item.reason === 'not_committed').map((item) => item.label),
   });
@@ -5588,6 +5637,9 @@ export class SellerPublisher {
   }
 
   async publishPreparedProduct(product, publishPageUrl, mode, publishCategory, jobId, reportStage, options) {
+    // Decisions belong to this form attempt; never leak an automatic decision
+    // into another product or change the caller's requested sales policy.
+    options = { ...options, onLogisticsDecision: reportStage };
     const resources = browserResourcePolicy();
     const connection = new AbortController();
     const stopKey = String(jobId || '');
@@ -5860,7 +5912,7 @@ export class SellerPublisher {
     }
     const unresolvedAttributes = await emptyRequiredSpecificationLabels(page, true);
     if (mode !== 'submit' && unresolvedAttributes.length) readinessWarnings.push(`草稿待补充必填属性：${unresolvedAttributes.join('、')}`);
-    try { await requireLogisticsReady(page, product); }
+    try { await requireLogisticsReady(page, product, options); }
     catch (error) {
       if (mode === 'submit') throw error;
       readinessWarnings.push(error.message);
@@ -5951,7 +6003,7 @@ export class SellerPublisher {
         logistics: async (error) => {
           const before = await capturePostingLogistics(page);
           await applyPostingLogistics(page, product, options);
-          await requireLogisticsReady(page, product);
+          await requireLogisticsReady(page, product, options);
           const after = await capturePostingLogistics(page);
           // Retry only a verified repair; do not keep submitting unchanged data.
           return JSON.stringify(before) !== JSON.stringify(after);
@@ -5972,7 +6024,9 @@ export class SellerPublisher {
       feedback: verification.feedback,
       requiredAttributes: verification.requiredAttributes || [],
       acceptedLogistics: verification.acceptedLogistics,
-      listingMode: normalizeListingMode(options.listingMode),
+      listingMode: options.effectiveListingMode || normalizeListingMode(options.listingMode),
+      requestedListingMode: normalizeListingMode(options.listingMode),
+      ...(options.logisticsDecision ? { logisticsDecision: options.logisticsDecision } : {}),
       stockProvenance: product.stockProvenance,
       fieldMapping,
       warnings: [

@@ -15,7 +15,7 @@ const EMPTY_STATE = {
     publishBindings: {},
     defaultStock: 100,
     stockPolicy: 'minimum-order',
-    listingMode: 'inquiry',
+    listingMode: 'auto',
     priceMarkup: 0,
     publishMode: 'submit'
   }

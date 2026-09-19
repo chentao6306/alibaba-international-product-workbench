@@ -9,7 +9,7 @@ import { matchesAlibabaSession } from '../electron/alibaba-identity.js';
 
 const argument = (name, fallback = '') => process.argv.find((value) => value.startsWith(`--${name}=`))?.slice(name.length + 3) || fallback;
 const desktop = argument('desktop', path.join(process.env.APPDATA, 'alibaba-international-product-workbench'));
-const output = path.resolve(argument('output', 'D:/CodexBuildTemp/customer-workflow-1.4.28'));
+const output = path.resolve(argument('output', 'D:/CodexBuildTemp/customer-workflow-1.4.29'));
 const ids = argument('ids').split(',').filter(Boolean);
 const account = argument('account');
 if (!ids.length || !account) throw new Error('Provide --ids=sourceId,... and --account=sellerId');

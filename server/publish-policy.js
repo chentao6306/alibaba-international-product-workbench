@@ -49,7 +49,7 @@ export function applyStockPolicy(product, { stockPolicy = 'preserve', defaultSto
 }
 
 export function normalizeListingMode(value) {
-  return value === 'inquiry' ? 'inquiry' : 'complete-logistics';
+  return ['auto', 'inquiry'].includes(value) ? value : 'complete-logistics';
 }
 
 export function packagingDisplayRows(packaging = {}) {

@@ -51,10 +51,10 @@ export function logisticsControlValue(packaging, field) {
   return String(Number(value.toPrecision(12)));
 }
 
-export function missingLogisticsFields(fields, packaging) {
+export function missingLogisticsFields(fields, packaging, { complete = false } = {}) {
   const labels = { weight: '包装重量', length: '包装长', width: '包装宽', height: '包装高', volume: '包装体积' };
   const active = fields.some((field) => Number(field.value) > 0);
-  return fields.filter((field) => (field.required || active) && !(Number(field.value) > 0))
+  return fields.filter((field) => (complete || field.required || active) && !(Number(field.value) > 0))
     .map((field) => ({ field: field.key, label: labels[field.key], reason: logisticsControlValue(packaging, field) == null ? 'missing_source' : 'not_committed' }));
 }
 
