@@ -6,6 +6,8 @@ import { ORIGIN_COUNTRIES, originCountry, productOrigin } from '../server/origin
 import { recordProductMutation, syncProductModel } from '../server/product-model.js';
 import { extractAlibabaAttributes, packagingFromAttributes, readAlibabaAttributeRows } from '../server/category-attributes.js';
 import { fillOriginCountry, fillLogisticsFields, preparePublishProduct } from '../server/publisher.js';
+import { configurePostingInteractions } from '../server/posting-interaction.js';
+import { publishEnvironmentBlockCode } from '../server/publish-recovery.js';
 
 test('origin edits synchronize both representations and invalidate old option IDs without changing source or sales region', () => {
   const product = syncProductModel({ title: 'Paddle', origin: 'China', attributes: [
@@ -36,6 +38,124 @@ test('origin edits synchronize both representations and invalidate old option ID
   assert.equal(product.sourceIntegrity.valid, true);
 });
 
+test('origin retries when Alibaba replaces the field before the first selection is committed', { skip: !findChromium() }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<div class="sell-catProp-item"><label>原产地</label><span class="next-select-values"></span><input id="origin" role="combobox"></div>
+      <div class="next-select-popup" style="display:none"><div role="listbox"></div></div>
+      <script>(() => {
+        const popup = document.querySelector('.next-select-popup');
+        const list = popup.querySelector('[role=listbox]');
+        window.selections = 0;
+        const mount = () => {
+          const trigger = document.querySelector('#origin');
+          trigger.onclick = () => { popup.style.display = 'block'; list.innerHTML = '<div role="option">日本</div>'; };
+          list.onclick = () => {
+            window.selections += 1;
+            popup.style.display = 'none';
+            const replacement = trigger.cloneNode(true);
+            replacement.removeAttribute('data-codex-field');
+            trigger.remove();
+            setTimeout(() => {
+              document.querySelector('.sell-catProp-item').appendChild(replacement);
+              if (window.selections > 1) document.querySelector('.next-select-values').innerHTML = '<em>日本</em>';
+              mount();
+            }, 150);
+          };
+        };
+        mount();
+      })();</script>`);
+    assert.equal(await fillOriginCountry(page, 'Japan'), true);
+    assert.equal(await page.locator('.next-select-values').innerText(), '日本');
+    assert.equal(await page.evaluate(() => window.selections), 2);
+    assert.equal(await fillOriginCountry(page, 'Japan'), true);
+    assert.equal(await page.evaluate(() => window.selections), 2);
+  } finally { await browser.close(); }
+});
+
+test('origin recovers a timed-out open, waits for asynchronously mounted options and preserves other fields', { skip: !findChromium() }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    page.setDefaultTimeout(1000);
+    await page.setContent(`<input id="title" value="Saved charger"><div class="sell-catProp-item"><label>产地</label>
+      <span class="next-select-values"></span><input readonly role="combobox"></div>
+      <div class="sell-catProp-item"><label>省份</label><input value=""></div>
+      <div class="next-select-popup" hidden><div role="listbox"></div></div><script>(() => {
+        window.opens = 0; window.selections = 0;
+        document.querySelector('[role=combobox]').onclick = () => {
+          if (++window.opens === 1) return;
+          const popup = document.querySelector('.next-select-popup'); popup.hidden = false;
+          setTimeout(() => {
+            popup.querySelector('[role=listbox]').innerHTML = '<div role="option">中国</div>';
+            popup.querySelector('[role=option]').onclick = () => {
+              window.selections++; document.querySelector('.next-select-values').textContent = 'China'; popup.hidden = true;
+            };
+          }, 250);
+        };
+      })();</script>`);
+    assert.equal(await fillOriginCountry(page, 'China'), true);
+    assert.deepEqual(await page.evaluate(() => [window.opens, window.selections]), [2, 1]);
+    assert.equal(await page.locator('#title').inputValue(), 'Saved charger');
+    assert.equal(await page.locator('.sell-catProp-item').last().locator('input').inputValue(), '');
+  } finally { await browser.close(); }
+});
+
+test('origin reports bounded control diagnostics when its dropdown never opens', { skip: !findChromium() }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<div class="sell-catProp-item"><label>产地</label><input readonly role="combobox" onclick="window.opens++"></div><script>window.opens=0</script>');
+    await assert.rejects(fillOriginCountry(page, 'China'), (error) => {
+      assert.equal(error.code, 'PUBLISH_FIELD_NOT_READY');
+      assert.equal(publishEnvironmentBlockCode(error), 'PUBLISH_FIELD_NOT_READY');
+      assert.match(error.message, /产地.*3 次/);
+      assert.equal(error.diagnostics.field, '产地');
+      assert.equal(error.diagnostics.step, 'open-menu');
+      assert.equal(error.diagnostics.attempts, 3);
+      assert.equal(error.diagnostics.control.role, 'combobox');
+      assert.doesNotMatch(JSON.stringify(error.diagnostics), /Call log:|data-codex-field|country=/);
+      return true;
+    });
+    assert.equal(await page.evaluate(() => window.opens), 3);
+  } finally { await browser.close(); }
+});
+
+test('origin propagates cancellation and page closure without additional selections', { skip: !findChromium() }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    const controller = new AbortController();
+    configurePostingInteractions(page, { signal: controller.signal });
+    controller.abort();
+    await page.setContent('<div class="sell-catProp-item"><label>产地</label><input readonly role="combobox" onclick="window.opens++"></div><script>window.opens=0</script>');
+    await assert.rejects(fillOriginCountry(page, 'China'), { code: 'PUBLISH_PAUSED' });
+    assert.equal(await page.evaluate(() => window.opens), 0);
+    await page.close();
+    await assert.rejects(fillOriginCountry(page, 'China'), (error) => {
+      assert.match(error.message, /closed/);
+      assert.notEqual(error.code, 'PUBLISH_FIELD_NOT_READY');
+      return true;
+    });
+  } finally { await browser.close(); }
+});
+
+test('origin recovery preserves platform policy review without clicking its confirmation', { skip: !findChromium() }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<div class="sell-catProp-item"><label>产地</label><input readonly role="combobox"></div>
+      <div class="next-dialog" role="dialog" style="position:fixed;inset:0;background:white;z-index:100">
+        疑似涉及禁限售，会造成风控违规问题，请根据商品发布规则修改后提交发布
+        <button onclick="window.confirmations++">继续提交</button>
+      </div><script>window.confirmations=0</script>`);
+    await assert.rejects(fillOriginCountry(page, 'China'), { code: 'PUBLISH_POLICY_REVIEW_REQUIRED' });
+    assert.equal(await page.evaluate(() => window.confirmations), 0);
+    assert.equal(await page.locator('[role=dialog]').isVisible(), true);
+  } finally { await browser.close(); }
+});
+
 test('preparing old products reconciles origin without inventing an absent or conflicting country', () => {
   const product = { title: 'Paddle', origin: 'Japan', attributes: [{ name: '原产地', value: 'China', valueIds: { China: 'CN' } }] };
   const prepared = preparePublishProduct(product);
@@ -58,6 +178,21 @@ test('collects package units in labels, individual dimensions and structured pac
   assert.deepEqual(packagingFromAttributes(extractAlibabaAttributes({ nodeMap: { module_packaging: { privateData: {
     singleGrossWeight: 750, singleGrossWeightUnit: 'g', singlePackageSize: '30x20x10', singlePackageSizeUnit: 'cm',
   } } } })), { weight: '0.75', length: '30', width: '20', height: '10' });
+});
+
+test('normalizes explicit mainland provinces for publishing while preserving collected evidence and unknown countries', () => {
+  for (const value of ['Fujian', '福建省', 'Guangdong Province', '浙江', 'Shaanxi', 'Shanxi', 'Inner Mongolia']) {
+    assert.equal(originCountry(value), 'China');
+    const product = { origin: '', attributes: [{ name: 'Place of Origin', value }] };
+    const prepared = preparePublishProduct(product);
+    assert.equal(prepared.origin, 'China');
+    assert.equal(prepared.attributes[0].value, 'China');
+    assert.equal(product.attributes[0].value, value);
+  }
+  for (const value of ['Unknown', 'Guangdong factory', 'China, United States', '']) assert.equal(originCountry(value), '');
+  assert.equal(originCountry('Hong Kong'), 'Hong Kong S.A.R.');
+  assert.equal(originCountry('Taiwan, China'), 'Taiwan, China');
+  assert.equal(originCountry('Japan'), 'Japan');
 });
 
 test('collected definition-list origin and packaging survive editing and fill native publishing controls', { skip: !findChromium() }, async () => {

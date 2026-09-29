@@ -45,6 +45,7 @@ try {
   await page.getByLabel('采集分组', { exact: true }).selectOption('qa');
   await page.locator('.sidebar nav button').filter({ hasText: '商品工作台' }).click();
   await page.getByTitle('编辑完整资料').first().click();
+  await page.getByRole('tablist', { name: '商品编辑页签' }).waitFor();
   assert.equal(await page.getByRole('tablist', { name: '商品编辑页签' }).getByRole('tab').count(), 9);
   for (const width of [1500, 430]) {
     await page.setViewportSize({ width, height: 1050 });
@@ -58,6 +59,22 @@ try {
   }
   await page.setViewportSize({ width: 1500, height: 1050 });
   await page.getByRole('tab', { name: '基础信息', exact: true }).click();
+  await page.getByRole('button', { name: '重选类目', exact: true }).click();
+  await page.getByRole('listbox', { name: '第 1 级类目' }).waitFor();
+  assert.equal(await page.getByRole('listbox', { name: '第 1 级类目' }).getByRole('option').count(), 50);
+  for (const name of ['Food & Beverage', 'Fruit & Vegetable Products', 'Fruit Products', 'Dried Fruit']) await page.getByRole('option', { name, exact: true }).click();
+  assert.equal(await page.locator('.category-picker-column').count(), 4);
+  assert.ok((await page.locator('.category-picker-preview').innerText()).includes('ID 229'));
+  await page.locator('.category-picker').screenshot({ path: path.join(root, 'category-four-levels.png') });
+  await page.getByRole('option', { name: 'Agriculture', exact: true }).click();
+  await page.getByRole('option', { name: 'Plant Seeds & Bulbs', exact: true }).click();
+  assert.equal(await page.getByRole('button', { name: '确认选择' }).isDisabled(), true);
+  assert.ok((await page.locator('.category-picker-columns').innerText()).includes('平台暂未提供'));
+  await page.getByRole('option', { name: 'Other Agriculture Products', exact: true }).click();
+  await page.locator('.category-picker').screenshot({ path: path.join(root, 'category-official-directory.png') });
+  assert.equal(store.read().products[0].categoryId, target.categoryId);
+  await page.getByRole('button', { name: '取消选择' }).click();
+  assert.ok((await page.locator('.pe-category-path').innerText()).includes(target.categoryId));
   await page.getByLabel('商品名称', { exact: true }).fill('Unsaved propeller title');
   await page.getByRole('button', { name: '引用类目与属性', exact: true }).click();
   await page.getByLabel('选择引用商品', { exact: true }).selectOption('reference');
@@ -92,7 +109,33 @@ try {
   await page.getByRole('button', { name: '返回', exact: true }).click();
   await page.getByRole('button', { name: '放弃修改并返回', exact: true }).click();
   assert.equal(store.read().products[0].title, saved.title);
+  // Full editor -> catalog search -> confirm -> save, then batch -> preview -> save.
+  await page.getByTitle('编辑完整资料').first().click();
+  await page.getByRole('button', { name: '重选类目', exact: true }).click();
+  await page.getByRole('tab', { name: '搜索类目', exact: true }).click();
+  await page.getByLabel('搜索类目名称或 ID').fill('135');
+  await page.getByRole('listbox', { name: '类目搜索结果' }).getByRole('option').first().click();
+  await page.getByRole('button', { name: '确认选择', exact: true }).click();
+  assert.equal(store.read().products[0].categoryId, target.categoryId, 'category confirmation is still an unsaved edit');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  await page.getByRole('dialog', { name: '编辑产品', exact: true }).waitFor({ state: 'hidden' });
+  assert.equal(store.read().products[0].categoryId, '135');
+  await page.getByRole('button', { name: '批量修改 2', exact: true }).click();
+  await page.locator('.batch-tabs').getByRole('button', { name: '产品类目', exact: true }).click();
+  await page.getByRole('tab', { name: '搜索类目', exact: true }).click();
+  await page.getByLabel('搜索类目名称或 ID').fill('201774004');
+  await page.getByRole('listbox', { name: '类目搜索结果' }).getByRole('option').click();
+  await page.getByRole('button', { name: '确认选择', exact: true }).click();
+  assert.ok((await page.locator('.batch-preview').innerText()).includes('Plush Keychains Toys'));
+  assert.equal(store.read().products[0].categoryId, '135');
+  await page.locator('.category-picker').screenshot({ path: path.join(root, 'category-batch.png') });
+  await page.setViewportSize({ width: 430, height: 1050 });
+  assert.ok(await page.locator('.category-picker').evaluate((node) => node.scrollWidth <= node.clientWidth));
+  await page.getByRole('button', { name: '应用到 2 件商品', exact: true }).click();
+  await page.locator('.batch-drawer').waitFor({ state: 'hidden' });
+  assert.ok(store.read().products.every((product) => product.categoryId === '201774004'));
+  assert.deepEqual(store.read().products[0].skus, saved.skus);
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ ok: true, screenshots: root, verified: ['nine-tabs-desktop-mobile', 'unsaved-reference-preview', 'atomic-save-and-recovery', 'commercial-data-preserved', 'delivery-tiers', 'cancel-discards'] }));
+  console.log(JSON.stringify({ ok: true, screenshots: root, verified: ['nine-tabs-desktop-mobile', 'unsaved-reference-preview', 'atomic-save-and-recovery', 'commercial-data-preserved', 'delivery-tiers', 'cancel-discards', 'official-catalog-and-cancel', 'single-short-category-save', 'batch-category-preview-and-save'] }));
 } catch (error) { await page.screenshot({ path: path.join(root, 'failure.png'), fullPage: true }); console.error(JSON.stringify({ root, errors })); throw error; }
 finally { await browser.close(); await server.shutdownServer(); }

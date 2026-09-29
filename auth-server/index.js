@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { clientAllowed, licenseState, pagination, announcementInput, licenseFilters } from './policy.js';
 import { configureHttpSecurity } from './http-security.js';
-import { createActivationCredential, validActivation, publicLicense, clientSessionAllowed, clientSession, tokenCodec, requireCredentialTransport, offlineGraceMinutes } from './security.js';
+import { createActivationCredential, credentialResetRevokesSessions, validActivation, publicLicense, clientSessionAllowed, clientSession, tokenCodec, requireCredentialTransport, offlineGraceMinutes } from './security.js';
 import { promisify } from 'node:util';
 
 const app = express();
@@ -139,14 +139,15 @@ app.patch('/api/admin/licenses/:id', requireAdmin, async (request, response) => 
     const existing = (await client.query('SELECT * FROM licenses WHERE id=$1 FOR UPDATE', [request.params.id])).rows[0];
     if (!existing) throw fail('授权账号不存在', 404);
     if (existing.deleted_at) throw fail('账号已删除，不能修改原授权', 409);
-    const values = [existing.id]; let query; let credential;
+    const values = [existing.id]; let query; let credential; let sessionsRevoked;
     if (action === 'connection') {
       values.push(offlineGraceMinutes(request.body.offlineGraceMinutes));
       query = 'UPDATE licenses SET offline_grace_minutes=$2,updated_at=now() WHERE id=$1 RETURNING *';
     } else if (action === 'credential') {
+      sessionsRevoked = credentialResetRevokesSessions(existing, request.body.revokeSessions);
       credential = createActivationCredential();
-      values.push(credential.credentialHash);
-      query = 'UPDATE licenses SET credential_required=true,credential_hash=$2,credential_version=credential_version+1,updated_at=now() WHERE id=$1 RETURNING *';
+      values.push(credential.credentialHash, sessionsRevoked ? 1 : 0);
+      query = 'UPDATE licenses SET credential_required=true,credential_hash=$2,credential_version=credential_version+$3,updated_at=now() WHERE id=$1 RETURNING *';
     } else if (action === 'devices') {
       if (typeof request.body.allowMultiDevice !== 'boolean') throw fail('多端登录开关无效');
       query = `UPDATE licenses SET allow_multi_device=$2,active_device_id=CASE WHEN $2 THEN NULL ELSE (SELECT device_id FROM client_logins WHERE alibaba_account=licenses.alibaba_account ORDER BY last_seen_at DESC,id LIMIT 1) END,updated_at=now() WHERE id=$1 RETURNING *`;
@@ -163,8 +164,8 @@ app.patch('/api/admin/licenses/:id', requireAdmin, async (request, response) => 
       values.push({ pause: 'paused', resume: 'active', revoke: 'revoked' }[action]);
     }
     const updated = (await client.query(query, values)).rows[0];
-    await event(client, existing.id, action, request.admin.username, { days: request.body.days || null, allowMultiDevice: updated.allow_multi_device, previousExpiresAt: existing.expires_at, expiresAt: updated.expires_at, previousOfflineGraceMinutes: existing.offline_grace_minutes, offlineGraceMinutes: updated.offline_grace_minutes });
-    return { ...publicLicense(updated), ...(credential ? { activationCode: credential.activationCode } : {}) };
+    await event(client, existing.id, action, request.admin.username, { days: request.body.days || null, allowMultiDevice: updated.allow_multi_device, previousExpiresAt: existing.expires_at, expiresAt: updated.expires_at, previousOfflineGraceMinutes: existing.offline_grace_minutes, offlineGraceMinutes: updated.offline_grace_minutes, ...(credential ? { sessionsRevoked } : {}) });
+    return { ...publicLicense(updated), ...(credential ? { activationCode: credential.activationCode, sessionsRevoked } : {}) };
   }));
 });
 app.delete('/api/admin/licenses/:id', requireAdmin, async (request, response) => {

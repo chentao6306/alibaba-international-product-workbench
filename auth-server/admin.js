@@ -14,10 +14,13 @@ function showCredential(item) {
   if (!item.activationCode) return;
   $('credentialAccount').textContent = item.alibaba_account;
   $('credentialValue').value = item.activationCode;
+  $('credentialEffect').textContent = item.sessionsRevoked === false
+    ? '旧授权码不能再用于登录；已登录设备可继续使用。退出软件或会话过期后，请使用新授权码重新登录。'
+    : item.sessionsRevoked === true ? '旧授权码和原有会话已失效，已登录设备需要使用新授权码重新登录。' : '';
   $('credentialMessage').textContent = '';
   $('credentialDialog').showModal();
 }
-$('credentialDialog').addEventListener('close', () => { $('credentialValue').value = ''; $('credentialAccount').textContent = ''; });
+$('credentialDialog').addEventListener('close', () => { $('credentialValue').value = ''; $('credentialAccount').textContent = ''; $('credentialEffect').textContent = ''; });
 $('copyCredential').onclick = async () => {
   try { await navigator.clipboard.writeText($('credentialValue').value); $('credentialMessage').textContent = '已复制'; }
   catch { $('credentialValue').select(); $('credentialMessage').textContent = '请复制选中的授权码'; }
@@ -91,13 +94,24 @@ function openAction(item, type, allowMultiDevice) {
     $('actionHeading').textContent = '授权连接中断策略';
     $('actionText').textContent = `${item.alibaba_account}：在线时自动续期校验，断线后从最后一次成功校验开始计时。超过保持时间则保留界面和进度，暂停后续任务。授权到期仍失效，在线停用立即生效。天数设置需要客户端 1.4.9 或更新版本，旧版最多保持 1 小时。`;
   }
-  if (type === 'credential') $('actionText').textContent = `${item.alibaba_account}：现有会话会失效。请先确认客户已安装 1.4.6 或更新版本，并将生成的新授权码交给客户。启用后不再允许旧版无授权码登录。`;
+  $('revokeSessionsField').hidden = type !== 'credential';
+  $('revokeSessions').disabled = type !== 'credential' || !item.credential_required;
+  $('revokeSessions').checked = !item.credential_required || item.allow_multi_device === false;
+  if (type === 'credential') updateCredentialEffect();
   $('extendField').hidden = !adjusting; $('extendDays').disabled = !adjusting;
   $('daysLabel').textContent = type === 'reduce' ? '减少天数' : '延长天数';
   $('extendDays').value = 30; $('expiryPreview').hidden = !adjusting;
   $('confirmAction').classList.toggle('danger', ['delete', 'deleteNotice', 'revoke'].includes(type));
   updateExpiryPreview(); $('actionError').textContent = ''; $('actionDialog').showModal();
 }
+function updateCredentialEffect() {
+  if (action?.type !== 'credential') return;
+  const { item } = action;
+  const effect = $('revokeSessions').checked ? '已登录设备将在下一次授权检查时退出，需要使用新授权码重新登录。'
+    : '已登录设备继续使用，正在运行的任务不会因为本次换码中断；退出软件或会话过期后，需要填写新授权码。';
+  $('actionText').textContent = `${item.alibaba_account}：将生成新授权码，旧码不能再用于登录。${effect}${item.allow_multi_device === false ? ' 当前仅允许单设备，新电脑登录后仍会替换旧电脑。' : ''}${!item.credential_required ? ' 首次启用授权码必须使旧会话失效。' : ''}`;
+}
+$('revokeSessions').onchange = updateCredentialEffect;
 function updateExpiryPreview() {
   if (!action || !['extend', 'reduce'].includes(action.type)) return;
   const days = Number($('extendDays').value);
@@ -112,7 +126,7 @@ $('actionForm').onsubmit = async (event) => {
   try {
     const removing = ['delete', 'deleteNotice'].includes(action.type);
     const announcement = action.type === 'deleteNotice';
-    const updated = await api(`/api/admin/${announcement ? 'announcements' : 'licenses'}/${action.item.id}`, { method: removing ? 'DELETE' : 'PATCH', ...(removing ? {} : { body: JSON.stringify({ action: action.type, days: Number($('extendDays').value), allowMultiDevice: action.allowMultiDevice, offlineGraceMinutes: Number($('offlineGraceMinutes').value) }) }) });
+    const updated = await api(`/api/admin/${announcement ? 'announcements' : 'licenses'}/${action.item.id}`, { method: removing ? 'DELETE' : 'PATCH', ...(removing ? {} : { body: JSON.stringify({ action: action.type, days: Number($('extendDays').value), allowMultiDevice: action.allowMultiDevice, offlineGraceMinutes: Number($('offlineGraceMinutes').value), ...(action.type === 'credential' ? { revokeSessions: $('revokeSessions').checked } : {}) }) }) });
     $('actionDialog').close();
     showCredential(updated);
     if (announcement) await loadNotices(); else await Promise.all([loadAccounts(), stats()]);

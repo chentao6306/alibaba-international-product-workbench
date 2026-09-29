@@ -1,3 +1,16 @@
+import { clickPostingControl } from './posting-interaction.js';
+
+// These exact checklist phrases describe eligibility for a transactional
+// listing. They are not a rejection unless the page renders them as an error.
+export function isLogisticsReadinessHint(text) {
+  const normalized = String(text || '').normalize('NFKC').replace(/[\s:：;；,，。()（）]/g, '');
+  if (!normalized) return false;
+  const remainder = normalized
+    .replace(/填写完整物流信息后选择物流提供方式(?:即运费模[版板]的选择)?/g, '')
+    .replace(/(?:最小起订量的发货期|重量|体积|物流属性)(?:已填写|未填写)/g, '');
+  return remainder === '';
+}
+
 // Serialized into the posting page. Product properties, sample packaging and
 // commercial text are separate domains, even when their labels contain weight.
 export function readPostingLogistics() {
@@ -105,7 +118,7 @@ export async function fillLogisticsAttributes(page, product) {
   if (await committed()) return true;
   const add = page.locator('#logisticsProperty button:visible').last();
   if (!await add.count()) return false;
-  await add.click({ timeout: 4000 });
+  await clickPostingControl(page, add);
   const dialog = page.locator('.product-attr-dialog:visible').last();
   try {
     const tags = dialog.locator('.tagWrapper .tag');
@@ -115,9 +128,9 @@ export async function fillLogisticsAttributes(page, product) {
     if (indices.some((index) => index < 0)) return false;
     for (let index = 0; index < options.length; index++) {
       const selected = /\bisSelected\b/.test(await tags.nth(index).getAttribute('class') || '');
-      if (selected !== indices.includes(index)) await tags.nth(index).click({ timeout: 3000 });
+      if (selected !== indices.includes(index)) await clickPostingControl(page, tags.nth(index), { timeout: 3000 });
     }
-    await dialog.getByRole('button', { name: /^(?:确认|Confirm|OK)$/i }).click({ timeout: 4000 });
+    await clickPostingControl(page, dialog.getByRole('button', { name: /^(?:确认|Confirm|OK)$/i }));
     const deadline = Date.now() + 3000;
     do { if (await committed()) return true; await page.waitForTimeout(150); } while (Date.now() < deadline);
     return false;

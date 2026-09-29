@@ -1,6 +1,6 @@
-# 授权服务器 · 1.4.17 Stable 配套服务
+# 授权服务器 · 1.4.52 客户端配套服务
 
-这是独立运行的 Linux/Express/PostgreSQL 服务。完整源码在本目录，依赖使用根目录 `package.json` 和 `package-lock.json`。`index.js` 是生产入口；`dev.js` 只用于本机 JSON 数据预览，不用于正式部署。客户端当前版本 1.4.17，服务健康接口的协议版本保留 1.4.9。
+这是独立运行的 Linux/Express/PostgreSQL 服务。完整源码在本目录，依赖使用根目录 `package.json` 和 `package-lock.json`。`index.js` 是生产入口；`dev.js` 只用于本机 JSON 数据预览，不用于正式部署。客户端当前版本 1.4.52，服务健康接口的协议版本保留 1.4.9。
 
 ## 配置与安全边界
 
@@ -26,7 +26,7 @@
 sudo apt-get update
 sudo apt-get install -y git curl ca-certificates xz-utils postgresql postgresql-client nginx
 sudo useradd --system --home /opt/kua-yipu-auth --shell /usr/sbin/nologin kua-yipu
-sudo git clone --branch Stable git@github.com:chentao6306/alibaba-international-product-workbench.git /opt/kua-yipu-auth
+sudo git clone --branch main git@github.com:chentao6306/alibaba-international-product-workbench.git /opt/kua-yipu-auth
 cd /opt/kua-yipu-auth
 sudo bash auth-server/deploy/prepare-runtime.sh
 sudo env PATH=/opt/kua-yipu-runtime/node-v22.23.2-linux-x64/bin:$PATH npm ci --omit=dev
@@ -87,7 +87,7 @@ curl --fail http://127.0.0.1:8790/health
 - `enable-compatible-https.sh`：更新本项目现有布局的 Nginx 兼容配置。
 - `harden-host.sh`、`enable-security-updates.sh`：主机与更新策略；先审阅，避免影响 SSH 运维访问。
 
-升级服务应先将 Stable 源码放在独立暂存目录，验证后以 root 运行该目录内的 `auth-server/deploy/update-service.sh`。不要从旧数据备份直接覆盖整个系统，不要只同步 `index.js` 而遗漏模块、SQL 和后台资源。
+升级服务应先将当前版本源码放在独立暂存目录，验证后以 root 运行该目录内的 `auth-server/deploy/update-service.sh`。不要从旧数据备份直接覆盖整个系统，不要只同步 `index.js` 而遗漏模块、SQL 和后台资源。
 
 ## 日常命令
 
@@ -115,15 +115,25 @@ sudo pg_restore --list /var/backups/kua-yipu/database.dump
 从仓库根目录构建，使用根目录锁文件：
 
 ```bash
-docker build -f auth-server/Dockerfile -t kua-yipu-auth:1.4.17 .
+docker build -f auth-server/Dockerfile -t kua-yipu-auth:1.4.52 .
 docker run -d --name kua-yipu-auth --restart unless-stopped \
   --env-file /private/auth.env -e BIND_HOST=0.0.0.0 \
-  -p 127.0.0.1:8790:8790 kua-yipu-auth:1.4.17
+  -p 127.0.0.1:8790:8790 kua-yipu-auth:1.4.52
 ```
 
 容器内 `BIND_HOST=0.0.0.0`；数据库地址使用容器可达地址，不是容器自身 `127.0.0.1`。发布到宿主机端口仅绑定回环，Nginx 再代理 HTTPS。先单独执行结构迁移和管理员初始化，镜像不会自动创建数据库。
 
 ## 本机预览与测试
+
+### 重置授权码与多端登录
+
+允许多端登录的账号，管理页面重置授权码时默认不勾选“同时退出已登录设备”。新授权码用于后续登录，旧码立即不能再用于登录；已验证的在线会话保持有效，可继续心跳续期。退出软件、会话到期后重新登录需要新授权码，客户端本地保存的旧码不会自动更新。
+
+勾选“同时退出已登录设备”会撤销所有现有会话。首次启用授权码强制撤销未验证旧会话；单设备账号默认勾选，即使取消勾选，新电脑登录仍会替换旧电脑。停用、注销、删除和授权过期继续阻止使用。
+
+管理 API 的 `credential` 操作接受布尔值 `revokeSessions`。显式传入 `false` 才保留已验证会话；省略时保持旧 API 的撤销行为，避免旧管理页面的确认含义改变。结果及审计事件中的 `sessionsRevoked` 记录实际行为，不记录授权码。实现不需要数据库迁移，也不能恢复修复前已被撤销的会话。
+
+此行为属于独立授权服务，必须部署服务端并刷新管理页面后生效，仅更新桌面安装包无效。已被旧服务退出的电脑，使用最新授权码重新登录一次即可；给新电脑登录可复用现有有效授权码，无需每次重置。
 
 在开发终端设置自己的临时管理员密码和随机签名密钥，再启动：
 

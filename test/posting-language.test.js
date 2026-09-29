@@ -71,6 +71,58 @@ test('Chinese forms leave product language values, hidden menus and existing con
   } finally { await browser.close(); }
 });
 
+test('reselects the real Chinese menu option when the header is Chinese but the form is English', browserTest, async () => {
+  const browser = await chromium.launch({ executablePath, headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(fixture(false, `document.querySelector('h2').textContent='基本信息';
+      document.querySelector('label').firstChild.textContent='商品名称';document.querySelector('#menu').hidden=true;`)
+      .replace('>English</button></header>', '>简体中文</button></header>'));
+    assert.deepEqual(await ensureSimplifiedChinese(page, { timeoutMs: 5000 }), { switched: true });
+    assert.equal(await page.evaluate(() => window.selections), 1);
+    assert.equal(await page.locator('h2').innerText(), '基本信息');
+  } finally { await browser.close(); }
+});
+
+test('reloads a stale translated header once before product entry while preserving the category URL', browserTest, async () => {
+  const browser = await chromium.launch({ executablePath, headless: true });
+  try {
+    const page = await browser.newPage();
+    let navigations = 0;
+    await page.route('https://post.alibaba.com/**', route => route.fulfill({ contentType: 'text/html; charset=utf-8',
+      body: ++navigations === 1 ? fixture(false, '').replace('>English</button></header>', '>简体中文</button></header>') : fixture(true) }));
+    await page.goto(postingUrl);
+    assert.deepEqual(await ensureSimplifiedChinese(page, { timeoutMs: 9000, reloadOnMismatch: true }), { switched: true });
+    assert.equal(navigations, 2);
+    assert.equal(page.url(), postingUrl);
+    assert.equal(await page.locator('h2').innerText(), '基本信息');
+  } finally { await browser.close(); }
+});
+
+test('selects Alibaba native language links inside the header without treating them as the current language', browserTest, async () => {
+  const browser = await chromium.launch({ executablePath, headless: true });
+  try {
+    const page = await browser.newPage();
+    for (const label of ['English', '简体中文']) {
+      await page.setContent(`<header style="display:flex;justify-content:flex-end;height:60px">
+        <a class="ui-header-lan-display" onmouseover="document.querySelector('ul').hidden=false">
+          <span class="ui-header-lan-display-text">${label}</span></a>
+        <ul hidden style="position:absolute;right:8px;top:40px">
+          <li><a data-role="item" rel="en_US" href="javascript:void(0)">English</a></li>
+          <li><a data-role="item" rel="zh_CN" href="javascript:void(0)" onclick="
+            window.selections=(window.selections||0)+1;
+            document.querySelector('.ui-header-lan-display-text').textContent='简体中文';
+            document.querySelector('h2').textContent='基本信息';">简体中文</a></li>
+        </ul></header><h2>Basic information</h2>`);
+      assert.deepEqual(await ensureSimplifiedChinese(page, { timeoutMs: 5000 }), { switched: true });
+      assert.equal(await page.evaluate(() => window.selections), 1);
+      assert.equal(await page.locator('h2').innerText(), '基本信息');
+      assert.deepEqual(await ensureSimplifiedChinese(page, { timeoutMs: 1000 }), { switched: false });
+      await page.evaluate(() => { window.selections = 0; });
+    }
+  } finally { await browser.close(); }
+});
+
 test('failed switches pause explicitly instead of accepting the menu text as a translated page', { ...browserTest, timeout: 45000 }, async () => {
   const browser = await chromium.launch({ executablePath, headless: true });
   try {

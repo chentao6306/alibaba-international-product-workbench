@@ -1,5 +1,6 @@
 import { requiredAttributeKey } from './publish-reference.js';
 import { browserResourcePolicy } from './browser-resource-policy.js';
+import { clickPostingControl } from './posting-interaction.js';
 
 const valueKey = (value) => String(value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
 const nameKey = (name) => /^(?:socket standard|socket type|plug type|output plug|connector type|connector|插座标准|插头类型|输出插头|连接器类型)$/i.test(String(name || '').trim())
@@ -96,12 +97,12 @@ export async function fillReferencedSkuRows(page, product, fill, onProgress = ()
       // Disabled reference rows still retain their code and quantity. Enable
       // briefly when needed so Alibaba allows the input, then restore state.
       if (sku) {
-        if (await toggle.count() && await toggle.getAttribute('aria-checked') !== 'true') await toggle.click();
+        if (await toggle.count() && await toggle.getAttribute('aria-checked') !== 'true') await clickPostingControl(page, toggle);
         await fill(row.locator('[data-name="skuOuterId"] input'), String(sku.code || sku.skuCode || ''), `第 ${index + 1} 行商品编码`);
         await fill(row.locator('[data-name="skuStock"] input').first(), sku.stock ?? '', `第 ${index + 1} 行可售数量`);
       }
       if (await toggle.count()) {
-        if ((await toggle.getAttribute('aria-checked') === 'true') !== enabled) await toggle.click();
+        if ((await toggle.getAttribute('aria-checked') === 'true') !== enabled) await clickPostingControl(page, toggle);
         if ((await toggle.getAttribute('aria-checked') === 'true') !== enabled) throw new Error(`第 ${index + 1} 行 SKU 启用状态未保存`);
       } else if (!enabled) throw new Error(`第 ${index + 1} 行 SKU 无法停用`);
       completed.add(index);

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { clientAllowed, licenseState, pagination, announcementInput, licenseFilters, matchesLicenseFilters } from './policy.js';
 import { configureHttpSecurity } from './http-security.js';
-import { createActivationCredential, validActivation, publicLicense, clientSessionAllowed, clientSession, tokenCodec, requireCredentialTransport, offlineGraceMinutes } from './security.js';
+import { createActivationCredential, credentialResetRevokesSessions, validActivation, publicLicense, clientSessionAllowed, clientSession, tokenCodec, requireCredentialTransport, offlineGraceMinutes } from './security.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -129,9 +129,12 @@ app.patch('/api/admin/licenses/:id', requireAdmin, (request, response) => {
   const action = String(request.body?.action || '');
   const previousExpiresAt = license.expires_at;
   const previousOfflineGraceMinutes = offlineGraceMinutes(license.offline_grace_minutes);
-  let credential;
+  let credential; let sessionsRevoked;
   if (action === 'connection') license.offline_grace_minutes = offlineGraceMinutes(request.body.offlineGraceMinutes);
-  else if (action === 'credential') { credential = createActivationCredential(); license.credential_required = true; license.credential_hash = credential.credentialHash; }
+  else if (action === 'credential') {
+    sessionsRevoked = credentialResetRevokesSessions(license, request.body.revokeSessions);
+    credential = createActivationCredential(); license.credential_required = true; license.credential_hash = credential.credentialHash;
+  }
   else if (action === 'pause') license.status = 'paused';
   else if (action === 'resume') { if (new Date(license.expires_at).getTime() <= Date.now()) return response.status(409).json({ error: '授权已过期，请使用延长功能' }); license.status = 'active'; }
   else if (action === 'revoke') license.status = 'revoked';
@@ -143,8 +146,8 @@ app.patch('/api/admin/licenses/:id', requireAdmin, (request, response) => {
     license.active_device_id = license.allow_multi_device ? null : state.logins.filter((item) => item.alibaba_account === license.alibaba_account).sort((a, b) => String(b.last_seen_at).localeCompare(String(a.last_seen_at)))[0]?.device_id || null;
   }
   else return response.status(400).json({ error: '不支持的授权操作' });
-  if (['credential', 'pause', 'revoke'].includes(action)) license.credential_version = Number(license.credential_version || 0) + 1;
-  license.updated_at = timestamp(); addEvent(state, license.id, action, request.admin.username, { days: request.body?.days || null, previousExpiresAt, expiresAt: license.expires_at, previousOfflineGraceMinutes, offlineGraceMinutes: offlineGraceMinutes(license.offline_grace_minutes) }); writeState(state); response.json({ ...publicLicense(license), ...(credential ? { activationCode: credential.activationCode } : {}) });
+  if (sessionsRevoked || ['pause', 'revoke'].includes(action)) license.credential_version = Number(license.credential_version || 0) + 1;
+  license.updated_at = timestamp(); addEvent(state, license.id, action, request.admin.username, { days: request.body?.days || null, previousExpiresAt, expiresAt: license.expires_at, previousOfflineGraceMinutes, offlineGraceMinutes: offlineGraceMinutes(license.offline_grace_minutes), ...(credential ? { sessionsRevoked } : {}) }); writeState(state); response.json({ ...publicLicense(license), ...(credential ? { activationCode: credential.activationCode, sessionsRevoked } : {}) });
 });
 
 app.delete('/api/admin/licenses/:id', requireAdmin, (request, response) => {

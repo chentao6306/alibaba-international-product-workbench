@@ -5,6 +5,7 @@ import { chromium } from 'playwright-core';
 import { readPrivateSession } from './private-session-storage.js';
 import { inspectVerificationDocument, verificationOptions, verificationPaused, waitForVerification } from './human-verification.js';
 import { browserStep } from './browser-step.js';
+import { nativeBrowserWindows } from './native-browser-window.js';
 
 const contextModes = new WeakMap();
 const importedSessions = new WeakMap();
@@ -127,7 +128,7 @@ export function findChromium() {
 }
 
 export async function launchPersistent(profileDir, options = {}) {
-  const { visible = false, ...browserOptions } = options;
+  const { visible = false, backgroundPublishing = false, ...browserOptions } = options;
   const executablePath = findChromium();
   if (!executablePath) {
     if (process.env.KUA_YIPU_REQUIRE_BUNDLED_BROWSER === '1') {
@@ -147,10 +148,10 @@ export async function launchPersistent(profileDir, options = {}) {
   const launchOptions = {
     executablePath,
     headless,
-    viewport: null,
+    viewport: headless ? (options.viewport || { width: 1280, height: 900 }) : null,
     locale: options.locale || 'zh-CN',
-    // Collection verification windows stay off-screen until needed; the
-    // publishing context explicitly requests an on-screen window.
+    // Headless work has no native window or taskbar entry, while retaining a
+    // normal viewport for form layout and lazy-loaded controls.
     args: [
       '--disable-blink-features=AutomationControlled',
       ...hiddenWindowArgs,
@@ -160,7 +161,7 @@ export async function launchPersistent(profileDir, options = {}) {
     ],
     ...browserOptions,
     headless,
-    viewport: null,
+    viewport: headless ? (options.viewport || { width: 1280, height: 900 }) : null,
     args: [...new Set([
       '--disable-blink-features=AutomationControlled',
       ...hiddenWindowArgs,
@@ -172,7 +173,7 @@ export async function launchPersistent(profileDir, options = {}) {
   };
   try {
     const context = await chromium.launchPersistentContext(profileDir, launchOptions);
-    contextModes.set(context, { headless, visible });
+    contextModes.set(context, { headless, visible, backgroundPublishing });
     try { await browserStep(() => syncAlibabaCookies(context), { timeoutMs: 15000, label: '初始化浏览器会话' }); }
     catch (error) { context.close().catch(() => {}); throw error; }
     return context;
@@ -183,7 +184,7 @@ export async function launchPersistent(profileDir, options = {}) {
       fs.mkdirSync(recoveryDir, { recursive: true });
       try {
         const context = await chromium.launchPersistentContext(recoveryDir, launchOptions);
-        contextModes.set(context, { headless, visible });
+        contextModes.set(context, { headless, visible, backgroundPublishing });
         try { await browserStep(() => syncAlibabaCookies(context), { timeoutMs: 15000, label: '初始化恢复浏览器会话' }); }
         catch (error) { context.close().catch(() => {}); throw error; }
         return context;
@@ -219,6 +220,8 @@ async function setWindowState(page, windowState, bounds = {}) {
 }
 
 export async function revealPage(page) {
+  if (!page || page.isClosed() || contextModes.get(page.context())?.headless) return false;
+  if (contextModes.has(page.context())) await nativeBrowserWindows(page.context(), 'show');
   // Used for both publishing inspection and human verification.
   const changed = await setWindowState(page, 'maximized');
   if (changed) await page.bringToFront().catch(() => {});
@@ -227,10 +230,15 @@ export async function revealPage(page) {
 
 export async function hidePage(page) {
   if (!page || page.isClosed()) return false;
+  if (contextModes.get(page.context())?.headless) return true;
   // Keep a real viewport while moving the native window off-screen. Resizing
   // to 1x1 (the old implementation) makes Playwright reject normal clicks as
   // "outside of the viewport" during publishing.
-  return setWindowState(page, 'normal', { left: -32000, top: -32000, width: 1280, height: 900 });
+  const moved = await setWindowState(page, 'normal', { left: -32000, top: -32000, width: 1280, height: 900 });
+  // CDP bounds only move the window; Windows still displays its taskbar entry.
+  // Hide the owned native windows while keeping the verified browser alive.
+  if (contextModes.has(page.context())) await nativeBrowserWindows(page.context(), 'hide');
+  return moved;
 }
 
 const HUMAN_CHALLENGE_TEXT = /请完成验证|请拖动滑块|滑动验证|滑块验证|人机验证|安全验证|安全校验|security verification|slide to verify|drag (?:the )?slider to verify|verify you are human|complete (?:the )?captcha|unusual traffic/i;
@@ -280,6 +288,13 @@ export async function waitForHumanVerification(page, options = {}) {
     // A plain Alibaba login redirect is handled as an unavailable detail page
     // by the caller. Only an actual challenge should interrupt headless work.
     if (!challenge && !pending) return false;
+    if (contextModes.get(page.context())?.backgroundPublishing) {
+      // Background publishing never opens another taskbar window by itself.
+      // Login/verification stays an explicit action in the seller window.
+      throw Object.assign(new Error('国际站要求安全验证，请打开卖家窗口完成验证后继续；当前商品进度已保留'), {
+        code: 'HUMAN_VERIFICATION_REQUIRED', verificationUrl: page.url(),
+      });
+    }
     const bridge = globalThis.__KUA_YIPU_SELLER_BRIDGE;
     if (typeof bridge?.humanVerification === 'function') {
       const verificationUrl = page.url();

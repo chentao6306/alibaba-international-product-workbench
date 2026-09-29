@@ -1,0 +1,27 @@
+.batch-description-editor { min-width: 0; color: #24354b; }
+.batch-description-editor fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.bde-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.bde-heading h3, .bde-apply h3 { margin: 0; }
+.bde-heading span, .bde-help { color: #758397; font-size: 12px; line-height: 1.7; }
+.bde-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+.batch-description-editor button, .bde-file { border: 1px solid #dbe3ed; border-radius: 6px; padding: 8px 12px; background: white; color: #344860; font-size: 12px; cursor: pointer; }
+.batch-description-editor button:disabled { opacity: .5; cursor: default; }
+.batch-description-editor .primary-button { background: #2563eb; color: white; border-color: #2563eb; }
+.batch-description-editor select, .batch-description-editor input:not([type=file]) { min-width: 0; max-width: 100%; border: 1px solid #dbe3ed; border-radius: 6px; background: white; padding: 9px; font-size: 13px; color: #24354b; }
+.bde-toolbar > select { flex: 1; min-width: 180px; }
+.bde-field { display: flex; flex-direction: column; gap: 8px; font-size: 13px; margin: 14px 0; }
+.bde-file { position: relative; overflow: hidden; }
+.bde-file input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; }
+.bde-save span { font-size: 12px; color: #758397; }
+.bde-apply { border-top: 1px solid #e5ebf2; margin-top: 20px; padding-top: 20px; }
+.bde-error { background: #fff1f0; color: #c43c3c; border: 1px solid #f6ceca; padding: 10px; border-radius: 6px; overflow-wrap: anywhere; }
+.bde-comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 14px 0; }
+.bde-comparison > div { min-width: 0; }
+.bde-comparison strong { font-size: 13px; display: block; margin-bottom: 8px; }
+.bde-comparison iframe { background: white; border: 1px solid #dbe3ed; border-radius: 6px; min-height: 370px; width: 100%; box-sizing: border-box; }
+.batch-description-editor .pe-richtext { min-height: 260px; max-height: 500px; overflow: auto; overflow-wrap: anywhere; }
+.batch-description-editor .pe-richtext img { max-width: 100%; height: auto; }
+.bde-editor-busy { opacity: .6; pointer-events: none; }
+.batch-description-editor .pe-description textarea { width: 100%; box-sizing: border-box; }
+.batch-description-editor [role=status] { font-size: 13px; color: #2563eb; }
+@media (max-width: 650px) { .bde-comparison { grid-template-columns: 1fr; } .bde-toolbar > select { flex-basis: 100%; width: 100%; } .bde-toolbar button, .bde-file { padding: 7px 9px; } }

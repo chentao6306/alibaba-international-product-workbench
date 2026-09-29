@@ -15,3 +15,21 @@ export const PRODUCT_EDIT_FIELDS = [
 export function productEditPatch(value = {}) {
   return structuredClone(Object.fromEntries(Object.entries(value).filter(([key]) => PRODUCT_EDIT_FIELDS.includes(key))));
 }
+
+// Property/value IDs belong to their original category. Preserve the product
+// text and commerce, but require fresh bindings after an explicit leaf change.
+export function categoryChangePatch(product, patch) {
+  if (patch.categoryId == null || String(patch.categoryId) === String(product.categoryId || '')) return patch;
+  const next = { ...patch, categoryReference: null };
+  for (const key of ['targetCategory', 'targetCategoryId', 'targetCategoryPath', 'internationalCategory', 'internationalCategoryPath', 'publishCategory', 'publishCategoryId', 'categoryAttributes']) next[key] = null;
+  for (const field of ['attributes', 'variantGroups']) {
+    const items = Object.hasOwn(patch, field) ? patch[field] : product[field];
+    if (!Array.isArray(items)) continue;
+    next[field] = items.map((item) => {
+      const value = { ...item };
+      for (const key of ['id', 'attributeId', 'propertyId', 'attrId', 'propId', 'valueId', 'valueIds', 'attributeValueId', 'propertyValueId', 'optionIds']) delete value[key];
+      return value;
+    });
+  }
+  return next;
+}

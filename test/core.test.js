@@ -158,7 +158,7 @@ test('publish pause invokes the active page stop hook immediately', () => {
 
 test('browser automation errors are reduced to readable business messages', () => {
   const message = userFacingError(new Error("locator.click: Timeout 30000ms exceeded\n<div class=\"next-overlay-backdrop\"> intercepts pointer events\n--disable-sync\nPID 16152"));
-  assert.equal(message, '国际站页面仍有弹窗遮罩，请关闭提示后重试');
+  assert.equal(message, '国际站有待处理的页面提示，已保留当前商品进度，请查看卖家页面后继续');
   assert.equal(userFacingError(new Error('locator.click: Timeout 5000ms exceeded waiting for button')), '国际站页面按钮未就绪或已发生变化，请重试该商品');
   const startup = userFacingError(new Error('--disable-sync\nPID 16152\ntaskkill failed'));
   assert.equal(startup, '浏览器操作失败，请重试');

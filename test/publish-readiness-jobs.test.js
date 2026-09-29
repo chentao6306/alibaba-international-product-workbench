@@ -43,8 +43,12 @@ test('login and unavailable forms pause at the same product without counting fai
       assert.equal(product.skus[0].code, 'KEPT');
       assert.deepEqual(product.detailImages, []);
     }
-    if (product.id === '1' && blockingCode) throw blockingCode === 'raw-overlay'
+    if (product.id === '1' && blockingCode) throw blockingCode === 'raw-scroll'
+      ? new Error('locator.scrollIntoViewIfNeeded: Timeout 3000ms exceeded. Call log: waiting for image-placeholder-span')
+      : blockingCode === 'raw-overlay'
       ? new Error('locator.click: Timeout 5000ms exceeded. next-overlay-backdrop intercepts pointer events')
+      : blockingCode === 'raw-control'
+        ? new Error('locator.click: Timeout 5000ms exceeded. posting-footer intercepts pointer events')
       : Object.assign(new Error(blockingCode), { code: blockingCode });
     if (product.id === '2') assert.equal(product.attributes.find((item) => item.name === 'Age Range'), undefined);
     if (product.id === '2' && !categoryCorrected) throw Object.assign(new Error('当前类目不可用，请重新选择有效类目'), { code: 'PUBLISH_CATEGORY_INVALID' });
@@ -64,7 +68,7 @@ test('login and unavailable forms pause at the same product without counting fai
   };
   try {
     const task = await api('/api/publish', { ids: ['1', '2', '3'], collectionFolderId: 'folder', mode: 'draft' });
-    const blockers = ['LOGIN_REQUIRED', 'PUBLISH_EDITOR_NOT_READY', 'PUBLISH_FORM_NOT_READY', 'PUBLISH_FIELD_NOT_READY', 'PUBLISH_BROWSER_NOT_READY', 'PUBLISH_LANGUAGE_NOT_READY', 'PUBLISH_IMAGE_BANK_FULL', 'PUBLISH_IMAGE_SERVICE_BLOCKED', 'PUBLISH_OVERLAY_BLOCKED', 'raw-overlay'];
+    const blockers = ['LOGIN_REQUIRED', 'HUMAN_VERIFICATION_REQUIRED', 'PUBLISH_STAGE_TIMEOUT', 'PUBLISH_EDITOR_NOT_READY', 'PUBLISH_FORM_NOT_READY', 'PUBLISH_FIELD_NOT_READY', 'PUBLISH_BROWSER_NOT_READY', 'PUBLISH_LANGUAGE_NOT_READY', 'PUBLISH_IMAGE_BANK_FULL', 'PUBLISH_IMAGE_SERVICE_BLOCKED', 'PUBLISH_OVERLAY_BLOCKED', 'raw-overlay', 'PUBLISH_CONTROL_OBSCURED', 'raw-control', 'PUBLISH_CONFIRMATION_PENDING', 'PUBLISH_SUBMIT_RESULT_UNKNOWN', 'raw-scroll', 'MAIN_IMAGE_CONTROL_NOT_READY', 'MAIN_IMAGE_UPLOAD_PENDING', 'IMAGE_UPLOAD_TIMEOUT'];
     for (const code of blockers) {
       blockingCode = code;
       if (code !== 'LOGIN_REQUIRED') await api(`/api/jobs/${task.id}/resume`, {});
@@ -75,7 +79,8 @@ test('login and unavailable forms pause at the same product without counting fai
       assert.equal(state.products[0].publishHistory?.length || 0, 0);
       assert.notEqual(state.products[0].status, 'publish_failed');
       assert.equal(attempts.every((id) => id === '1'), true);
-      assert.equal(state.jobs[0].diagnostics.stage, code === 'raw-overlay' ? 'PUBLISH_OVERLAY_BLOCKED' : code);
+      assert.equal(state.jobs[0].diagnostics.stage, code === 'raw-overlay' ? 'PUBLISH_OVERLAY_BLOCKED' : code === 'raw-control' ? 'PUBLISH_CONTROL_OBSCURED' : code === 'raw-scroll' ? 'PUBLISH_CONTROL_NOT_READY' : code);
+      assert.doesNotMatch(state.jobs[0].message, /locator\.|Call log:|弹窗遮罩/);
     }
     blockingCode = '';
     await api(`/api/jobs/${task.id}/resume`, {});

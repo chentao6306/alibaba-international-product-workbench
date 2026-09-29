@@ -87,6 +87,9 @@ export function mergeSourceDataForPublish(target, source) {
     'description', 'descriptionHtml', 'structuredDescription', 'mainImage', 'mainImages', 'images', 'detailImages', 'videos', 'videoUrl',
     'packaging', 'stock', 'price', 'variantGroups', 'skus']) {
     if (target.categoryReference && templateFields.has(field)) continue;
+    if (target.imageEdits?.main && ['mainImage', 'mainImages', 'images'].includes(field)) continue;
+    if (target.imageEdits?.detail && ['detailImages', 'descriptionHtml', 'structuredDescription'].includes(field)) continue;
+    if (target.descriptionTemplate && field === 'description') continue;
     if (isBlank(target[field]) && !isBlank(source[field])) next[field] = clone(source[field]);
   }
   // Recollection can add missing properties and their stable IDs. Keep
@@ -94,8 +97,10 @@ export function mergeSourceDataForPublish(target, source) {
   if (!target.categoryReference) {
     next.attributes = clone(target.attributes || []);
     for (const item of source.attributes || []) {
-      const existing = next.attributes.find((row) => attributeId(row) && attributeId(item)
+      const candidates = next.attributes.filter((row) => attributeId(row) && attributeId(item)
         ? attributeId(row) === attributeId(item) : requiredAttributeKey(row.name) === requiredAttributeKey(item.name));
+      const exact = attributeId(item) && candidates.find((row) => attributeId(row) === attributeId(item));
+      const existing = exact || (candidates.length === 1 ? candidates[0] : null);
       if (!existing) next.attributes.push(clone(item));
       else if (isBlank(existing.value)) Object.assign(existing, clone(item));
       else if (JSON.stringify(existing.value) === JSON.stringify(item.value)) {
@@ -109,7 +114,7 @@ export function mergeSourceDataForPublish(target, source) {
   for (const [field, value] of Object.entries(source.packaging || {})) {
     if (isBlank(next.packaging[field])) next.packaging[field] = clone(value);
   }
-  if ((target.mainImages || target.images || []).length < 4) {
+  if (!target.imageEdits?.main && (target.mainImages || target.images || []).length < 4) {
     next.mainImages = [...new Set([...(target.mainImages || target.images || []), ...(source.mainImages || source.images || [])])];
     next.images = [...next.mainImages];
     next.mainImage = next.mainImages[0] || next.mainImage;
@@ -361,7 +366,7 @@ function snapshotFields(product) {
   return structuredClone({
     ...Object.fromEntries(['province', 'brandName', 'compatibleBrand', 'compatibleBrands', 'privateMold', 'compatibleModel',
       'compatibleModels', 'material', 'type', 'color', 'colorImages', 'modelImages', 'specifications', 'platformAttributes',
-      'internationalAttributes', 'targetAttributes', 'categoryReference', 'referenceRecovery', 'stockProvenance'].filter((key) => Object.hasOwn(product, key)).map((key) => [key, product[key]])),
+      'internationalAttributes', 'targetAttributes', 'categoryReference', 'referenceRecovery', 'stockProvenance', 'imageEdits', 'descriptionTemplate'].filter((key) => Object.hasOwn(product, key)).map((key) => [key, product[key]])),
     sourceId: product.sourceId || '', sourceUrl: product.sourceUrl || '', sourceTitle: product.sourceTitle || '',
     sourceOriginalTitle: product.sourceOriginalTitle || '', sourceLanguage: product.sourceLanguage || '',
     sourceCaptureLocale: product.sourceCaptureLocale || '', sourceLanguageEvidence: product.sourceLanguageEvidence || null,

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ArrowDown, ArrowLeft, ArrowUp, Bold, Code, ExternalLink, ImagePlus, Italic, Link, List, LoaderCircle, Maximize2, Minimize2, Plus, Save, Trash2, Undo2, X } from 'lucide-react';
 import ReferenceDialog from './ReferenceDialog.jsx';
 import OriginCountrySelect from './OriginCountrySelect.jsx';
-import { attributeKey, changeEditorCategory, createEditorForm, editAttribute, editorPayload, labelOf, rebuildEditorSkus, updateDeliveryCell, valuesOf } from './product-editor-model.js';
+import { attributeKey, changeEditorCategory, createEditorForm, editAttribute, editorAttributeRows, editorPayload, labelOf, rebuildEditorSkus, updateDeliveryCell, valuesOf } from './product-editor-model.js';
 import './ProductEditor.css';
 
 const TABS = [['basic', '基础信息'], ['attributes', '商品属性'], ['custom', '自定义属性'], ['specs', '产品规格'], ['trade', '交易信息'], ['logistics', '物流信息'], ['service', '商品服务与证书'], ['description', '商品描述'], ['regional', '国家/地区差异设置']];
@@ -60,7 +60,7 @@ function safeEditorHtml(html) {
   }));
   return document.body.innerHTML;
 }
-function DescriptionEditor({ html, onChange }) {
+export function DescriptionEditor({ html, onChange }) {
   const ref = useRef(null);
   const [source, setSource] = useState(false);
   useEffect(() => { if (ref.current && ref.current.innerHTML !== safeEditorHtml(html)) ref.current.innerHTML = safeEditorHtml(html); }, [html, source]);
@@ -90,7 +90,7 @@ export default function ProductEditor({ product, onClose, onSaved, notify, Categ
   const dialogRef = useRef(null);
   const change = (key, value) => { setDirty(true); setForm((current) => ({ ...current, [key]: value })); };
   const updateItem = (key, index, value) => change(key, form[key].map((item, itemIndex) => itemIndex === index ? value : item));
-  const updateAttribute = (index, value) => { setDirty(true); setForm((current) => editAttribute(current, index, { ...current.attributes[index], value })); };
+  const updateAttribute = (index, value, fallback) => { setDirty(true); setForm((current) => editAttribute(current, index, { ...(current.attributes[index] || fallback), value })); };
   const close = () => dirty ? setDiscard(true) : onClose();
   useEffect(() => {
     const previousOverflow = document.body.style.overflow; document.body.style.overflow = 'hidden';
@@ -151,7 +151,6 @@ export default function ProductEditor({ product, onClose, onSaved, notify, Categ
     } catch (error) { notify(error.message, 'error'); } finally { setUploadingVideo(''); }
   }
   const requirements = product.postingRequirements?.categoryId === form.categoryId ? product.postingRequirements.fields || [] : [];
-  const missingFields = requirements.filter((field) => !form.attributes.some((item) => attributeKey(item.name) === attributeKey(field.label)));
   const source = product.source?.snapshot || {};
   const selectedGroup = form.sellerGroup;
   const allGroups = selectedGroup && !sellerGroups.some((group) => group.id === selectedGroup.id) ? [selectedGroup, ...sellerGroups] : sellerGroups;
@@ -168,7 +167,7 @@ export default function ProductEditor({ product, onClose, onSaved, notify, Categ
       <div className="pe-scroll">
       {auditOpen && <section className="pe-audit"><button type="button" onClick={() => setAuditOpen(false)}>返回编辑</button><p>采集时间：{product.source?.capturedAt || '未记录'}　修改次数：{product.auditTrail?.length || 0}</p><p>上次发布：{product.publishResult?.message || product.referenceRecovery?.failure?.message || '无失败记录'}</p>{(product.quality?.issues || []).map((item) => <p key={item.code}>{item.message}</p>)}<details><summary>原始采集数据</summary><pre>{JSON.stringify(source, null, 2)}</pre></details></section>}
       <div {...pane('basic')}>
-        <div className="pe-category"><div><span>您当前类目选择的是：</span><div className="pe-toolbar"><button type="button" onClick={() => setCategoryOpen(!categoryOpen)}>重选类目</button><button type="button" onClick={() => openReference('full')}>引用类目与属性</button></div></div><div className="pe-category-path">当前类目：{form.categoryPath.join(' >> ') || '未选择'}{form.categoryId && ` | ${form.categoryId}`}</div>{categoryOpen && <div className="pe-category-select"><CategorySelect path={form.categoryPath.join(' >> ')} includeId onChange={(option) => { setDirty(true); setForm((current) => changeEditorCategory(current, option)); }} /></div>}</div>
+        <div className="pe-category"><div><span>您当前类目选择的是：</span><div className="pe-toolbar"><button type="button" onClick={() => setCategoryOpen(!categoryOpen)}>重选类目</button><button type="button" onClick={() => openReference('full')}>引用类目与属性</button></div></div><div className="pe-category-path">当前类目：{form.categoryPath.join(' >> ') || '未选择'}{form.categoryId && ` | ${form.categoryId}`}</div>{categoryOpen && <div className="pe-category-select"><CategorySelect path={form.categoryPath.join(' >> ')} categoryId={form.categoryId} onCancel={() => setCategoryOpen(false)} onChange={(option) => { setDirty(true); setForm((current) => changeEditorCategory(current, option)); setCategoryOpen(false); }} /></div>}</div>
         <Row label="商品名称" wide required><Input label="商品名称" value={form.title} onChange={(value) => change('title', value)} required maxLength={128} /></Row>
         <Row label="副标题" wide><Input label="副标题" value={form.subtitle} onChange={(value) => change('subtitle', value)} maxLength={128} /></Row>
         <Row label="商品关键词" wide><textarea aria-label="商品关键词" rows={4} value={form.keywords.join('\n')} onChange={(event) => change('keywords', event.target.value.split('\n'))} /></Row>
@@ -178,25 +177,19 @@ export default function ProductEditor({ product, onClose, onSaved, notify, Categ
       </div>
       <div {...pane('attributes')}>
         <div className="pe-right-toolbar"><button type="button" onClick={() => openReference('attributes')}>引用商品属性</button></div>
-        {form.attributes.map((item, index) => ({ item, index })).sort((left, right) => {
-          const order = ['Place of Origin', 'Province', 'Brand Name'].map(attributeKey);
-          const rank = (item) => order.includes(attributeKey(item.name)) ? order.indexOf(attributeKey(item.name)) : order.length;
-          return rank(left.item) - rank(right.item);
-        }).map(({ item, index }) => {
+        {editorAttributeRows(form, requirements).map(({ item, index, key: rowKey, descriptor }) => {
           const key = attributeKey(item.name), label = labelOf(item.name), values = valuesOf(item.value);
-          const descriptor = requirements.find((field) => String(field.id || '') && String(field.id) === String(item.id || item.attributeId || '') || attributeKey(field.label) === key);
-          const options = (item.options || []).map((option) => typeof option === 'object' ? option.label || option.name || option.value : option).filter(Boolean);
+          const options = (item.options?.length ? item.options : descriptor?.options || []).map((option) => typeof option === 'object' ? option.label || option.name || option.text || option.value : option).filter(Boolean);
           let control;
-          if (key === attributeKey('Place of Origin')) control = <OriginCountrySelect value={textValue(item.value)} onChange={(value) => updateAttribute(index, value)} />;
-          else if (key === attributeKey('Brand Name')) control = <div className="pe-brand"><Choice label="品牌选项" value={options.includes(textValue(item.value)) ? textValue(item.value) : values.length ? 'Other' : ''} options={[...options, 'Other']} onChange={(value) => updateAttribute(index, value)} /><Input label="品牌名称" value={/^others?$/i.test(textValue(item.value)) ? '' : textValue(item.value)} onChange={(value) => updateAttribute(index, value || 'Other')} /></div>;
-          else if (key === attributeKey('Private Mold')) control = <Choice label={label} value={textValue(item.value)} options={['Yes', 'No']} onChange={(value) => updateAttribute(index, value)} />;
-          else if (Array.isArray(item.value) || descriptor?.controlType === 'checkbox' || form.categoryId === '201346401' && [attributeKey('Material'), attributeKey('Compatible Brand')].includes(key)) {
+          if (key === attributeKey('Place of Origin')) control = <OriginCountrySelect value={textValue(item.value)} onChange={(value) => updateAttribute(index, value, item)} />;
+          else if (key === attributeKey('Brand Name')) control = <div className="pe-brand"><Choice label="品牌选项" value={options.includes(textValue(item.value)) ? textValue(item.value) : values.length ? 'Other' : ''} options={[...options, 'Other']} onChange={(value) => updateAttribute(index, value, item)} /><Input label="品牌名称" value={/^others?$/i.test(textValue(item.value)) ? '' : textValue(item.value)} onChange={(value) => updateAttribute(index, value || 'Other', item)} /></div>;
+          else if (key === attributeKey('Private Mold')) control = <Choice label={label} value={textValue(item.value)} options={['Yes', 'No']} onChange={(value) => updateAttribute(index, value, item)} />;
+          else if (Array.isArray(item.value) || descriptor?.multiple === true || ['checkbox', 'multiSelect'].includes(descriptor?.controlType) || form.categoryId === '201346401' && [attributeKey('Material'), attributeKey('Compatible Brand')].includes(key)) {
             const defaults = form.categoryId === '201346401' ? key === attributeKey('Material') ? MATERIALS : key === attributeKey('Compatible Brand') ? BRANDS : [] : [];
-            control = <MultiAttribute label={label} value={item.value} options={[...options, ...defaults]} onChange={(value) => updateAttribute(index, value)} />;
-          } else control = options.length ? <Choice label={label} value={textValue(item.value)} options={options} onChange={(value) => updateAttribute(index, value)} /> : <Input label={label} value={textValue(item.value)} onChange={(value) => updateAttribute(index, value)} />;
-          return <Row key={index} label={label} required={descriptor?.required || item.required}><div className="pe-attribute-control">{control}<IconButton title={`删除属性 ${label}`} onClick={() => { updateAttribute(index, ''); setForm((current) => ({ ...current, attributes: current.attributes.filter((_, at) => at !== index) })); }}><Trash2 size={15} /></IconButton></div></Row>;
+            control = <MultiAttribute label={label} value={item.value} options={[...options, ...defaults]} onChange={(value) => updateAttribute(index, value, item)} />;
+          } else control = options.length ? <Choice label={label} value={textValue(item.value)} options={options} onChange={(value) => updateAttribute(index, value, item)} /> : <Input label={label} value={textValue(item.value)} onChange={(value) => updateAttribute(index, value, item)} />;
+          return <Row key={rowKey} label={label} required={descriptor?.required || item.required}><div className="pe-attribute-control">{control}<IconButton title={`删除属性 ${label}`} onClick={() => { updateAttribute(index, '', item); setForm((current) => ({ ...current, attributes: current.attributes.filter((_, at) => at !== index) })); }}><Trash2 size={15} /></IconButton></div></Row>;
         })}
-        {missingFields.map((field) => <Row key={field.id || field.label} label={labelOf(field.label)} required={field.required}><Input label={labelOf(field.label)} value="" onChange={(value) => { setDirty(true); setForm((current) => editAttribute(current, current.attributes.length, { id: field.id, name: field.label, value })); }} /></Row>)}
         <Row label="新增属性"><div className="pe-inline"><Input label="新增属性名称" value={newAttribute} onChange={setNewAttribute} /><button type="button" disabled={!newAttribute.trim()} onClick={() => { change('attributes', [...form.attributes, { name: newAttribute.trim(), value: '' }]); setNewAttribute(''); }}><Plus size={16} />添加</button></div></Row>
       </div>
       <div {...pane('custom')}><div className="pe-custom-list">{Array.from({ length: Math.max(10, form.customAttributes.length) }, (_, index) => { const item = form.customAttributes[index] || { name: '', value: '' }; const update = (patch) => { const rows = [...form.customAttributes]; rows[index] = { ...item, ...patch }; change('customAttributes', Array.from(rows, (row) => row || { name: '', value: '' })); }; return <div className="pe-custom-row" key={index}><span>{index + 1}.</span><Input label={`自定义属性 ${index + 1} 名称`} placeholder="属性名称 如：Color" value={item.name} onChange={(name) => update({ name })} /><Input label={`自定义属性 ${index + 1} 值`} placeholder="属性值 如：Red" value={textValue(item.value)} onChange={(value) => update({ value })} /><IconButton title={`清除自定义属性 ${index + 1}`} onClick={() => update({ name: '', value: '' })}><Trash2 size={16} /></IconButton></div>; })}</div></div>

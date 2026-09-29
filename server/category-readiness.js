@@ -1,9 +1,23 @@
 import { sourceAttributeForField } from './category-attributes.js';
 import { requiredAttributeKey } from './publish-reference.js';
+import { productOrigin } from './origin-country.js';
 
 const hasValue = (value) => value != null && (Array.isArray(value) ? value.some(hasValue) : String(value).trim() !== '');
 const categoryId = (product) => String(product.categoryId || product.sourceCategoryId || '');
 export const CATEGORY_SCHEMA_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+export function postingSchemaWithKnownLabels(product, fields, now = Date.now()) {
+  const saved = product.postingRequirements;
+  const age = now - Date.parse(saved?.capturedAt);
+  if (!saved || saved.categoryId !== categoryId(product) || !Number.isFinite(age) || age < 0 || age > CATEGORY_SCHEMA_MAX_AGE_MS) return fields;
+  return fields.map((field) => {
+    const previous = field.id && saved.fields?.find((item) => item.id === field.id);
+    if (!previous) return field;
+    // Only reuse names tied to the same observed property ID. Current controls,
+    // options and required flags always come from the live form.
+    return { ...field, labels: [...new Set([...(field.labels || [field.label]), ...(previous.labels || [previous.label])].filter(Boolean))] };
+  });
+}
 
 // Store descriptors, never current option selections or another product's
 // values. Only baseline fields can be reused across products in the same leaf.
@@ -11,7 +25,8 @@ export function categoryRequirementSchema(id, fields, capturedAt = new Date().to
   return { categoryId: String(id || ''), capturedAt, source: 'posting-form', fields: fields
     .filter((field) => !field.saleSpecification && !field.disabled)
     .map((field) => ({ id: String(field.id || ''), label: field.label, labels: field.labels || [field.label],
-      required: Boolean(field.required), controlType: field.controlType })) };
+      required: Boolean(field.required), controlType: field.controlType,
+      ...(typeof field.multiple === 'boolean' ? { multiple: field.multiple } : {}) })) };
 }
 
 export function categoryReadiness(product, schema = product.postingRequirements, now = Date.now()) {
@@ -29,7 +44,7 @@ export function categoryReadiness(product, schema = product.postingRequirements,
     const source = sourceAttributeForField(product, field);
     const keys = (field.labels || [field.label]).map(requiredAttributeKey);
     const direct = keys.map((key) => properties[key]).filter(Boolean).map((key) => product[key]).find(hasValue);
-    const value = source?.value ?? direct;
+    const value = keys.includes('产地') ? productOrigin(product) : source?.value ?? direct;
     if (source?.conflict) conflicts.push(field.label);
     else if (!hasValue(value)) missing.push(field.label);
     mappings.push({ id: field.id, label: field.label, source: source?.name || '',

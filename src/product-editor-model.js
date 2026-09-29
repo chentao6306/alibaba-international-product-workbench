@@ -1,6 +1,7 @@
-import { productEditPatch } from '../server/product-edit.js';
+import { categoryChangePatch, productEditPatch } from '../server/product-edit.js';
 import { requiredAttributeKey } from '../server/publish-reference.js';
 import { productOrigin, synchronizeProductOrigin } from '../server/origin-country.js';
+import { freightTemplateForProduct, cartonModeForProduct } from '../server/publish-policy.js';
 
 const clone = (value) => structuredClone(value);
 export const attributeKey = requiredAttributeKey;
@@ -14,10 +15,13 @@ export function createEditorForm(product) {
   for (const key of ['title', 'subtitle', 'description', 'descriptionHtml', 'categoryId', 'origin', 'model', 'brand', 'videoUrl', 'paymentMethod', 'freightTemplate']) form[key] ??= '';
   for (const key of ['keywords', 'attributes', 'customAttributes', 'variantGroups', 'skus', 'priceTiers', 'deliveryTime', 'detailImages', 'videos', 'logisticsAttributes', 'certificates']) form[key] ??= [];
   for (const key of ['packaging', 'services', 'shipping', 'regionalPricing']) form[key] ??= {};
+  if (typeof form.shipping !== 'object' || Array.isArray(form.shipping)) form.shipping = { notes: String(form.shipping || '') };
   form.mainImages = clone(product.mainImages || product.images || (product.mainImage ? [product.mainImage] : []));
   form.categoryPath = clone(product.categoryPath || (product.sourcePlatform === 'alibaba.com' ? product.sourceCategoryPath : []) || []);
   form.origin = productOrigin(product) || product.origin || '';
   form.salesUnit ||= 'Piece';
+  form.freightTemplate = freightTemplateForProduct(product);
+  form.shipping.cartonMode = cartonModeForProduct(product);
   form.priceMode ||= 'quantity-tier';
   form.price ??= ''; form.stock ??= ''; form.moq ??= '';
   if (form.moq !== '' && !Number.isFinite(Number(form.moq))) form.moq = String(form.moq).match(/\d[\d,]*(?:\.\d+)?/)?.[0]?.replace(/,/g, '') || '';
@@ -44,6 +48,26 @@ export function editAttribute(form, index, item) {
   if (key === attributeKey('Compatible Brand')) { patch.compatibleBrand = ''; patch.compatibleBrands = valuesOf(next.value); }
   if (key === attributeKey('Compatible Model')) { patch.compatibleModel = ''; patch.compatibleModels = valuesOf(next.value); }
   return { ...form, ...synchronizeProductOrigin(form, patch) };
+}
+
+export function editorAttributeRows(form, requirements = []) {
+  const idOf = (item) => String(item.id || item.attributeId || item.propertyId || item.attrId || item.propId || '');
+  const used = new Set();
+  // Keep schema rows in the same list and position before and after their first edit.
+  // A placeholder must not remount (or change control type) when its value is added.
+  const schemaRows = requirements.map((descriptor, at) => {
+    const id = idOf(descriptor);
+    let index = id ? form.attributes.findIndex((item, i) => !used.has(i) && idOf(item) === id) : -1;
+    if (index < 0) index = form.attributes.findIndex((item, i) => !used.has(i)
+      && !(id && idOf(item) && id !== idOf(item)) && attributeKey(item.name) === attributeKey(descriptor.label));
+    if (index >= 0) used.add(index);
+    return { key: `field-${at}`, index: index < 0 ? form.attributes.length : index, descriptor,
+      item: index < 0 ? { id: descriptor.id, name: descriptor.label, value: '' } : form.attributes[index] };
+  });
+  const rows = form.attributes.flatMap((item, index) => used.has(index) ? [] : [{ key: `attribute-${index}`, item, index }]);
+  const order = ['Place of Origin', 'Province', 'Brand Name'].map(attributeKey);
+  const rank = (item) => order.includes(attributeKey(item.name)) ? order.indexOf(attributeKey(item.name)) : order.length;
+  return [...rows, ...schemaRows].sort((left, right) => rank(left.item) - rank(right.item));
 }
 
 export function rebuildEditorSkus(form, groups = form.variantGroups) {
@@ -106,14 +130,7 @@ export function editorPayload(form) {
 }
 
 export function changeEditorCategory(form, option) {
-  const clearIds = (item) => {
-    const next = { ...item };
-    for (const key of ['id', 'attributeId', 'propertyId', 'attrId', 'propId', 'valueId', 'valueIds', 'attributeValueId', 'propertyValueId', 'optionIds']) delete next[key];
-    return next;
-  };
-  const changed = String(form.categoryId) !== String(option.id || '');
-  return { ...form, categoryId: option.id || '', categoryPath: option.path ? option.path.split(' >> ') : [],
-    ...(changed ? { attributes: form.attributes.map(clearIds), variantGroups: form.variantGroups.map(clearIds) } : {}) };
+  return { ...form, ...categoryChangePatch(form, { categoryId: option.id || '', categoryPath: option.path ? option.path.split(' >> ') : [] }) };
 }
 
 export function updateDeliveryCell(deliveryTime, index, column, value) {

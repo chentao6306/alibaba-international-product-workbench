@@ -12,7 +12,7 @@ test('origin keeps only the chosen country and never infers a province or unknow
   assert.equal(originCountry('Taiwan, China'), 'Taiwan, China');
   assert.equal(originCountry('Croatia'), 'Croatia (local name: Hrvatska)');
   assert.equal(originCountry('Congo, The Democratic Republic Of The'), 'Congo, The Democratic Republic Of The');
-  assert.equal(originCountry('Guangdong'), '');
+  assert.equal(originCountry('Guangdong'), 'China');
   assert.equal(originCountry('China, United States'), '');
   assert.equal(inferRequiredAttributeValue({ origin: 'Japan', attributes: [{ name: '产地', value: 'China' }] }, '产地'), 'Japan');
   assert.equal(inferRequiredAttributeValue({ attributes: [{ name: '省份', value: 'Guangdong' }] }, '省份'), '');

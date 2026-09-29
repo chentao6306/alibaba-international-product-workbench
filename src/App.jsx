@@ -1,6 +1,11 @@
 import ReferenceDialog from './ReferenceDialog.jsx';
 import ProductEditor from './ProductEditor.jsx';
+import BatchImageEditor from './BatchImageEditor.jsx';
+import BatchDescriptionEditor from './BatchDescriptionEditor.jsx';
+import CategorySelect from './CategorySelect.jsx';
 import PublishRecovery from './PublishRecovery.jsx';
+import PublishPageView from './PublishPageView.jsx';
+import PublishingRiskSetting from './PublishingRiskSetting.jsx';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Boxes, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, ClipboardList, CloudUpload,
@@ -22,46 +27,6 @@ import { categoryReadiness } from '../server/category-readiness.js';
 import { createPublishedReferenceTemplate } from '../server/publish-reference.js';
 
 const EMPTY = { shops: [], groups: [], collectionFolders: [], products: [], jobs: [], settings: {}, browser: {}, collectorBrowser: {} };
-
-const CATEGORY_OPTIONS = [
-  { path: 'Consumer Electronics >> Mobile Phone & Radio >> 5G smartphone', id: '201896803' },
-  { path: 'Consumer Electronics >> Earphones & Headphones >> On-Ear & Over-Ear Headphones', id: '201745901' },
-  { path: 'Consumer Electronics >> Computer Hardware & Software >> Tablet PC', id: '100010614' },
-  { path: 'Consumer Electronics >> Camera, Photo & Accessories >> Drones Accessories', id: '201346401' },
-  { path: 'Consumer Electronics >> Camera, Photo & Accessories >> Camera Accessories', id: '' },
-  { path: 'Consumer Electronics >> Cables & Commonly Used Accessories >> Microphones', id: '' },
-  { path: 'Consumer Electronics >> Mobile Phone & Radio >> Mobile Phones', id: '' },
-  { path: 'Consumer Electronics >> Computer Hardware & Software >> Webcams', id: '' },
-  { path: 'Power Transmission >> Motors >> Motor Controllers', id: '' },
-  { path: 'Business Services >> Certification, Inspection & Credit Management >> Inspection & Quality Control Services', id: '' },
-  { path: 'Other >> Other', id: '' }
-];
-
-function CategorySelect({ path, onChange, includeId = false }) {
-  const [referenceUrl, setReferenceUrl] = useState('');
-  const [reading, setReading] = useState(false);
-  const [error, setError] = useState('');
-  const [extraOptions, setExtraOptions] = useState([]);
-  const value = path || '';
-  const available = [...new Map([...extraOptions, ...CATEGORY_OPTIONS.filter((item) => item.id)].map((item) => [item.path, item])).values()];
-  const known = available.some((item) => item.path === value);
-  const options = known || !value ? available : [{ path: value, id: '' }, ...available];
-  async function readCategory() {
-    setReading(true); setError('');
-    try {
-      const option = await api('/api/categories/from-product', { method: 'POST', body: JSON.stringify({ url: referenceUrl }) });
-      setExtraOptions((items) => [option, ...items]); onChange(option);
-    } catch (failure) { setError(failure.message); } finally { setReading(false); }
-  }
-  return <>
-    <select value={value} onChange={(event) => { const option = options.find((item) => item.path === event.target.value); onChange(option || { path: '', id: '' }); }}>
-      <option value="">请选择 Alibaba 类目</option>
-      {options.map((item) => <option key={item.path} value={item.path}>{item.path}{includeId && item.id ? `（ID ${item.id}）` : ''}</option>)}
-    </select>
-    <div className="category-reference"><input aria-label="同类国际站商品链接" placeholder="同类国际站商品链接" value={referenceUrl} onChange={(event) => setReferenceUrl(event.target.value)} /><button type="button" className="icon-button" title="读取商品类目" disabled={reading || !referenceUrl.trim()} onClick={readCategory}>{reading ? <LoaderCircle size={16} className="spin" /> : <Search size={16} />}</button></div>
-    {error && <small className="data-missing">{error}</small>}
-  </>;
-}
 
 function PlatformTabs({ products, value, onChange }) {
   return <div className="platform-tabs" role="tablist" aria-label="来源平台">
@@ -349,18 +314,18 @@ function productCompleteness(product) {
   if (!tiers && !hasPriceRange) missing.push('价格资料');
   if (!product.origin) missing.push('产地');
   if (!(Number(product.packaging?.weight) > 0)) missing.push('包装重量');
-  if (!product.description && !product.descriptionHtml) missing.push('商品详情');
+  if (!product.description && !product.descriptionHtml && !product.hasDescription) missing.push('商品详情');
   const quality = product.quality;
   if (quality && Array.isArray(quality.issues)) {
     const qualityMissing = quality.issues.filter((item) => item.severity === 'error').map((item) => item.message);
-    return { main, detail, attributes, tiers, hasPriceRange, variants, skus: (product.skus || []).length, missing: qualityMissing, complete: quality.status !== 'blocked', review: quality.status === 'review', score: quality.score, warnings: quality.warnings, issues: quality.issues };
+    return { main, detail, attributes, tiers, hasPriceRange, variants, skus: product.skuCount ?? (product.skus || []).length, missing: qualityMissing, complete: quality.status !== 'blocked', review: quality.status === 'review', score: quality.score, warnings: quality.warnings, issues: quality.issues };
   }
   const complete = missing.length === 0;
-  return { main, detail, attributes, tiers, hasPriceRange, variants, skus: (product.skus || []).length, missing, complete, review: false, score: complete ? 100 : Math.max(0, 100 - missing.length * 12), warnings: 0, issues: [] };
+  return { main, detail, attributes, tiers, hasPriceRange, variants, skus: product.skuCount ?? (product.skus || []).length, missing, complete, review: false, score: complete ? 100 : Math.max(0, 100 - missing.length * 12), warnings: 0, issues: [] };
 }
 
 function CategoryReadiness({ product }) {
-  const check = categoryReadiness(product);
+  const check = product.categoryReadiness || categoryReadiness(product);
   const pending = [...check.missing, ...check.conflicts];
   const message = check.status === 'covered' ? `已核对 ${check.checked} 项类目必填资料`
     : check.status === 'incomplete' ? `类目资料待核对：${pending.join('、')}`
@@ -392,6 +357,8 @@ function ProductsView({ state, refresh, notify, onMenu, platform, setPlatform, n
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [editing, setEditing] = useState(null);
+  const [loadingEditor, setLoadingEditor] = useState(false);
+  const editorRequest = useRef(0);
   const [batchEditing, setBatchEditing] = useState(false);
   const [findReplaceOpen, setFindReplaceOpen] = useState(false);
   const [referenceOpen, setReferenceOpen] = useState(false);
@@ -410,7 +377,7 @@ function ProductsView({ state, refresh, notify, onMenu, platform, setPlatform, n
   const allProductsSelected = products.length > 0 && products.every((item) => item.selected);
   const selectedProducts = platformProducts.filter((item) => item.selected);
   const referenceEligibleProducts = selectedProducts.filter((product) => product.status !== 'published');
-  const wasPublishedSuccessfully = (product) => product.status === 'published'
+  const wasPublishedSuccessfully = (product) => product.publishedSuccessfully || product.status === 'published'
     || (product.publishHistory || []).some((entry) => ['published', 'submitted', 'success'].includes(String(entry.result?.status || entry.status || '').toLowerCase()));
   const publishedReferenceProducts = state.products.filter(wasPublishedSuccessfully);
   const referenceUnavailableReason = !selectedProducts.length
@@ -419,13 +386,28 @@ function ProductsView({ state, refresh, notify, onMenu, platform, setPlatform, n
       ? '已勾选商品均已上架成功，无需引用'
       : '引用成功商品的类目、商品属性、规格及 SKU 信息';
 
-  useEffect(() => { setPage(1); setMoveFolderId(''); setEditing(null); setBatchEditing(false); setFindReplaceOpen(false); setReferenceOpen(false); }, [folderId]);
+  useEffect(() => { editorRequest.current++; setLoadingEditor(false); setPage(1); setMoveFolderId(''); setEditing(null); setBatchEditing(false); setFindReplaceOpen(false); setReferenceOpen(false); return () => { editorRequest.current++; }; }, [folderId]);
   useEffect(() => { setPage(1); }, [query, filter, pageSize, platform]);
   useEffect(() => { if (page > pageCount) setPage(pageCount); }, [page, pageCount]);
 
   async function select(ids, selected) {
     await api('/api/products/select', { method: 'POST', body: JSON.stringify({ ids, selected }) });
     await refresh();
+  }
+
+  async function openEditor(products, batch = false) {
+    const request = ++editorRequest.current;
+    setLoadingEditor(true);
+    try {
+      // Read serially so large selections cannot flood the renderer with JSON.
+      const details = [];
+      for (const product of products) {
+        details.push(product.summary ? await api('/api/products/' + encodeURIComponent(product.id)) : product);
+        if (request !== editorRequest.current) return;
+      }
+      if (batch) setBatchEditing(details); else setEditing(details[0]);
+    } catch (error) { if (request === editorRequest.current) notify(error.message, 'error'); }
+    finally { if (request === editorRequest.current) setLoadingEditor(false); }
   }
 
   async function selectAllProducts(selected) {
@@ -472,7 +454,7 @@ function ProductsView({ state, refresh, notify, onMenu, platform, setPlatform, n
       <button className="secondary-button" disabled={!products.length} onClick={() => selectAllProducts(!allProductsSelected)}><Check size={15} />{allProductsSelected ? '取消全选' : `全选当前结果 ${products.length}`}</button>
       {selectedProducts.length > 0 && <button className="primary-button" onClick={() => navigate('publish', platform)}><CloudUpload size={15} />选中商品上架 {selectedProducts.length}</button>}
       <button className="secondary-button" disabled={!platformProducts.length} onClick={() => setFindReplaceOpen(true)}><Search size={15} />查找替换</button>
-      {selectedProducts.length > 0 && <button className="primary-button" onClick={() => setBatchEditing(true)}><Pencil size={15} />批量修改 {selectedProducts.length}</button>}
+      {selectedProducts.length > 0 && <button className="primary-button" disabled={loadingEditor} onClick={() => openEditor(selectedProducts, true)}><Pencil size={15} />批量修改 {selectedProducts.length}</button>}
       <button className="secondary-button" disabled={!referenceEligibleProducts.length} title={referenceUnavailableReason} onClick={() => setReferenceOpen(true)}><ClipboardList size={15} />引用成功商品资料</button>
       <ProcessSelectedProducts products={platformProducts} refresh={refresh} notify={notify} />
       {selectedProducts.length > 0 && <button className="secondary-button danger-button" onClick={removeSelected}><Trash2 size={15} />删除已勾选 {selectedProducts.length}</button>}
@@ -488,13 +470,13 @@ function ProductsView({ state, refresh, notify, onMenu, platform, setPlatform, n
           <td><div className="product-main"><div className="thumb">{product.mainImage ? <img src={product.mainImage} alt="" /> : <Boxes size={20} />}</div><div><strong>{product.title || '未命名商品'}</strong><small><span className={`platform-label platform-${sourcePlatform(product).replace('.', '-')}`}>{sourcePlatformLabel(product)}</span> ID {product.sourceId}</small></div></div></td>
           <td><span className={`data-status ${completeness.complete ? 'complete' : ''}`} title={completeness.missing.length ? `阻断项：${completeness.missing.join('、')}` : completeness.review ? '来源未公开部分逐SKU数据，需要发布前确认' : '可进入发布检查'}>{!completeness.complete ? `资料阻断 ${completeness.score}` : completeness.review ? `资料待确认 ${completeness.score}` : `资料齐全 ${completeness.score}`}</span><CategoryReadiness product={product} /><small className="data-counts">主 {completeness.main} · 详 {completeness.detail} · 属 {completeness.attributes} · SKU {completeness.skus} · 价 {completeness.tiers || (completeness.hasPriceRange ? '区间' : 0)}</small>{completeness.warnings > 0 && <small className="data-warning">另有 {completeness.warnings} 项待确认</small>}{!completeness.complete && <small className="data-missing">{completeness.missing.join('；')}</small>}</td>
           <td><b className="price">{!product.priceConversion && product.sourcePriceRange?.formattedText || `${product.currencySymbol || '¥'}${product.price || '-'}`}</b></td><td>{product.stock ?? '-'}</td><td><StatusBadge status={display.status} message={display.message} />{(display.jobId || display.status === 'publish_failed') && <small className="data-missing" title={display.message}>{display.message || '未记录失败原因'}</small>}</td>
-          <td className="action-cell"><button className="icon-button" disabled={refreshingId === product.id} onClick={() => refreshDetail(product)} title="重新采集完整资料">{refreshingId === product.id ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}</button><button className="icon-button" onClick={() => setEditing(product)} title="编辑完整资料"><Pencil size={17} /></button><button className="icon-button danger" onClick={() => remove(product)} title="删除商品"><Trash2 size={17} /></button></td>
+          <td className="action-cell"><button className="icon-button" disabled={refreshingId === product.id} onClick={() => refreshDetail(product)} title="重新采集完整资料">{refreshingId === product.id ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}</button><button className="icon-button" disabled={loadingEditor} onClick={() => openEditor([product])} title="编辑完整资料"><Pencil size={17} /></button><button className="icon-button danger" onClick={() => remove(product)} title="删除商品"><Trash2 size={17} /></button></td>
         </tr>; })}</tbody>
       </table></div>}
       {products.length > pageSize && <Pagination page={page} pageCount={pageCount} onPage={setPage} label={`第 ${page}/${pageCount} 页 · 共 ${products.length} 件`} />}
     </section>
     {editing && <ProductEditor product={editing} CategorySelect={CategorySelect} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); await refresh(); notify('商品修改已保存'); }} notify={notify} />}
-      {batchEditing && <BatchEditor products={selectedProducts} references={publishedReferenceProducts} onClose={() => setBatchEditing(false)} onSaved={async (result) => { setBatchEditing(false); await refresh(); notify(result?.categoryBindingReset ? '批量修改已应用，请重新绑定修改后类目的国际站发布表单' : '批量修改已应用'); }} notify={notify} />}
+      {batchEditing && <BatchEditor products={batchEditing} references={publishedReferenceProducts} onClose={() => setBatchEditing(false)} onSaved={async (result) => { setBatchEditing(false); await refresh(); notify(result?.categoryBindingReset ? '批量修改已应用，请重新绑定修改后类目的国际站发布表单' : '批量修改已应用'); }} notify={notify} />}
     {findReplaceOpen && <FindReplaceDialog products={selectedProducts.length ? selectedProducts : platformProducts} onClose={() => setFindReplaceOpen(false)} onSaved={async (result) => { setFindReplaceOpen(false); await refresh(); notify(`已替换 ${result.changedProducts} 件商品，共 ${result.total} 处`); }} notify={notify} />}
     {referenceOpen && <ReferenceDialog products={referenceEligibleProducts} references={publishedReferenceProducts} onClose={() => setReferenceOpen(false)} onSaved={async (result) => { setReferenceOpen(false); await refresh(); notify(`已引用类目、属性和规格，更新 ${result.changed.length} 件商品`); }} notify={notify} />}
   </>;
@@ -523,6 +505,11 @@ function FindReplaceDialog({ products, onClose, onSaved, notify }) {
 }
 
 function BatchEditor({ products, references, onClose, onSaved, notify }) {
+  const [imageGuard, setImageGuard] = useState({ busy: false, dirty: false });
+  function closeBatch() {
+    if (imageGuard.busy) return notify('正在处理，请稍候', 'error');
+    if (!imageGuard.dirty || window.confirm('修改尚未保存，确认放弃？')) onClose();
+  }
   const [usdRate, setUsdRate] = useState('');
   const [tab, setTab] = useState('basic');
   const [locale, setLocale] = useState('zh');
@@ -574,10 +561,6 @@ function BatchEditor({ products, references, onClose, onSaved, notify }) {
     try { const result = await api('/api/products/batch-update', { method: 'POST', body: JSON.stringify({ ids: products.map((p) => p.id), patch }) }); onSaved(result); }
     catch (error) { notify(error.message, 'error'); }
   }
-  async function applyImage(action) {
-    try { await api('/api/products/batch-update', { method: 'POST', body: JSON.stringify({ ids: products.map((p) => p.id), patch: { imageOperation: action } }) }); onSaved(); }
-    catch (error) { notify(error.message, 'error'); }
-  }
   function currentCategory(product) { return [...(product.categoryPath || product.sourceCategoryPath || [])].join(' >> ') || '未设置'; }
   function previewFor(product) {
     if (tab === 'category') return { current: currentCategory(product), next: form.category || '请选择新类目' };
@@ -625,23 +608,24 @@ function BatchEditor({ products, references, onClose, onSaved, notify }) {
     };
     reader.readAsArrayBuffer(file);
   }
-  return <div className="drawer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><aside className="drawer batch-drawer">
-    <div className="drawer-header"><div><span>{locale === 'en' ? 'Batch edit' : '批量修改'}</span><h2>{locale === 'en' ? `${products.length} products selected` : `已选择 ${products.length} 件商品`}</h2></div><div className="drawer-header-actions"><div className="locale-switch"><button type="button" className={locale === 'zh' ? 'active' : ''} onClick={() => setLocale('zh')}>中文</button><button type="button" className={locale === 'en' ? 'active' : ''} onClick={() => setLocale('en')}>English</button></div><button className="icon-button" onClick={onClose} title="关闭"><X size={20} /></button></div></div>
-    <div className="batch-tabs">{tabs.map(([value]) => <button key={value} className={tab === value ? 'active' : ''} onClick={() => setTab(value)}>{tabLabels[value]?.[locale === 'en' ? 1 : 0] || value}</button>)}</div>
+  return <div className="drawer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeBatch(); }}><aside className="drawer batch-drawer">
+    <div className="drawer-header"><div><span>{locale === 'en' ? 'Batch edit' : '批量修改'}</span><h2>{locale === 'en' ? `${products.length} products selected` : `已选择 ${products.length} 件商品`}</h2></div><div className="drawer-header-actions"><div className="locale-switch"><button type="button" className={locale === 'zh' ? 'active' : ''} onClick={() => setLocale('zh')}>中文</button><button type="button" className={locale === 'en' ? 'active' : ''} onClick={() => setLocale('en')}>English</button></div><button className="icon-button" onClick={closeBatch} title="关闭"><X size={20} /></button></div></div>
+    <div className="batch-tabs">{tabs.map(([value]) => <button key={value} className={tab === value ? 'active' : ''} onClick={() => { if (value !== tab && (imageGuard.busy || imageGuard.dirty)) return notify('请先保存修改或放弃未保存修改', 'error'); setTab(value); }}>{tabLabels[value]?.[locale === 'en' ? 1 : 0] || value}</button>)}</div>
     <div className="batch-body">
       {tab === 'trade' && products.some((product) => product.currencySymbol !== '$') && <label className="batch-field"><span>换算汇率（1 原币 = 多少美元）</span><input type="number" min="0.000001" step="any" value={usdRate} onChange={(event) => setUsdRate(event.target.value)} />{usdRate && <small>仅换算尚未转为美元的商品</small>}</label>}
       {tab === 'basic' && <>{field('标题前缀', 'titlePrefix')}{field('标题后缀', 'titleSuffix')}{field('统一副标题', 'subtitle')}{field('关键词（逗号或换行分隔）', 'keywords', 'text', true)}<label className="batch-field"><span>原产地（国家）</span><OriginCountrySelect value={form.origin} emptyLabel="保持原产地" onChange={(origin) => setForm((current) => ({ ...current, origin }))} /></label>{field('品牌', 'brand')}{field('产品类型', 'productType')}</>}
-      {tab === 'category' && <><label className="batch-field"><span>选择新产品类目</span><CategorySelect path={form.category} includeId onChange={(option) => setForm((v) => ({ ...v, category: option.path, categoryId: option.id || '' }))} /></label><label className="batch-field"><span>类目 ID（由选择或发布页绑定生成）</span><input value={form.categoryId} readOnly placeholder="选择类目后自动填充" /></label><div className="batch-actions"><button type="button" className="secondary-button" onClick={() => setReferenceOpen(true)}><ClipboardList size={16} />引用成功商品资料</button><small className="batch-help">选择成功商品，引用其类目、商品属性和完整规格。</small></div></>}
+      {tab === 'category' && <><div className="batch-field"><span>选择新产品类目</span><CategorySelect path={form.category} categoryId={form.categoryId} onChange={(option) => setForm((v) => ({ ...v, category: option.path, categoryId: option.id }))} /></div><label className="batch-field"><span>类目 ID（由选择或发布页绑定生成）</span><input value={form.categoryId} readOnly placeholder="选择类目后自动填充" /></label><div className="batch-actions"><button type="button" className="secondary-button" onClick={() => setReferenceOpen(true)}><ClipboardList size={16} />引用成功商品资料</button><small className="batch-help">选择成功商品，引用其类目、商品属性和完整规格。</small></div></>}
       {tab === 'trade' && <><label className="batch-field"><span>定价模式</span><select value={form.priceMode || ''} onChange={update('priceMode')}><option value="">保持原模式</option><option value="fob-range">FOB区间价格</option><option value="fob-tier">FOB阶梯价格</option><option value="quantity-tier">数量阶梯价格</option><option value="sku">SKU定价</option></select></label>{field('价格调整比例（%）', 'pricePercent', 'number')}{field('统一加减金额', 'priceFixed', 'number')}{field('统一库存', 'stock', 'number')}{field('统一起订量', 'moq', 'number')}{field('统一交期（天）', 'deliveryDays', 'number')}<div className="form-grid">{field('FOB最低价', 'fobMinPrice', 'number')}{field('FOB最高价', 'fobMaxPrice', 'number')}</div>{field('SKU统一价格', 'skuPrice', 'number')}{field('SKU统一库存', 'skuStock', 'number')}<div className="batch-actions"><button type="button" className="secondary-button" onClick={exportSku}>导出 SKU Excel</button><label className="file-button secondary-button">导入 SKU Excel<input type="file" accept=".xlsx,.xls,.csv,.txt" onChange={importSku} /></label></div></>}
       {tab === 'logistics' && <><label className="batch-field"><span>原产地（国家）</span><OriginCountrySelect value={form.origin} emptyLabel="保持原产地" onChange={(origin) => setForm((current) => ({ ...current, origin }))} /></label>{field('毛重（kg）', 'weight', 'number')}{field('包装长（cm）', 'length', 'number')}{field('包装宽（cm）', 'width', 'number')}{field('包装高（cm）', 'height', 'number')}</>}
-      {(tab === 'description' || tab === 'detail' || tab === 'service') && field('批量追加内容', 'description', 'text', true)}
+      {(tab === 'description' || tab === 'service') && field('批量追加内容', 'description', 'text', true)}
       {(tab === 'attributes' || tab === 'custom') && <><label className="batch-field"><span>修改方式</span><select value={form.attrMode} onChange={update('attrMode')}><option value="upsert">更新同名属性，不存在则新增</option><option value="append">追加属性</option><option value="replace">清空后只保留本属性</option></select></label>{field('属性名称', 'attrName')}{field('属性值', 'attrValue')}</>}
       {tab === 'specs' && <><label className="batch-field"><span>修改方式</span><select value={form.specMode} onChange={update('specMode')}><option value="upsert">更新同名规格，不存在则新增</option><option value="append">追加规格</option><option value="replace">清空后只保留本规格</option></select></label>{field('规格名称', 'specName')}{field('规格选项（逗号分隔）', 'specOption')}</>}
-      {tab === 'images' && <><p className="batch-help">会对所有已选商品的主图和详情图执行批量处理，并保留原始来源快照。</p><button className="secondary-button" onClick={() => applyImage('dedupe')}>图片去重并排序</button><button className="secondary-button" onClick={() => applyImage('copy-detail')}>主图复制为详情图</button><button className="secondary-button" onClick={() => applyImage('clean')}>清理空图片</button><button className="secondary-button danger-button" onClick={() => applyImage('clear-main')}>清空全部主图</button><div className="batch-slot-actions"><span>批量删除指定主图：</span>{[1,2,3,4,5,6].map((slot) => <button key={slot} className="secondary-button danger-button" onClick={() => applyImage(`delete-main-${slot}`)}>主图 {slot}</button>)}</div></>}
+      {tab === 'images' && <BatchImageEditor products={products} onSaved={onSaved} notify={notify} onGuardChange={setImageGuard} />}
+      {tab === 'detail' && <BatchDescriptionEditor products={products} onSaved={onSaved} notify={notify} onGuardChange={setImageGuard} />}
       {tab === 'regional' && <><label className="batch-field"><span>销售国家/地区</span><OriginCountrySelect ariaLabel="定价国家/地区" value={form.country} onChange={(country) => setForm((current) => ({ ...current, country }))} /></label>{field('该地区价格', 'countryPrice', 'number')}</>}
     </div>
-    <div className="batch-preview"><div className="batch-preview-title"><strong>修改预览</strong><span>先确认每个商品的当前值和修改后值，再点击保存</span></div><div className="batch-preview-table"><div className="batch-preview-head"><span>商品名称</span><span>旧值-修改前</span><span>新值-修改后</span></div>{products.map((product) => { const row = previewFor(product); return <div className="batch-preview-row" key={product.id}><strong title={product.title}>{product.title || '未命名商品'}</strong><span title={row.current}>{row.current}</span><span className={row.next.includes('等待') || row.next.includes('请选择') ? 'pending' : ''} title={row.next}>{row.next}</span></div>; })}</div></div>
-    <div className="drawer-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" onClick={apply}><Save size={17} />应用到 {products.length} 件商品</button></div>
+    {!['images', 'detail'].includes(tab) && <><div className="batch-preview"><div className="batch-preview-title"><strong>修改预览</strong><span>先确认每个商品的当前值和修改后值，再点击保存</span></div><div className="batch-preview-table"><div className="batch-preview-head"><span>商品名称</span><span>旧值-修改前</span><span>新值-修改后</span></div>{products.map((product) => { const row = previewFor(product); return <div className="batch-preview-row" key={product.id}><strong title={product.title}>{product.title || '未命名商品'}</strong><span title={row.current}>{row.current}</span><span className={row.next.includes('等待') || row.next.includes('请选择') ? 'pending' : ''} title={row.next}>{row.next}</span></div>; })}</div></div>
+    <div className="drawer-actions"><button type="button" className="secondary-button" onClick={closeBatch}>取消</button><button className="primary-button" onClick={apply}><Save size={17} />应用到 {products.length} 件商品</button></div></>}
   </aside>{referenceOpen && <ReferenceDialog products={products} references={references} onClose={() => setReferenceOpen(false)} onSaved={onSaved} notify={notify} />}</div>;
 }
 
@@ -776,6 +760,7 @@ function PublishCounts({ job }) {
 }
 
 function JobHistory({ jobs, refresh, notify }) {
+  const [viewingJob, setViewingJob] = useState(null);
   async function control(job, action) {
     try {
       await api(`/api/jobs/${job.id}/${action}`, { method: 'POST' });
@@ -790,6 +775,7 @@ function JobHistory({ jobs, refresh, notify }) {
         <div><strong>{job.type === 'collect' ? `${sourcePlatformLabel({ sourcePlatform: job.metadata?.sourcePlatform })} ${job.metadata?.collectionMethod === 'image-search' ? '以图搜品采集' : '商品采集'}` : job.metadata?.mode === 'submit' ? '批量直接发布' : '批量保存草稿'}</strong><small>{new Date(job.createdAt).toLocaleString('zh-CN')}</small></div>
         <div className="history-progress"><span>{job.message}</span><PublishCounts job={job} /></div><b>{job.progress}/{job.total || '-'}</b>
         <div className="history-action">
+          {job.type === 'publish' && job.status === 'paused' && <button className="icon-button" onClick={() => setViewingJob(job)} title="查看暂停画面" aria-label="查看暂停画面"><Eye size={16} /></button>}
           {['queued', 'running'].includes(job.status) && <button className="icon-button" onClick={() => control(job, 'pause')} title="暂停任务"><Pause size={16} /></button>}
           {job.status === 'pause_requested' && <button className="icon-button" disabled title="正在暂停"><LoaderCircle className="spin" size={16} /></button>}
           {job.status === 'paused' && <><button className="icon-button" onClick={() => control(job, 'resume')} title="继续任务"><Play size={16} /></button><button className="icon-button danger" onClick={() => control(job, 'cancel')} title="取消任务"><X size={16} /></button></>}
@@ -797,6 +783,7 @@ function JobHistory({ jobs, refresh, notify }) {
       </div>
       {job.metadata?.failures?.length > 0 && <details className="collection-failures"><summary>失败链接（{job.metadata.failures.length}）</summary>{job.metadata.failures.map((failure, index) => <div key={index}><a href={failure.url} target="_blank" rel="noreferrer">{failure.source}</a><span>{failure.error}</span></div>)}</details>}
     </div>)}
+    {viewingJob && <PublishPageView job={viewingJob} request={api} onClose={() => setViewingJob(null)} />}
   </section>;
 }
 
@@ -809,7 +796,7 @@ function SettingsView({ state, refresh, notify, onMenu }) {
     try { await api('/api/settings', { method: 'PATCH', body: JSON.stringify({ stockPolicy: form.stockPolicy, defaultStock: Number(form.defaultStock), priceMarkup: Number(form.priceMarkup) }) }); await refresh(); notify('默认规则已保存'); }
     catch (error) { notify(error.message, 'error'); }
   }
-  return <><Header title="设置" subtitle="管理新采集商品的默认规则" onMenu={onMenu} /><section className="panel settings-panel"><div className="section-title"><div><h2>采集与定价</h2><p>库存规则用于未公开库存的商品，手工填写的库存始终保留；加价规则仅用于新商品</p></div></div><form onSubmit={save} className="settings-form"><label><span>来源未公开库存时</span><select aria-label="来源未公开库存时" value={form.stockPolicy} onChange={(event) => setForm({ ...form, stockPolicy: event.target.value })}><option value="minimum-order">按商品起订量设置默认值</option><option value="fixed">使用固定默认库存</option></select></label><label><span>固定默认库存</span><input type="number" min="0" value={form.defaultStock} onChange={(event) => setForm({ ...form, defaultStock: event.target.value })} /></label><label><span>售价加价比例</span><div className="suffix-input"><input type="number" min="-99" step="0.1" value={form.priceMarkup} onChange={(event) => setForm({ ...form, priceMarkup: event.target.value })} /><b>%</b></div></label><button className="primary-button"><Save size={17} />保存规则</button></form></section><MarketplaceProcessing notify={notify} /><StorageCleanup refresh={refresh} notify={notify} onCleaned={() => api('/api/storage').then(setStorage)} /><section className="panel storage-panel"><div className="section-title"><div><h2>图片与视频存储目录</h2><p>以下是当前实际使用的本地目录，磁盘不足时可在这里定位并清理临时文件</p></div></div>{storage ? <div className="storage-list"><div><strong>商品工作区</strong><code>{storage.workspace}</code><small>{Math.round((storage.bytes.workspace || 0) / 1024)} KB</small></div><div><strong>采集/上架图片</strong><code>{storage.images}</code><small>{Math.round((storage.bytes.images || 0) / 1024 / 1024 * 10) / 10} MB</small></div><div><strong>视频文件</strong><code>{storage.videos}</code><small>{Math.round((storage.bytes.videos || 0) / 1024 / 1024 * 10) / 10} MB</small></div><div><strong>媒体上传目录</strong><code>{storage.media}</code><small>{Math.round((storage.bytes.media || 0) / 1024 / 1024 * 10) / 10} MB</small></div><p className="batch-help">删除图片或视频前请确认没有正在执行的上架任务。</p></div> : <div className="muted-row">正在读取存储目录…</div>}</section><section className="panel security-panel"><div className="security-icon"><Eye size={20} /></div><div><h3>浏览器登录数据</h3><p>账号密码不写入商品数据库。My Alibaba 登录状态仅保存在本机独立浏览器目录中。</p></div></section></>;
+  return <><Header title="设置" subtitle="管理新采集商品的默认规则" onMenu={onMenu} /><section className="panel settings-panel"><div className="section-title"><div><h2>采集与定价</h2><p>库存规则用于未公开库存的商品，手工填写的库存始终保留；加价规则仅用于新商品</p></div></div><form onSubmit={save} className="settings-form"><label><span>来源未公开库存时</span><select aria-label="来源未公开库存时" value={form.stockPolicy} onChange={(event) => setForm({ ...form, stockPolicy: event.target.value })}><option value="minimum-order">按商品起订量设置默认值</option><option value="fixed">使用固定默认库存</option></select></label><label><span>固定默认库存</span><input type="number" min="0" value={form.defaultStock} onChange={(event) => setForm({ ...form, defaultStock: event.target.value })} /></label><label><span>售价加价比例</span><div className="suffix-input"><input type="number" min="-99" step="0.1" value={form.priceMarkup} onChange={(event) => setForm({ ...form, priceMarkup: event.target.value })} /><b>%</b></div></label><button className="primary-button"><Save size={17} />保存规则</button></form></section><PublishingRiskSetting settings={state.settings} request={api} refresh={refresh} notify={notify} /><MarketplaceProcessing notify={notify} /><StorageCleanup refresh={refresh} notify={notify} onCleaned={() => api('/api/storage').then(setStorage)} /><section className="panel storage-panel"><div className="section-title"><div><h2>图片与视频存储目录</h2><p>以下是当前实际使用的本地目录，磁盘不足时可在这里定位并清理临时文件</p></div></div>{storage ? <div className="storage-list"><div><strong>商品工作区</strong><code>{storage.workspace}</code><small>{Math.round((storage.bytes.workspace || 0) / 1024)} KB</small></div><div><strong>采集/上架图片</strong><code>{storage.images}</code><small>{Math.round((storage.bytes.images || 0) / 1024 / 1024 * 10) / 10} MB</small></div><div><strong>视频文件</strong><code>{storage.videos}</code><small>{Math.round((storage.bytes.videos || 0) / 1024 / 1024 * 10) / 10} MB</small></div><div><strong>媒体上传目录</strong><code>{storage.media}</code><small>{Math.round((storage.bytes.media || 0) / 1024 / 1024 * 10) / 10} MB</small></div><p className="batch-help">删除图片或视频前请确认没有正在执行的上架任务。</p></div> : <div className="muted-row">正在读取存储目录…</div>}</section><section className="panel security-panel"><div className="security-icon"><Eye size={20} /></div><div><h3>浏览器登录数据</h3><p>账号密码不写入商品数据库。My Alibaba 登录状态仅保存在本机独立浏览器目录中。</p></div></section></>;
 }
 
 const NAV = [
@@ -839,7 +826,7 @@ export default function App() {
     // StrictMode and the polling timer cannot queue repeated multi-megabyte
     // JSON parses and React renders in the Electron renderer.
     if (refreshInFlight.current) return refreshInFlight.current;
-    const request = api(`/api/state?revision=${encodeURIComponent(stateRevision.current)}`)
+    const request = api(`/api/state?view=summary&revision=${encodeURIComponent(stateRevision.current)}`)
       .then((nextState) => {
         if (mounted.current) {
           stateRevision.current = nextState.revision;

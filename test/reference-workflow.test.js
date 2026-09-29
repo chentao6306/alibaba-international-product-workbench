@@ -3,6 +3,52 @@ import assert from 'node:assert/strict';
 import { buildReferencePatch, previewProductReference, applyReferencePreview, failedPublishProducts, referenceCandidates } from '../server/reference-workflow.js';
 import { syncProductModel, verifySourceIntegrity } from '../server/product-model.js';
 import { postingPageProblem } from '../server/posting-readiness.js';
+import { preparePublishProduct } from '../server/publisher.js';
+import { sourceAttributeForField } from '../server/category-attributes.js';
+
+test('previews and saves a complete phone reference without resurrecting old province, feature or 64-SKU values', () => {
+  const group = (name, options) => ({ name, options });
+  const colors = ['Black', 'Green', 'Pink', 'White'], plugs = ['AU', 'EU', 'UK', 'US'];
+  const target = syncProductModel({ id: 'phone', status: 'publish_failed', categoryId: '201896803',
+    title: 'Source phone', model: 'CN0144', origin: 'China', province: 'Invalid province', price: 99,
+    attributes: [{ name: '省份', value: 'Invalid province', valueIds: { 'Invalid province': 'old-value-id' } },
+      { name: 'Model Number', value: 'CN0144' }, { name: 'feature', value: ['Old feature', 'Conflicting feature'] }],
+    customAttributes: [{ name: 'Province', value: 'Stale custom province' }],
+    variantGroups: [group('color', colors), group('plug', plugs), group('ram', ['4 G', '16g']), group('storage capacity', ['128 GB', '1TB'])],
+    skus: colors.flatMap((color) => plugs.flatMap((plug) => ['4 G', '16g'].flatMap((ram) => ['128 GB', '1TB'].map((storage) => ({
+      attributes: { color, plug, ram, 'storage capacity': storage }, price: 99, stock: 1,
+    }))))),
+    description: 'Keep original seller description', detailImages: ['https://example.test/source.jpg'],
+    publishResult: { status: 'failed', requiredFields: ['省份', '功能/特性'], message: '属性值错误' },
+  }, { captureSource: true });
+  const reference = { id: 'accepted-phone', status: 'published', categoryId: '201896803', model: 'DAK-23A', origin: 'China', province: 'Guangdong',
+    attributes: [{ name: 'Model Number', value: 'DAK-23A' }, { name: 'Province', value: 'Guangdong', valueIds: { Guangdong: 'accepted-id' } },
+      { name: 'feature', value: ['Beauty Camera', 'Dual SIM Card'] }],
+    variantGroups: [group('color', colors), group('plug', plugs), group('ram', ['12g', '16g']), group('storage capacity', ['1TB', '256 GB', '512 GB'])],
+  };
+  const state = { products: [target, reference], jobs: [] }, before = structuredClone(target);
+  const request = { ids: ['phone'], referenceId: 'accepted-phone', options: { scope: 'full' } };
+  const preview = previewProductReference(state, request);
+  assert.deepEqual(target, before, 'Preview is read-only');
+  assert.equal(target.skus.length, 64);
+  assert.equal(preview.items[0].patch.skus.length, 96);
+  assert.equal(preview.items[0].patch.province, 'Guangdong');
+  applyReferencePreview(state, { ...request, previewToken: preview.token });
+  const saved = JSON.parse(JSON.stringify(target));
+  const payload = preparePublishProduct(saved);
+  assert.equal(saved.status, 'ready'); assert.equal(saved.publishResult, undefined);
+  assert.equal(saved.referenceRecovery.failure.requiredFields[0], '省份');
+  assert.equal(payload.model, 'DAK-23A'); assert.equal(payload.province, 'Guangdong'); assert.equal(payload.origin, 'China');
+  assert.equal(sourceAttributeForField(payload, { label: '型号' }).value, 'DAK-23A');
+  assert.deepEqual(sourceAttributeForField(payload, { label: '功能/特性', multiple: true }).value, ['Beauty Camera', 'Dual SIM Card']);
+  assert.equal(payload.skus.length, 96);
+  assert.equal(new Set(payload.skus.map((sku) => JSON.stringify(sku.attributes))).size, 96);
+  assert.deepEqual([...new Set(payload.skus.map((sku) => sku.attributes.ram))], ['12g', '16g']);
+  assert.ok(payload.skus.every((sku) => sku.price === '99.00' && sku.attributes['storage capacity'] !== '128 GB'));
+  assert.doesNotMatch(JSON.stringify([...payload.attributes, ...payload.customAttributes]), /Invalid province|old-value-id|Stale custom province|CN0144|Old feature/);
+  for (const key of ['title', 'description', 'detailImages', 'source']) assert.deepEqual(saved[key], before[key], key);
+  assert.equal(verifySourceIntegrity(saved).valid, true);
+});
 
 function fixture() {
   const target = syncProductModel({ id: 'target', status: 'publish_failed', title: 'Early learning book', price: 12, stock: 0,

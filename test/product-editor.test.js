@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { changeEditorCategory, createEditorForm, editorPayload, editAttribute, rebuildEditorSkus, updateDeliveryCell } from '../src/product-editor-model.js';
+import { changeEditorCategory, createEditorForm, editorPayload, editAttribute, editorAttributeRows, rebuildEditorSkus, updateDeliveryCell } from '../src/product-editor-model.js';
 import { previewProductReference, applyReferencePreview } from '../server/reference-workflow.js';
 import { productEditPatch } from '../server/product-edit.js';
 
@@ -14,6 +14,32 @@ const product = () => ({ id: 'target', status: 'publish_failed', title: 'Propell
   variantGroups: [{ name: 'Color', options: ['Black'], optionImages: { Black: 'black.jpg' } }],
   skus: [{ attributes: { Color: 'Black' }, code: 'KEEP', stock: 0, price: 2.9, enabled: false, image: 'black.jpg' }],
   publishResult: { status: 'failed', requiredFields: ['Brand Name'], message: 'Brand missing' } });
+
+test('schema attributes keep row identity and order while optional and required values are first entered', () => {
+  let form = createEditorForm(product());
+  const before = structuredClone(form);
+  const fields = [{ id: 'application', label: '应用领域', required: true }, { id: 'notes', label: '使用说明', required: false }];
+  const rows = editorAttributeRows(form, fields);
+  assert.deepEqual(form, before, 'displaying missing fields does not modify the saved payload');
+  const notes = rows.find((row) => row.descriptor?.id === 'notes');
+  form = editAttribute(form, notes.index, { ...notes.item, value: 'Indoor use only' });
+  assert.deepEqual(editorAttributeRows(form, fields).map((row) => row.key), rows.map((row) => row.key));
+  const application = editorAttributeRows(form, fields).find((row) => row.descriptor?.id === 'application');
+  form = editAttribute(form, application.index, { ...application.item, value: 'Christmas decorations' });
+  assert.deepEqual(editorAttributeRows(form, fields).map((row) => row.key), rows.map((row) => row.key));
+  assert.equal(editorPayload(form).attributes.find((item) => item.id === 'application').value, 'Christmas decorations');
+  assert.equal(editorPayload(form).attributes.find((item) => item.id === 'notes').value, 'Indoor use only');
+});
+
+test('schema rows use property IDs before translated names without merging distinct same-name properties', () => {
+  const form = { attributes: [{ id: 'a', name: 'Function', value: 'one' }, { id: 'b', name: 'Function', value: 'two' }, { name: 'Brand Name', value: 'Own' }] };
+  const fields = [{ id: 'b', label: '功能', options: ['two', 'three'] }, { id: 'a', label: '功能' }, { id: 'brand', label: '品牌名称' }];
+  const rows = editorAttributeRows(form, fields);
+  assert.equal(rows.length, 3);
+  assert.equal(rows.find((row) => row.descriptor.id === 'a').item.value, 'one');
+  assert.equal(rows.find((row) => row.descriptor.id === 'b').item.value, 'two');
+  assert.equal(rows.find((row) => row.descriptor.id === 'brand').item.value, 'Own');
+});
 
 test('editing a title preserves collected multi-values, prices, delivery ranges, structured data and video roles', () => {
   const original = product(), source = structuredClone(original);

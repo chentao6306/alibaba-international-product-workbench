@@ -21,6 +21,9 @@ export function cleanupWorkspace(store, root, request = {}) {
       throw Object.assign(new Error('存储目录异常，无法清理'), { status: 409 });
     }
   }
+  if (scopes.includes('media') && JSON.stringify(state.descriptionTemplates || []).includes('/media/')) {
+    throw Object.assign(new Error('上传图片仍被详情模板引用，请先在模板管理中移除对应图片'), { status: 409 });
+  }
   if (scopes.includes('media') && !scopes.includes('products') && JSON.stringify(state.products).includes('/media/')) {
     throw Object.assign(new Error('上传图片仍被商品引用，请先删除对应商品或同时选择清理商品资料'), { status: 409 });
   }

@@ -49,7 +49,7 @@ async function main() {
   const original = SellerPublisher.prototype.publishProduct;
   SellerPublisher.prototype.publishProduct = async function (...args) {
     const [product, , mode] = args;
-    const page = await this.currentSellerPage('', { showPublishing: true });
+    const page = await this.currentSellerPage('', { backgroundPublishing: true });
     if (!matchesAlibabaSession(await page.context().cookies(), account, page.url())) throw new Error('Seller account mismatch');
     const row = { sourceId: product.sourceId, categoryId: product.categoryId, mode, options: args[6], started: new Date().toISOString(), stages: [] };
     ledger.push(row); save();
@@ -64,9 +64,16 @@ async function main() {
     } finally {
       row.fields = await this.page?.evaluate(readPostingAttributeSchema).catch(() => []) || [];
       row.fields = row.fields.map((field) => ({ ...field, sourceValue: sourceAttributeForField(product, field)?.value }));
+      row.specification = await this.page?.locator('#struct-specification').evaluate((node) => ({
+        text: node.innerText,
+        colors: [...node.querySelectorAll('input[role="colorCombobox"]')].map((input) => ({
+          value: input.value,
+          html: input.closest('.posting-feild-color-item, .posting-field-color-item, .posting-feild-color-item-container')?.outerHTML,
+        })),
+      })).catch(() => null);
       await this.page?.screenshot({ path: path.join(output, `${product.sourceId}-${mode}.png`) }).catch(() => {});
       row.finished = new Date().toISOString(); save();
-      console.log(JSON.stringify({ id: product.sourceId, result: row.result, error: row.error, required: row.fields.filter((field) => field.required) }));
+      console.log(JSON.stringify({ id: product.sourceId, result: row.result, error: row.error }));
     }
   };
   const server = await import('../server/index.js');

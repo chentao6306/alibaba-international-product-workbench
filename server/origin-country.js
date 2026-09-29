@@ -21,7 +21,7 @@ for (const country of ORIGIN_COUNTRIES) {
   for (const value of [country.code, country.name, country.label, ...(CODES.includes(country.code) ? [english.of(country.code)] : [])]) aliases.set(normalized(value), country.name);
   for (const value of [`${country.name} (${country.label})`, `${country.name}(${country.label})`, `${country.label} (${country.name})`, `${country.name} ${country.label}`]) aliases.set(normalized(value), country.name);
 }
-for (const [alias, code] of [['中国大陆', 'CN'], ['中国', 'CN'], ['中国香港', 'HK'], ['香港', 'HK'], ['中国澳门', 'MO'], ['澳门', 'MO'], ['中国台湾', 'TW'], ['台湾', 'TW'], ['USA', 'US'], ['UK', 'GB'], ['Korea', 'KR']]) {
+for (const [alias, code] of [['中国大陆', 'CN'], ['中国', 'CN'], ['Mainland China', 'CN'], ['China (Mainland)', 'CN'], ['中国香港', 'HK'], ['香港', 'HK'], ['Hong Kong', 'HK'], ['中国澳门', 'MO'], ['澳门', 'MO'], ['Macao', 'MO'], ['Macau', 'MO'], ['中国台湾', 'TW'], ['台湾', 'TW'], ['USA', 'US'], ['UK', 'GB'], ['Korea', 'KR']]) {
   aliases.set(normalized(alias), ORIGIN_COUNTRIES.find((country) => country.code === code).name);
 }
 
@@ -32,9 +32,24 @@ export function originCountry(value) {
   const parts = text.split(/[,，;；>\n]/).map((part) => part.trim()).filter(Boolean);
   const matches = [...new Set(parts.filter((part) => aliases.has(part)).map((part) => aliases.get(part)))];
   if (matches.length === 1) return matches[0];
+  if (matches.length > 1) return '';
+  // Public detail pages sometimes put a mainland province in Place of Origin.
+  // Resolve only explicit province names, not arbitrary city/address strings.
+  const province = text.replace(/\s+province$/i, '').replace(/省$/, '').trim();
+  if (MAINLAND_PROVINCES.has(province)) return 'China';
   if (/^中国(?:广东|浙江|江苏|福建|上海|北京|山东|深圳|广州)/.test(text)) return 'China';
   return '';
 }
+
+const MAINLAND_PROVINCES = new Set([
+  'anhui', '安徽', 'fujian', '福建', 'gansu', '甘肃', 'guangdong', '广东', 'guizhou', '贵州',
+  'hainan', '海南', 'hebei', '河北', 'heilongjiang', '黑龙江', 'henan', '河南', 'hubei', '湖北',
+  'hunan', '湖南', 'jiangsu', '江苏', 'jiangxi', '江西', 'jilin', '吉林', 'liaoning', '辽宁',
+  'qinghai', '青海', 'shaanxi', '陕西', 'shandong', '山东', 'shanxi', '山西', 'sichuan', '四川',
+  'yunnan', '云南', 'zhejiang', '浙江', 'beijing', '北京', 'chongqing', '重庆', 'shanghai', '上海',
+  'tianjin', '天津', 'guangxi', '广西', 'inner mongolia', '内蒙古', 'ningxia', '宁夏',
+  'xinjiang', '新疆', 'xizang', 'tibet', '西藏',
+]);
 
 export function isOriginRegionAttribute(name) {
   return /^(?:省|省份|省市|城市|province|state|city|province\s*\/\s*state|state\s*\/\s*province)$/i.test(String(name || '').trim());
@@ -48,8 +63,9 @@ export function isOriginAttribute(name) {
 
 export function productOrigin(product = {}) {
   if (String(product.origin ?? '').trim()) return originCountry(product.origin);
-  const values = [...(product.attributes || []), ...(product.customAttributes || [])]
-    .filter((item) => isOriginAttribute(item.name)).map((item) => originCountry(item.value)).filter(Boolean);
+  const entries = [...(product.attributes || []), ...(product.customAttributes || [])].filter((item) => isOriginAttribute(item.name));
+  const categoryEntries = entries.filter((item) => !/^description-/.test(item.source || ''));
+  const values = (categoryEntries.length ? categoryEntries : entries).map((item) => originCountry(item.value)).filter(Boolean);
   const countries = [...new Set(values)];
   return countries.length === 1 ? countries[0] : '';
 }

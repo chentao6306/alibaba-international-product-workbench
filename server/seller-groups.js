@@ -1,3 +1,5 @@
+import { clickPostingControl } from './posting-interaction.js';
+
 const selector = '#struct-productGroup .product-group-select';
 const popupSelector = '.posting-field-group:visible';
 
@@ -6,7 +8,7 @@ async function closeTree(page) {
   const input = control.locator('input');
   await (await input.count() ? input : control).focus();
   await page.keyboard.press('Escape');
-  if (await control.getAttribute('aria-expanded') === 'true') await control.click();
+  if (await control.getAttribute('aria-expanded') === 'true') await clickPostingControl(page, control);
   await page.locator(popupSelector).waitFor({ state: 'hidden', timeout: 5000 });
 }
 
@@ -22,7 +24,7 @@ async function openTree(page) {
   await control.waitFor({ state: 'visible', timeout: 30000 });
   if (await control.getAttribute('aria-expanded') !== 'true') {
     await page.locator(popupSelector).waitFor({ state: 'hidden', timeout: 5000 });
-    await control.click();
+    await clickPostingControl(page, control);
   }
   const popup = page.locator(popupSelector);
   await popup.waitFor({ state: 'visible', timeout: 15000 });
@@ -33,7 +35,7 @@ async function openTree(page) {
     const switcher = popup.locator('[role="treeitem"][aria-expanded="false"] > .next-tree-switcher:not([class*="noop"])').first();
     if (!await switcher.count()) return popup;
     const id = normalizeSellerGroup({ id: await switcher.locator('../..').getAttribute('value') }).id;
-    await switcher.click();
+    await clickPostingControl(page, switcher);
     await popup.locator(`li.next-tree-node[value="${id}"] > [role="treeitem"][aria-expanded="true"]`).waitFor({ state: 'visible', timeout: 10000 });
   }
   throw new Error('国际站分组数量过多，无法完整读取');
@@ -65,7 +67,7 @@ export async function applySellerGroup(page, value) {
   const name = await item.getAttribute('aria-label');
   // Publishing checks the group twice. Clicking an already selected tree item can toggle it off.
   if (await item.getAttribute('aria-selected') !== 'true') {
-    await item.locator('.next-tree-node-label').click();
+    await clickPostingControl(page, item.locator('.next-tree-node-label'));
     await popup.waitFor({ state: 'hidden', timeout: 2000 }).catch(() => {});
     await openTree(page);
   }

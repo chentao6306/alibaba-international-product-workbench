@@ -1,0 +1,31 @@
+.batch-image-editor { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.batch-image-editor fieldset { border: 1px solid #dce4e5; border-radius: 8px; padding: 15px; min-width: 0; margin: 0; }
+.batch-image-editor legend { font-weight: 700; padding: 0 7px; color: #28565a; }
+.batch-image-editor label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.batch-image-editor input, .batch-image-editor select { max-width: 100%; min-width: 0; padding: 8px; border: 1px solid #cbd5d8; border-radius: 5px; }
+.bie-actions, .bie-footer { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+.bie-actions input[type=number] { width: 90px; }
+.bie-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.bie-upload { flex: 1 1 180px; }
+.bie-upload input { width: 100%; }
+.bie-watermark-upload { grid-column: 1 / -1; min-width: 0; }
+.bie-watermark-preview { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 12px; }
+.bie-watermark-preview img { width: 140px; height: 90px; object-fit: contain; border: 1px solid #dce4e5; border-radius: 6px; background: repeating-conic-gradient(#e9eded 0% 25%, #fff 0% 50%) 50% / 16px 16px; }
+.bie-watermark-preview span { overflow-wrap: anywhere; min-width: 0; font-size: 13px; }
+.batch-image-editor small { color: #687c80; display: block; margin-top: 10px; }
+.bie-error { color: #b52a1d; background: #fff1ef; padding: 10px; border-radius: 6px; }
+.bie-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(145px, 1fr)); gap: 12px; }
+.bie-grid article { border: 1px solid #dce4e5; border-radius: 8px; padding: 8px; display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.bie-grid img { width: 100%; height: 130px; object-fit: contain; background: #f3f6f6; }
+.bie-grid button { font-size: 12px; padding: 8px; }
+.bie-comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.bie-comparison figure { margin: 0; padding: 10px; border: 1px solid #dce4e5; border-radius: 8px; }
+.bie-comparison img { width: 100%; max-height: 340px; object-fit: contain; }
+.bie-comparison figcaption { margin-bottom: 8px; font-weight: bold; }
+.bie-selection { position: relative; width: fit-content; max-width: 100%; margin: 12px auto; touch-action: none; user-select: none; cursor: crosshair; }
+.bie-selection img { display: block; max-width: 100%; max-height: 520px; width: auto; height: auto; pointer-events: none; }
+.bie-selection span { position: absolute; background: #ef6c0040; outline: 2px solid #ef6c00; pointer-events: none; }
+.batch-image-editor .bie-check { flex-direction: row; align-items: start; }
+.bie-summary { max-height: 160px; overflow: auto; font-size: 12px; color: #65787c; }
+.bie-footer { position: sticky; bottom: -20px; padding: 14px 0; background: white; border-top: 1px solid #dce4e5; z-index: 2; }
+@media (max-width: 600px) { .bie-settings, .bie-comparison { grid-template-columns: 1fr; } .bie-actions button { max-width: 100%; } }

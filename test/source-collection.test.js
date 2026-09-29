@@ -76,7 +76,7 @@ test('reads modern and legacy detail modules without collecting recommendation i
       if (route.request().resourceType() !== 'document') return route.abort();
       if (route.request().url().includes('/descIframe.html')) return route.fulfill({ contentType: 'text/html',
         body: '<div id="detail_decorate_root"><p>Original product description with a picture also used in its gallery.</p><img data-src="https://sc04.alicdn.com/kf/main0.jpg_960x960.jpg"><table><tr><td>Package Weight</td><td>185g</td></tr></table><video src="https://video.example/detail.mp4"></video></div>' });
-      return route.fulfill({ contentType: 'text/html', body: `<html lang="en"><body><h1>Sample Phone</h1>${gallery}
+      return route.fulfill({ contentType: 'text/html; charset=utf-8', body: `<html lang="en"><body><h1>Sample Phone</h1>${gallery}
         <div data-module-name="module_gallery"><video src="https://video.example/main.mp4"></video></div>
         <nav class="breadcrumb"><a href="https://www.alibaba.com/parent_cid123456.html">Parent</a><a href="https://www.alibaba.com/leaf_cid234567.html">Leaf</a></nav>
         <div data-testid="module-attribute-row"><span data-testid="module-attribute-name">Place of Origin</span><span data-testid="module-attribute-value">China</span></div>
@@ -92,6 +92,7 @@ test('reads modern and legacy detail modules without collecting recommendation i
     for (const module of ['module_structure_description', 'module_description', 'missing', 'structured-data-only', 'late-iframe']) {
       description = ['missing', 'structured-data-only'].includes(module) ? '' : `<div data-module-name="${module}">
         <div data-module-name="module_report">Report abuse</div><p>Source specification</p><img data-src="https://sc04.alicdn.com/kf/detail.jpg">
+        <table><tr><td>原产地</td><td>Japan</td></tr></table>
         </div>`;
       privateData = module === 'structured-data-only' ? { productDescription: { details: [{ type: 'image', url: 'https://sc04.alicdn.com/kf/structured.jpg' }] } } : {};
       renderType = module === 'late-iframe' ? 'js_ssr' : '';
@@ -116,7 +117,12 @@ test('reads modern and legacy detail modules without collecting recommendation i
       assert.equal(product.videos.some((item) => /unrelated/.test(item.url)), false);
       if (module === 'late-iframe') {
         assert.equal(product.attributes.find((item) => item.name === 'Package Weight').value, '185g');
+        assert.equal(product.attributes.find((item) => item.name === 'Package Weight').source, 'description-iframe');
         assert.equal(product.videos.find((item) => item.role === 'detail')?.url, 'https://video.example/detail.mp4');
+      }
+      if (['module_structure_description', 'module_description'].includes(module)) {
+        assert.equal(product.attributes.find((item) => item.name === '原产地').source, 'description-dom');
+        assert.match(product.descriptionHtml, /Japan/);
       }
     }
   } finally {

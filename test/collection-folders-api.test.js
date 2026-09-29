@@ -65,7 +65,7 @@ test('collection stays in its job folder and publishing captures only that folde
     await wait(() => state().jobs.every((job) => job.status === 'completed'));
     const { onCategorySchema, ...publishOptions } = published[6];
     assert.equal(typeof onCategorySchema, 'function');
-    assert.deepEqual(publishOptions, { sellerGroup: group, listingMode: 'auto', stockPolicy: 'minimum-order', defaultStock: 100 });
+    assert.deepEqual(publishOptions, { sellerGroup: group, listingMode: 'auto', stockPolicy: 'minimum-order', defaultStock: 100, allowPolicyWarningPublish: false });
     assert.equal(published[0].collectionFolderId, b.id);
     assert.equal(published[0].stock, 75);
     assert.equal(published[0].stockProvenance.stock, 'manual');

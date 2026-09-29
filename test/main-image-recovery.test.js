@@ -6,6 +6,83 @@ import path from 'node:path';
 import { chromium } from 'playwright-core';
 import { findChromium } from '../server/browser-runtime.js';
 import { SellerPublisher, mainImageUploadRecords, restoreMainImageOrder } from '../server/publisher.js';
+import { publishEnvironmentBlockCode } from '../server/publish-recovery.js';
+import { userFacingError } from '../server/browser-error.js';
+
+test('uploads from moving inline labels inside a scroller after a late dismissible notice without touching another uploader', { skip: !findChromium(), timeout: 45000 }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'main-image-moving-'));
+  const files = ['one', 'two', 'three', 'four'].map((name) => {
+    const file = path.join(directory, `${name}.jpg`); fs.writeFileSync(file, 'fixture'); return file;
+  });
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<style>
+      @keyframes moving { from { transform:translateX(0) } to { transform:translateX(30px) } }
+      #image-placeholder-span { display:inline-block; animation:moving .7s linear infinite alternate }
+      .image-upload-list-item { display:inline-block; width:160px; height:90px }
+      .next-dialog { position:fixed; inset:0; background:white; z-index:100 }
+    </style><div id="scroller" style="height:400px;overflow:auto"><div style="height:1200px"></div>
+      <div class="image-uploader"></div><div style="height:1200px"></div></div>
+      <div class="sc-images-upload-dropdown" style="display:none;position:fixed"><input type="file" multiple accept="image/jpeg"></div>
+      <input id="unrelated" type="file" multiple><script>
+      window.uploads=0;window.wrongUploads=0;window.bankOpened=0;window.closedNotice=0;window.prompted=false;
+      document.querySelector('#unrelated').onchange=()=>window.wrongUploads++;
+      const root=document.querySelector('.image-uploader'), portal=document.querySelector('.sc-images-upload-dropdown');
+      for(let i=0;i<6;i++){
+        const slot=document.createElement('div');slot.className='image-upload-list-item';
+        slot.innerHTML='<span id="image-placeholder-span">上传图片</span>';
+        slot.onmouseenter=()=>{
+          if(!window.prompted){
+            window.prompted=true;
+            const notice=document.createElement('div');notice.className='next-dialog';notice.setAttribute('role','dialog');
+            notice.innerHTML='<p>上传图片操作提示</p><button>我知道了</button>';
+            notice.querySelector('button').onclick=()=>{
+              window.closedNotice++;notice.remove();
+              const label=slot.querySelector('span');label.replaceWith(label.cloneNode(true));
+            };document.body.append(notice);return;
+          }
+          if(document.querySelector('.next-dialog'))return;
+          const box=slot.getBoundingClientRect();portal.style.left=box.x+'px';portal.style.top=box.bottom+'px';portal.style.display='block';
+        };
+        slot.onclick=()=>window.bankOpened++;root.append(slot);
+      }
+      portal.querySelector('input').onchange=event=>{
+        window.uploads++;
+        [...event.target.files].forEach((file,i)=>{root.children[i].innerHTML='<img src="https://example.test/'+file.name+'" width="80" height="80">'});
+        portal.style.display='none';
+      };
+    </script>`);
+    const publisher = new SellerPublisher(directory);
+    publisher.downloadImageSet = async () => files;
+    assert.equal(await publisher.uploadMainImages(page, { mainImages: files }), 4);
+    assert.deepEqual(await page.evaluate(() => [window.uploads, window.wrongUploads, window.bankOpened, window.closedNotice]), [1, 0, 0, 1]);
+    assert.equal(await page.locator('.image-uploader img').count(), 4);
+  } finally { await browser.close(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('bounds repeated main-image control failures and preserves them as a paused operation', { skip: !findChromium() }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<div class="image-uploader">Waiting for upload control</div>');
+    const publisher = new SellerPublisher('.');
+    publisher.downloadImageSet = async () => ['one.jpg', 'two.jpg', 'three.jpg', 'four.jpg'];
+    let attempts = 0;
+    publisher.uploadMainImageBatch = async () => {
+      attempts++;
+      throw new Error('locator.scrollIntoViewIfNeeded: Timeout 3000ms exceeded. Call log: waiting for image-placeholder-span');
+    };
+    await assert.rejects(publisher.uploadMainImages(page, {}), (error) => {
+      assert.equal(error.code, 'MAIN_IMAGE_CONTROL_NOT_READY');
+      assert.equal(publishEnvironmentBlockCode(error), error.code);
+      assert.match(error.cause.message, /scrollIntoViewIfNeeded/);
+      assert.doesNotMatch(userFacingError(error), /locator\.|Timeout|Call log/);
+      return true;
+    });
+    assert.equal(attempts, 3);
+  } finally { await browser.close(); }
+});
 
 test('re-enters a delayed main-image hover menu without opening the image bank', { skip: !findChromium(), timeout: 30000 }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'main-image-hover-'));
@@ -120,6 +197,7 @@ test('failed main-image records can be removed and source order restored without
     let attempts = 0;
     publisher.uploadMainImageBatch = async () => {
       if (++attempts === 1) throw Object.assign(new Error('Portal remounted'), { code: 'IMAGE_UPLOAD_TIMEOUT' });
+      if (attempts === 2) throw new Error('locator.scrollIntoViewIfNeeded: Timeout 3000ms exceeded. Call log: waiting for image-placeholder-span');
       assert.deepEqual((await mainImageUploadRecords(page)).map((file) => file.name), ['first.jpg', 'second.jpg']);
       await page.evaluate(() => {
         window.files.push(...['third', 'fourth'].map((name) => ({ uid: `${name}-fresh`, fileName: `${name}.jpg`, status: 'done', fileURL: `https://example.com/${name}.jpg` })));
@@ -128,7 +206,7 @@ test('failed main-image records can be removed and source order restored without
       return 2;
     };
     await publisher.uploadMainImages(page, {});
-    assert.equal(attempts, 2);
+    assert.equal(attempts, 3);
     assert.deepEqual((await mainImageUploadRecords(page)).map((file) => file.name), filenames);
   } finally { await browser.close(); }
 });

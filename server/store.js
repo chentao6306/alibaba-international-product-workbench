@@ -19,7 +19,8 @@ const EMPTY_STATE = {
     publishDelayMinSeconds: 0,
     publishDelayMaxSeconds: 0,
     priceMarkup: 0,
-    publishMode: 'submit'
+    publishMode: 'submit',
+    allowPolicyWarningPublish: false,
   }
 };
 

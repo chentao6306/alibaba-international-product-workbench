@@ -12,6 +12,15 @@ export function createActivationCredential() {
   return { activationCode, credentialHash: crypto.createHash('sha256').update(activationCode).digest('hex') };
 }
 
+export function credentialResetRevokesSessions(license, revokeSessions = true) {
+  if (typeof revokeSessions !== 'boolean') {
+    throw Object.assign(new Error('退出已登录设备选项必须为布尔值'), { status: 400 });
+  }
+  // Keep the previous API default for older admin pages. Enabling credentials
+  // must always revoke sessions that never verified an activation code.
+  return !license.credential_required || revokeSessions;
+}
+
 export function validActivation(license, value) {
   if (!license?.credential_required) return true;
   if (typeof value !== 'string' || !/^CDK-[A-Za-z0-9_-]{43}$/.test(value.trim())) return false;

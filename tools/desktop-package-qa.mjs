@@ -63,7 +63,16 @@ try {
   assert.equal(await window.locator('#login').isEnabled(), true);
   await window.evaluate(() => window.kuaYipu.loadCredentials());
   assert.equal(await window.locator('#error').textContent(), '');
-  assert.equal((await fetch(`http://127.0.0.1:${apiPort}/health`)).status, 200);
+  // The login window is now responsive before the background service finishes
+  // startup. Wait for readiness independently instead of assuming UI == API.
+  let health;
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    health = await fetch(`http://127.0.0.1:${apiPort}/health`, { signal: AbortSignal.timeout(2000) }).catch(() => null);
+    if (health?.ok) break;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  assert.equal(health?.status, 200);
   assert.equal((await fetch(`http://127.0.0.1:${apiPort}/api/state`)).status, 401);
   await window.screenshot({ path: path.join(root, 'packaged-login.png') });
 } finally {

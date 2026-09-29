@@ -10,7 +10,7 @@ export default async function preparePackage() {
     await fs.rm(destination, { recursive: true, force: true });
     await fs.mkdir(destination, { recursive: true });
     for (const name of await fs.readdir(path.join(root, directory))) {
-      if (!/\.(?:js|cjs|html)$/.test(name) || name === 'preload.js') continue;
+      if (!/\.(?:js|cjs|html)$/.test(name)) continue;
       const source = await fs.readFile(path.join(root, directory, name), 'utf8');
       // Keep function-local identifiers stable for Playwright's serialized
       // callbacks. ASAR integrity, not minification, enforces tamper detection.

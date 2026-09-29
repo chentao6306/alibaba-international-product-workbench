@@ -1,45 +1,57 @@
 # 抄得快 · 阿里巴巴国际站商品工作台
 
-**当前完整源码：1.4.35，2026-09-19 修订。** 分支为 [`codex/collection-mapping-1.4.35`](https://github.com/chentao6306/alibaba-international-product-workbench/tree/codex/collection-mapping-1.4.35)。重构失败商品处理：按失败原因筛选、读取卖家商品模板、选择引用范围、预览新旧值后批量保存、仅重试失败项；加强动态属性与 Other 自定义值采集和填写。上架仍只使用已保存资料。见 [本次验证记录](docs/verification-1.4.35.md)。
+当前版本：**1.4.52**，更新日期：**2026-09-30**。最新完整源码以默认 **main** 分支为准。
 
-**1.4.29：** 自动判断物流填写方式，保留包装事实；完整物流统一检查全空和部分缺项，记录实际执行方式。见 [1.4.29 验证记录](docs/verification-1.4.29.md)。
+## 常用命令速查
 
-**1.4.28：** 修复旧来源快照误报、多选属性丢值，暂停任务可切换方式；十个不同细分类目真实提交验证见 [1.4.28 验证记录](docs/verification-1.4.28.md)。
+在 Windows PowerShell 的项目根目录执行。首次下载后先安装依赖并准备浏览器：
 
-**1.4.27：** 新增询盘展示销售方式，保留来源包装资料于详情；未公开库存按起订量设默认值，保留手工库存，修复主图菜单重建。见 [1.4.27 验证记录](docs/verification-1.4.27.md)。
+```powershell
+npm ci
+node node_modules/playwright-core/cli.js install chromium
+npm run prepare:chromium
+```
 
-**1.4.26：** 修复发货期延迟加载、年龄与场景属性映射、主图菜单和成功商品物流引用。见 [1.4.26 验证记录](docs/verification-1.4.26.md)。
+| 操作 | 命令 | 结果 |
+| --- | --- | --- |
+| 开发前后端 | `npm run dev` | 界面 `http://127.0.0.1:5173`，API `8787` |
+| 构建前端 | `npm run build` | 输出 `dist/` |
+| 启动完整桌面版 | `npm run desktop` | 先构建前端，桌面端自动启动本地服务 |
+| 启动浏览器版 | `npm start` | 先构建前端，打开 `http://127.0.0.1:8787` |
+| 运行全部测试 | `npm test` | 部分用例会启动内置 Chromium |
+| 减少测试并发 | `npm test -- --test-concurrency=2` | 减少浏览器同时运行数量 |
+| 生成安装版 EXE | `npm run dist:win:installer` | `release-installer/chaodekuai-1.4.52-setup.exe` |
+| 生成便携版 EXE | `npm run dist:win:portable` | `release/chaodekuai-1.4.52-win-x64.exe` |
 
-**1.4.25：** 按实际发布页处理动态类目属性，补充物流属性与包装单位转换；缺少必填资料时从原商品核对一次，提示真实缺项和账号经营类目限制。见 [1.4.25 验证记录](docs/verification-1.4.25.md)。
+最常用：改代码用 `npm run dev`；测试桌面端先 `npm run build` 再 `npm run desktop`；给客户打包用 `npm run dist:win:installer`。
 
-**1.4.23 修复分支说明：** `codex/fix-english-description-editor-1.4.23` 使用详情区固定结构定位并主动滚动到富文本入口，兼容英文 `Commodity Details`、延迟生成的编辑控件和隐藏副本。进度区分“定位详情区”“初始化编辑器”和“编辑区域就绪”；不会反复切换已选中的编辑模式。见 [1.4.23 验证记录](docs/verification-1.4.23.md)。
+## 当前功能与验证
 
-**1.4.22 修复：** 将上架使用的实际浏览器默认显示并最大化，等待或暂停时保留页面供检查；采集仍仅在验证码出现时显示窗口。阶梯价格改为逐档填写、等待新增行实际生成、过滤隐藏副本并提交前复核，不再以固定 350 毫秒判断新增失败。见 [1.4.22 验证记录](docs/verification-1.4.22.md)。
+- 类目目录浏览、搜索和末级类目选择；成功商品的类目、属性和规格引用。
+- 主图和详情图上传、单张/批量删除；文字和上传图片水印均支持范围、位置、大小和透明度，更新不叠加，保存后可移除软件水印恢复底图。
+- 原图水印框选修复与预览，适合简单背景；客户可维护多套公司详情模板，批量替换、前置或追加。
+- 修复必填/选填缺失属性首次输入后失焦问题，支持已知下拉、多选项。已验证编辑保存后发布填写新值，并取消旧多选值、清除旧选项 ID。
+- 包含此前授权码重置、多端登录、临时断线保持、后台任务线程、产品链接与浏览器窗口处理修复。
 
-**1.4.21 修复：** 修复关键词输入框重建后序号定位失效，以及连接发布浏览器阶段的会话同步长时间等待。主动滚动到详情区触发编辑器加载，核对普通编辑的选中状态；编辑器超时后不再整页重试并重新等待数分钟。连接各步骤有独立超时和进度，暂停在连接阶段即可生效；字段或连接未就绪时保留当前任务。见 [1.4.21 验证记录](docs/verification-1.4.21.md)。
-
-**此前修复：** 1.4.20 修复英文类目入口和商品名称识别、来源类目误读、详情 iframe 延迟加载漏图及本地图片被过滤的问题。针对低配置电脑自动降低图片处理并发、延长页面等待，避免反复点击编辑器切换按钮打断慢加载。失效类目先核对原商品；无法确认时暂停并保留当前任务。包含 1.4.19 的部分采集和登录同步修复，以及 1.4.18 的弹窗误判修复。见 [1.4.20 验证记录](docs/verification-1.4.20.md)、[1.4.19 验证记录](docs/verification-1.4.19.md) 和 [1.4.18 实测记录](docs/verification-1.4.18.md)。下文 `Stable` 链接和备份教程继续对应完整的 1.4.17 归档。
+已有商品无需删除或重新采集，修改保存后再重试发布。验证边界和结果见 [1.4.52 验证记录](docs/verification-1.4.52.md)。
 
 采集列表中途暂停后，点击“采集已发现的 N 件商品”即可停止继续翻页、转为读取这些商品的详情；点击原来的继续按钮则接着翻页。详情采集仍支持断点继续。上架时遇到登录失效或发布表单反复加载不完整，任务暂停并保留当前商品；重新登录或处理页面问题后点击继续。国际站明确提示类目不存在或失效时，暂停并保留进度，需选择有效类目后继续。上架只使用已保存资料，不再自动访问来源商品页；需要更新来源资料时，在商品工作台主动重新采集。
 
-Windows 桌面客户端，提供国际站、1688、速卖通商品采集、资料编辑、引用成功商品、批量保存草稿与提交上架。授权管理后台部署在 Linux 服务器。`Stable` 分支保留为 **1.4.17 历史归档**，当前版本请使用上面的 1.4.35 分支。
+Windows 桌面客户端，提供国际站、1688、速卖通商品采集、资料编辑、引用成功商品、批量保存草稿与提交上架。授权管理后台部署在 Linux 服务器。下载、开发和构建均使用 `main` 分支。
 
 客户端通过 Playwright 操作真实浏览器页面，不是 Alibaba 官方发布 API。验证码需要用户完成；平台审核、账号权限和类目必填规则仍由 Alibaba 决定。
 
-## 下载与完整备份
+## 源码与备份范围
 
-- [当前 1.4.35 完整源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/codex/collection-mapping-1.4.35)
-- [1.4.17 Stable 历史源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/Stable)
-- [1.4.17 安装包与加密数据备份](https://github.com/chentao6306/alibaba-international-product-workbench/releases/tag/v1.4.17-stable)
-- [1.4.17 修复和验证记录](docs/verification-1.4.17.md)
+- [当前 1.4.52 完整源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/main)
+- [1.4.52 修复和验证记录](docs/verification-1.4.52.md)
 - [备份范围、解密和恢复说明](docs/stable-backup.md)
-- [Stable 源码与备份核查记录](docs/stable-1.4.17-audit.md)
 
 此分支包含前端、本地服务、Electron 桌面端、授权服务器、数据库结构、管理页面、部署脚本、测试、静态资源与锁定依赖清单。`build/installer.nsh` 是构建源码，必须保留。
 
-Release 另存安装包和加密数据备份，覆盖项目本地数据、当前桌面用户数据、商品/任务/图片、服务器数据库和实际部署配置。密码、Cookie、环境变量等仅位于加密备份，解密密钥由项目所有者在 GitHub 之外保管。
+源码仓库不包含客户商品、任务、浏览器登录资料或生产环境配置；这些数据需单独备份。本次只同步源码，不上传安装包或运行数据。历史备份的日期、范围和恢复方式以对应备份说明为准，不代表最新用户数据已备份。
 
-`node_modules`、`dist`、`.packaged`、`vendor/chromium` 是可再生成依赖或构建输出，不直接进入 Git 历史；通过锁定依赖和下文命令恢复，发行 EXE 已包含依赖和浏览器。备份清单会列出未纳入的运行时锁文件等例外。源码和数据备份不是整台 Windows 系统镜像。
+`node_modules`、`dist`、`.packaged`、`vendor/chromium` 是可再生成依赖或构建输出，不提交到源码仓库；通过锁定依赖和下文命令恢复，发行 EXE 已包含依赖和浏览器。
 
 ## 环境要求
 
@@ -58,7 +70,7 @@ Release 另存安装包和加密数据备份，覆盖项目本地数据、当前
 以下命令在 Windows PowerShell 执行。私有仓库需要已获授权的 GitHub SSH 身份。
 
 ```powershell
-git clone --branch codex/collection-mapping-1.4.35 git@github.com:chentao6306/alibaba-international-product-workbench.git
+git clone --branch main git@github.com:chentao6306/alibaba-international-product-workbench.git
 cd alibaba-international-product-workbench
 node --version
 npm --version
@@ -84,18 +96,17 @@ npm run desktop
 | 源码桌面日常启动 | `npm run desktop` | Electron 窗口，使用现有 `dist` |
 | 浏览器版日常启动 | `npm start` | `http://127.0.0.1:8787` |
 | 前后端开发 | `npm run dev` | Vite `5173`，API `8787` |
-| 开发服务与桌面壳 | `npm run desktop:dev` | 桌面仍需已有 `dist`，Vite 热更新在 `5173` |
 | 重新构建前端 | `npm run build` | `dist/` |
 | 全部测试 | `npm test -- --test-concurrency=2` | 降低同时运行浏览器测试的内存竞争 |
 | 本地授权后台预览 | `node auth-server/dev.js` | `http://127.0.0.1:8790`，仅开发 |
 
 桌面界面更改后需 `npm run build` 并重新打开桌面端。`start.bat` 会按需安装依赖、构建并启动浏览器版；`dev.bat` 启动开发服务。关闭命令窗口或按 `Ctrl+C` 停止对应服务。
 
-更新当前 1.4.35 分支后：
+后续获取 `main` 分支更新：
 
 ```powershell
-git switch codex/collection-mapping-1.4.35
-git pull --ff-only origin codex/collection-mapping-1.4.35
+git switch main
+git pull --ff-only origin main
 npm ci
 node node_modules/playwright-core/cli.js install chromium
 npm run prepare:chromium
@@ -103,7 +114,7 @@ npm run build
 npm run desktop
 ```
 
-同一工作区不要同时运行多个桌面或后端实例。浏览器版数据默认为仓库 `.data`，与桌面用户目录不同；浏览器开发入口不等同于正式桌面授权入口。
+同一工作区不要同时运行多个桌面或后端实例。桌面版自动启动服务，运行 `npm run desktop` 前先停止 `npm run dev` 或 `npm start`，避免争用 8787 端口。旧 `desktop:dev` 组合脚本会重复启动独立 API，当前桌面开发使用构建后单独启动的方式。浏览器版数据默认为仓库 `.data`，与桌面用户目录不同；浏览器开发入口不等同于正式桌面授权入口。
 
 ## 销售方式与默认库存
 
@@ -113,17 +124,17 @@ npm run desktop
 
 ## 生成 Windows EXE
 
-首次先完成 `npm ci` 和 Chromium 下载。确认 `package.json` 与锁文件版本均为 `1.4.35`，然后执行：
+首次先完成 `npm ci` 和 Chromium 下载。确认 `package.json` 与锁文件版本均为 `1.4.52`，然后执行：
 
 ```powershell
 npm test -- --test-concurrency=2
 npm run dist:win:installer
 ```
 
-输出：`release-installer/chaodekuai-1.4.35-setup.exe`。脚本依次构建前端、准备 Chromium，再执行 Electron Builder NSIS x64 打包。安装包支持选择安装目录、桌面和开始菜单快捷方式。
+输出：`release-installer/chaodekuai-1.4.52-setup.exe`。脚本依次构建前端、准备 Chromium，再执行 Electron Builder NSIS x64 打包。安装包支持选择安装目录、桌面和开始菜单快捷方式。
 
 ```powershell
-npm run dist:win:portable   # 便携 EXE，输出在 release/
+npm run dist:win:portable   # release/chaodekuai-1.4.52-win-x64.exe
 npm run dist:win            # 按 package.json 构建 Windows 目标
 ```
 
@@ -132,12 +143,14 @@ Electron 下载失败但 `node_modules/electron/dist` 已完整时，可指定�
 ```powershell
 npm run build
 npm run prepare:chromium
-npx electron-builder --win nsis --x64 `
+npx --no-install electron-builder --win nsis --x64 `
   --config.electronDist=node_modules/electron/dist `
   --config.directories.output=release-installer `
   '--config.artifactName=chaodekuai-${version}-setup.${ext}' `
   --publish never
 ```
+
+便携版仍会在 Windows 用户目录保存商品、任务和登录资料。下次版本升级可用 `npm version 1.4.53 --no-git-tag-version` 同步清单与锁文件，再测试打包；此命令只是升级示例，不是使用 1.4.52 的必要步骤。
 
 `beforePack` 运行 `tools/prepare-package.mjs`，从 `server/` 和 `electron/` 生成 `.packaged/`。不要手工修改生成目录或用旧输出代替缺失源码。程序必须包含 `resources/chromium/chrome.exe`。
 
@@ -145,9 +158,9 @@ npx electron-builder --win nsis --x64 `
 
 ```powershell
 node tools/desktop-package-qa.mjs release-installer
-npx electron tools/verification-window-qa.mjs .packaged/electron/human-verification.js
-Get-Item .\release-installer\chaodekuai-1.4.35-setup.exe
-Get-FileHash .\release-installer\chaodekuai-1.4.35-setup.exe -Algorithm SHA256
+npx --no-install electron tools/verification-window-qa.mjs .packaged/electron/human-verification.js
+Get-Item .\release-installer\chaodekuai-1.4.52-setup.exe
+Get-FileHash .\release-installer\chaodekuai-1.4.52-setup.exe -Algorithm SHA256
 ```
 
 包检查核对版本、打包源码、浏览器、安全开关、登录窗口和未登录 API 鉴权，使用隔离用户目录。当前 EXE 未配置 Authenticode 签名；有证书后按 Electron Builder 签名配置构建。`publish` 地址是占位配置，目前通过 GitHub Release 手工分发，没有启用可用的自动更新服务。
@@ -169,7 +182,7 @@ sudo systemctl restart kua-yipu-auth
 
 正式客户端授权入口由 `server/auth-endpoint.js` 固定。源码桌面可用 `KUA_YIPU_AUTH_URL` 指向本机开发后台；**正式打包客户端忽略此环境变量**。迁移生产地址需要修改该模块默认地址、配置对应有效证书并重新打包。仅设置打包终端环境变量不能改变正式入口。
 
-授权服务 `/health` 中的版本为 `1.4.9`，代表独立授权协议实现；当前桌面版本为 `1.4.35`。本次源码提交包含授权服务完整代码，不执行线上部署。后台可配置 1/3/15 天等断线保持时间，不延长付费授权到期日，在线停用仍立即生效。
+授权服务 `/health` 中的版本为 `1.4.9`，代表独立授权协议实现；当前桌面版本为 `1.4.52`。本次源码提交包含授权服务完整代码，不执行线上部署。后台可配置 1/3/15 天等断线保持时间，不延长付费授权到期日，在线停用仍立即生效。
 
 ## 项目原理
 
@@ -211,7 +224,7 @@ flowchart TD
 | `assets/`、`build/installer.nsh` | 图标、NSIS 自定义安装逻辑 |
 | `docs/` | 验证、完整性、备份说明 |
 | `package.json`、`package-lock.json` | 版本、命令、锁定依赖、打包配置 |
-| `.data/` | 浏览器版运行数据，进入加密备份 |
+| `.data/` | 浏览器版运行数据，不提交到 Git，需单独备份 |
 
 桌面数据目录：
 
@@ -236,22 +249,26 @@ DeepSeek 密钥加密保存在 `.data/integrations.bin`。更换 Windows 用户�
 ```powershell
 npm test -- --test-concurrency=2
 npm run build
-node tools/reference-ui-qa.mjs
-node tools/group-origin-ui-qa.mjs
-npx electron tools/verification-window-qa.mjs
+node tools/product-attributes-qa.mjs
+node tools/image-watermark-qa.mjs
+node tools/product-image-qa.mjs
+node tools/product-editor-qa.mjs
+npx --no-install electron tools/verification-window-qa.mjs
 ```
 
-当前 1.4.35 修订的测试、打包核对和真实账号验证范围见 [验证记录](docs/verification-1.4.35.md)。历史记录不代表当前版本在所有类目均已通过实测。
+1.4.52 已通过前端构建、上述属性/图片/商品编辑 UI 验证和安装包核验。两次全量测试各为 487 项通过、1 项超时取消；两个曾超时的测试文件随后单独串行运行，8 项全部通过。没有将全量结果记为一次全绿。详细结果见 [验证记录](docs/verification-1.4.52.md)。
+
+属性发布验证使用编辑 UI、真实保存 API 和生产发布填写函数，目标是隔离的受控表单；没有向客户店铺提交商品，也不代表所有国际站类目均已逐一实测。
 
 源站未公开的 SKU 商业数据无法凭空获得，图片链接可能失效，跨类目引用可能带来不适用属性。带 `live`、`publish` 的工具可能操作真实站点，先阅读脚本并使用隔离数据目录。
 
 ```powershell
-git fetch origin codex/collection-mapping-1.4.35
+git fetch origin main
 git rev-parse HEAD
-git rev-parse origin/codex/collection-mapping-1.4.35
-git diff --exit-code HEAD origin/codex/collection-mapping-1.4.35
+git rev-parse origin/main
+git diff --exit-code HEAD origin/main
 git status --short
-git ls-tree -r --name-only origin/codex/collection-mapping-1.4.35
+git ls-tree -r --name-only origin/main
 ```
 
-首次 Stable 归档从已验收的 `65dc255` 建立并保留全部历史，该历史分支的应用源码保持 1.4.17。当前 1.4.35 分支包含后续修复。历史 Release 的 SHA-256 清单用于下载校验；解密密钥不上传 GitHub。
+`main` 中只保留当前实现及仍有用的测试、构建工具和文档。历史验证记录用于追溯，Git 提交历史用于恢复，不是另一份需要运行的旧源码。下载最新代码时无需切换历史版本分支。

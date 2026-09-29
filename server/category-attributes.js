@@ -1,8 +1,11 @@
 import { requiredAttributeKey } from './publish-reference.js';
+import { attributeValueKey, attributeValueList, cpuValueKind, hasMeasurementUnit, measurementFits, measurementValue } from './attribute-values.js';
 
 const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
+const attributeNameKey = (name) => clean(name).normalize('NFKC').toLowerCase();
 export const attributeId = (item) => clean(item?.attributeId ?? item?.propertyId ?? item?.attrId ?? item?.propId ?? item?.id).replace(/^(?:struct-)?p-/, '');
-export const SOURCE_ATTRIBUTE_SCHEMA_VERSION = 4;
+export const SOURCE_ATTRIBUTE_SCHEMA_VERSION = 6;
+export const isDescriptionAttribute = (item) => /^description-(?:dom|iframe)$/.test(item?.source || '');
 
 export function needsSourceAttributeRefresh(product) {
   if (product.categoryReference || Number(product.sourceAttributeSchemaVersion) >= SOURCE_ATTRIBUTE_SCHEMA_VERSION) return false;
@@ -10,13 +13,43 @@ export function needsSourceAttributeRefresh(product) {
 }
 
 export function mergeSourceAttributes(...sources) {
+  const rows = sources.flat();
+  const idsByName = new Map();
+  for (const row of rows) {
+    if (!row?.name || !attributeId(row)) continue;
+    const key = requiredAttributeKey(row.name);
+    if (!idsByName.has(key)) idsByName.set(key, new Set());
+    idsByName.get(key).add(attributeId(row));
+  }
   const result = [];
-  for (const item of sources.flat()) {
+  for (const item of rows) {
     if (!item?.name || item.value == null || !clean(item.value)) continue;
     const id = attributeId(item);
     const key = requiredAttributeKey(item.name);
-    const existing = result.find((row) => (id && attributeId(row) ? id === attributeId(row) : key === requiredAttributeKey(row.name)));
+    const candidates = result.filter((row) => {
+      if (isDescriptionAttribute(row) !== isDescriptionAttribute(item)) return false;
+      if (id && attributeId(row)) return id === attributeId(row);
+      if (key !== requiredAttributeKey(row.name)) return false;
+      // CPU core count and processor model are often both labelled "CPU".
+      if (key === '手机中央处理器') {
+        const kinds = new Set([row.value, item.value].flat().map(cpuValueKind).filter(Boolean));
+        if (kinds.size > 1) return false;
+      }
+      return true;
+    });
+    const exactId = id && candidates.find((row) => attributeId(row) === id);
+    // An unlabelled DOM row cannot identify which of two same-name properties
+    // it describes. Keep it separate instead of attaching it to the first ID.
+    const candidateIds = new Set(candidates.map(attributeId).filter(Boolean));
+    const existing = exactId || ((idsByName.get(key)?.size || 0) <= 1 && candidateIds.size <= 1 && candidates.length === 1 ? candidates[0] : null);
     if (!existing) { result.push(structuredClone(item)); continue; }
+    const differentNames = clean(existing.name).toLowerCase() !== clean(item.name).toLowerCase();
+    const differentSections = existing.section && item.section && existing.section !== item.section;
+    const sameValues = JSON.stringify([existing.value].flat().map(attributeValueKey).sort()) === JSON.stringify([item.value].flat().map(attributeValueKey).sort());
+    if (!exactId && (differentNames || differentSections) && !sameValues
+      && !(existing.source === 'detailData.attributes' && item.source === 'dom')) {
+      result.push(structuredClone(item)); continue;
+    }
     if (id && !attributeId(existing)) existing.id = id;
     if (item.valueIds) existing.valueIds = { ...item.valueIds, ...existing.valueIds };
     // DOM text may be a translation or a comma-joined rendering of the same
@@ -77,16 +110,23 @@ export function extractAlibabaAttributes(detailData) {
 
 // Serialized into the collection page. Read each supported layout, even when
 // another layout has already yielded attributes. Never inspect recommendations.
-export function readAlibabaAttributeRows() {
+export function readAlibabaAttributeRows({ description = false } = {}) {
   const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
   const excluded = '[data-module-name*="recommend" i], [data-module-name*="related" i], [data-module-name*="similar" i], [class*="recommend" i], [data-testid*="recommend" i]';
   const scopes = '[data-testid="module-attribute-group"], [data-module-name*="attribute" i], [data-module-name*="specification" i], [data-module-name*="packaging" i], [data-module-name*="productPackInfo" i], [class*="product-attribute" i]';
+  const descriptions = '[data-module-name="module_description"], [data-testid="module-description"], [data-module-name="module_structure_description"], [data-testid="module-details-structure-description"], #detail_decorate_root';
+  const valueNodes = '[data-testid="module-attribute-value"], [class*="attribute-value"], [class*="property-value"]';
+  const readText = (node) => {
+    const copy = node?.cloneNode(true);
+    copy?.querySelectorAll('button, [role="button"]').forEach((control) => control.remove());
+    return clean(copy?.textContent);
+  };
   const result = [];
   const readRow = (row) => {
-    if (row.closest(excluded)) return;
+    if (row.closest(excluded) || row.closest(valueNodes)) return;
     let name = '', value = '';
     const keyNode = row.querySelector('[data-testid="module-attribute-name"], [class*="attribute-name"], [class*="property-name"]');
-    const valueNode = row.querySelector('[data-testid="module-attribute-value"], [class*="attribute-value"], [class*="property-value"]');
+    const valueNode = row.querySelector(valueNodes);
     if (row.tagName === 'DT') {
       name = clean(row.textContent);
       const values = [];
@@ -94,7 +134,7 @@ export function readAlibabaAttributeRows() {
       value = values.join(', ');
     } else if (keyNode && valueNode) {
       name = clean(keyNode.getAttribute('title') || keyNode.textContent);
-      value = clean(valueNode.getAttribute('title') || valueNode.textContent);
+      value = clean(valueNode.getAttribute('title') || readText(valueNode));
     } else {
       const cells = [...row.querySelectorAll(':scope > th, :scope > td, :scope > dt, :scope > dd')];
       if (cells.length >= 2) { name = clean(cells[0].textContent); value = cells.slice(1).map((cell) => clean(cell.textContent)).join(', '); }
@@ -107,6 +147,7 @@ export function readAlibabaAttributeRows() {
       }
     }
     if (!name || !value || name.length > 100 || value.length > 2000 || /[\r\n]/.test(name)
+      || /^(?:show (?:more|less|all)|view more|see more|展开|收起|查看更多)$/i.test(value)
       || /^(?:key attributes|other attributes|product attributes|关键属性|其他属性|商品属性)$/i.test(name)) return;
     const id = row.getAttribute('data-attribute-id') || row.getAttribute('data-property-id') || '';
     const valueSelector = '[data-value-id], [data-attribute-value-id], [data-property-value-id]';
@@ -114,8 +155,10 @@ export function readAlibabaAttributeRows() {
     const valueIds = Object.fromEntries(values.map((node) => [clean(node.getAttribute('title') || node.textContent),
       node.getAttribute('data-value-id') || node.getAttribute('data-attribute-value-id') || node.getAttribute('data-property-value-id')]).filter(([label, id]) => label && id));
     result.push({ name, value: values.length ? values.map((node) => clean(node.getAttribute('title') || node.textContent)).filter(Boolean) : value,
-      ...(Object.keys(valueIds).length ? { valueIds } : {}), ...(id ? { id } : {}), source: 'dom',
-      section: clean(row.closest('[data-testid="module-attribute-group"]')?.querySelector('[data-testid="module-attribute-group-title"]')?.textContent) || 'Product Attributes' });
+      ...(Object.keys(valueIds).length ? { valueIds } : {}), ...(id ? { id } : {}),
+      source: description ? 'description-iframe' : row.closest(descriptions) ? 'description-dom' : 'dom',
+      section: description || row.closest(descriptions) ? 'Product Description'
+        : clean(row.closest('[data-testid="module-attribute-group"]')?.querySelector('[data-testid="module-attribute-group-title"]')?.textContent) || 'Product Attributes' });
   };
   const rows = new Set(document.querySelectorAll('[data-testid="module-attribute-row"], table tr, dl > dt'));
   for (const scope of document.querySelectorAll(scopes)) {
@@ -186,7 +229,7 @@ export function readPostingAttributeSchema() {
       || row.id.match(/^(?:struct-)?p-(\d+)$/)?.[1] || field?.name?.match(/^p-(\d+)$/)?.[1] || '';
     // Verified seller property IDs disambiguate labels translated differently
     // on the public detail page (Theme) and the Chinese posting page (场景).
-    const propertyLabels = { '200515261': ['Theme'], '210194576': ['Age'], '210240146': ['Age Range'] };
+    const propertyLabels = { '200515261': ['Theme'], '210194576': ['Age'], '210240146': ['Age Range'], '191288357': ['use'] };
     const labels = [label, row.dataset.enName, row.dataset.attributeName, ...(propertyLabels[id] || [])].filter(Boolean);
     const fiberKey = Object.getOwnPropertyNames(row).find((key) => key.startsWith('__reactFiber'));
     let fiber = fiberKey && row[fiberKey];
@@ -219,8 +262,20 @@ export function readPostingAttributeSchema() {
       || !/^(?:other|others|其他|其它|自定义)$/i.test(value)) : values;
     const controlType = field?.tagName === 'SELECT' ? (field.multiple ? 'multiSelect' : 'select')
       : field?.getAttribute('role') === 'combobox' || field?.readOnly ? 'combobox' : field?.type || '';
+    const selectRoot = field?.closest('.next-select') || field?.closest('[role="combobox"]');
+    const multiFlag = field?.getAttribute('aria-multiselectable') ?? selectRoot?.getAttribute('aria-multiselectable');
+    const multiple = controlType === 'multiSelect' || controlType === 'checkbox' ? true
+      : ['select', 'radio', 'number'].includes(controlType) ? false
+        : multiFlag != null ? multiFlag === 'true'
+          : selectRoot?.classList.contains('next-select-multiple') ? true
+            : selectRoot?.classList.contains('next-select-single') ? false : undefined;
+    const options = field?.tagName === 'SELECT' ? [...field.options].filter((option) => option.value)
+      .map((option) => ({ value: option.value, label: clean(option.textContent), disabled: option.disabled || Boolean(option.parentElement?.disabled) }))
+      : ['checkbox', 'radio'].includes(controlType) ? enabled.filter((node) => node.type === controlType)
+        .map((node) => ({ value: node.value, label: clean(node.closest('label')?.textContent || node.value), disabled: node.disabled })) : [];
     row.setAttribute('data-posting-attribute-row', String(index));
     return [{ id, label, labels: [...new Set(labels)], rowId: row.id, rowIndex: index, inputIndex: controls.indexOf(field), controlType,
+      ...(multiple !== undefined ? { multiple } : {}), ...(options.length ? { options } : {}),
       disabled: controls.length > 0 && enabled.length === 0, values: [...new Set(committedValues)],
       saleSpecification: Boolean(row.closest('#struct-specification')),
       required: row.getAttribute('aria-required') === 'true' || row.getAttribute('data-required') === 'true'
@@ -230,22 +285,53 @@ export function readPostingAttributeSchema() {
 
 export function sourceAttributeForField(product, field) {
   const items = [...(product.attributes || []), ...(product.customAttributes || [])].filter((item) => item?.name && item.value != null && clean(item.value));
-  if (field.id) {
-    const exact = items.filter((item) => attributeId(item) === field.id);
-    if (exact.length) return consistentAttribute(exact, true);
-  }
-  const compatible = items.filter((item) => !field.id || !attributeId(item) || attributeId(item) === field.id);
-  const normalizeName = (name) => clean(name).normalize('NFKC').toLowerCase();
-  const exactNames = new Set((field.labels || [field.label]).map(normalizeName));
+  const exactNames = new Set((field.labels || [field.label]).map(attributeNameKey));
   const names = new Set((field.labels || [field.label]).map(requiredAttributeKey));
-  const exact = compatible.filter((item) => exactNames.has(normalizeName(item.name)));
-  return consistentAttribute(exact.length ? exact : compatible.filter((item) => names.has(requiredAttributeKey(item.name))), false);
+  // Resolve category properties before supplier detail text, including when
+  // only the latter has an exact translated label or a previously bound ID.
+  for (const candidates of [items.filter((item) => !isDescriptionAttribute(item)), items.filter(isDescriptionAttribute)]) {
+    if (field.id) {
+      const exact = candidates.filter((item) => attributeId(item) === field.id);
+      if (exact.length) return consistentAttribute(exact, true, field);
+    }
+    const compatible = candidates.filter((item) => !field.id || !attributeId(item) || attributeId(item) === field.id);
+    const exact = compatible.filter((item) => exactNames.has(attributeNameKey(item.name)));
+    const matched = exact.length ? exact : compatible.filter((item) => names.has(requiredAttributeKey(item.name)));
+    if (matched.length) return consistentAttribute(matched, false, field);
+  }
+  return null;
 }
 
-function consistentAttribute(items, matchedById) {
+function consistentAttribute(items, matchedById, field) {
   if (!items.length) return null;
-  const valueKey = (value) => JSON.stringify([value].flat().map((item) => clean(item).normalize('NFKC').toLowerCase()).sort());
-  if (new Set(items.map((item) => valueKey(item.value))).size > 1) {
+  const key = requiredAttributeKey(field.label);
+  if (key === '手机中央处理器' && (field.id === '200001044' || (field.labels || [field.label]).includes('手机中央处理器'))) {
+    const entries = items.flatMap((item) => [item.value].flat().map((value) => ({ ...item, value })));
+    if (entries.every((item) => cpuValueKind(item.value)) && entries.some((item) => cpuValueKind(item.value) === 'cores')) {
+      items = entries.filter((item) => cpuValueKind(item.value) === 'cores');
+    }
+  }
+  const unit = { 屏幕: 'inch', 电池容量: 'mah' }[key] || '';
+  const multiple = field.multiple ?? ['multiSelect', 'checkbox'].includes(field.controlType);
+  const values = items.flatMap((item) => [item.value].flat());
+  const numeric = values.every((value) => hasMeasurementUnit(value) || (field.controlType === 'number' && measurementValue(value) != null));
+  if (!multiple && (unit || numeric)) {
+    const entries = items.flatMap((item) => [item.value].flat().map((rawValue) => {
+      const value = measurementValue(rawValue, unit) ?? rawValue;
+      return { ...item, value, ...(item.valueIds?.[rawValue] ? { valueIds: { [value]: item.valueIds[rawValue] } } : {}) };
+    }));
+    // Prefer a source measurement contained by every source range. Overlap
+    // alone is insufficient: we never manufacture an intersection value.
+    const specific = entries.find((item) => entries.every((other) => measurementFits(item.value, other.value, unit)));
+    if (specific) return { ...specific, matchedById };
+    items = entries;
+  }
+  const valueKey = (item) => JSON.stringify([...new Set(attributeValueList(item.value, {
+    multiple: field.multiple !== false && (multiple || field.controlType === 'combobox' || key === '蜂窝网络'),
+    options: field.options, valueIds: item.valueIds,
+  }).map(attributeValueKey))].sort());
+  const singleWithManyValues = field.multiple === false || ['select', 'radio'].includes(field.controlType);
+  if (new Set(items.map(valueKey)).size > 1 || (singleWithManyValues && items.some((item) => new Set([item.value].flat().map(attributeValueKey)).size > 1))) {
     return { name: items[0].name, value: null, conflict: true, candidates: items.map((item) => ({ name: item.name, value: item.value, id: attributeId(item) })) };
   }
   return { ...items[0], matchedById };
@@ -255,12 +341,21 @@ function consistentAttribute(items, matchedById) {
 // form using stable property IDs, including categories absent from our aliases.
 export function bindSourceAttributesToPostingSchema(product, schema) {
   let changed = false;
+  const all = [...(product.attributes || []), ...(product.customAttributes || [])]
+    .filter((item) => item?.name && item.value != null && clean(item.value));
+  const exactName = (item, field) => (field.labels || [field.label]).some((label) => attributeNameKey(label) === attributeNameKey(item.name));
   const bind = (items = []) => items.map((item) => {
     if (attributeId(item)) return item;
     const key = requiredAttributeKey(item.name);
     const matches = schema.filter((field) => field.id && !field.saleSpecification
       && (field.labels || [field.label]).some((label) => requiredAttributeKey(label) === key));
-    const ids = [...new Set(matches.map((field) => field.id))];
+    const exact = matches.filter((field) => exactName(item, field));
+    // A broad alias must not acquire the same ID as a distinct, precisely
+    // named source property. Keep it unbound for its own field or description.
+    const eligible = exact.length ? exact : matches.filter((field) => !all.some((other) => other !== item
+      && isDescriptionAttribute(other) === isDescriptionAttribute(item)
+      && (attributeId(other) === field.id || (!attributeId(other) && exactName(other, field)))));
+    const ids = [...new Set(eligible.map((field) => field.id))];
     if (ids.length !== 1) return item;
     changed = true;
     return { ...item, id: ids[0] };

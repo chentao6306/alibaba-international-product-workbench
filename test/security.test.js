@@ -13,7 +13,16 @@ import { chromium } from 'playwright-core';
 import { findChromium } from '../server/browser-runtime.js';
 import { fillChoice } from '../server/publisher.js';
 import { authorizationEndpoint } from '../server/auth-endpoint.js';
-import { tokenCodec, clientSessionAllowed } from '../auth-server/security.js';
+import { tokenCodec, clientSessionAllowed, credentialResetRevokesSessions } from '../auth-server/security.js';
+
+test('credential reset only preserves verified sessions when explicitly requested', () => {
+  assert.equal(credentialResetRevokesSessions({ credential_required: true }, false), false);
+  assert.equal(credentialResetRevokesSessions({ credential_required: true }), true);
+  assert.equal(credentialResetRevokesSessions({ credential_required: true }, true), true);
+  assert.equal(credentialResetRevokesSessions({ credential_required: false }, false), true);
+  assert.equal(credentialResetRevokesSessions({}, false), true);
+  for (const value of ['false', null, 0]) assert.throws(() => credentialResetRevokesSessions({ credential_required: true }, value), { status: 400 });
+});
 
 test('authorization transport rejects HTTP and credential-bearing or redirected endpoints', () => {
   assert.equal(authorizationEndpoint(), 'https://106.55.45.126');

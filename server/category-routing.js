@@ -5,7 +5,9 @@ const BUILTIN_CATEGORY_IDS = new Map([
 ]);
 
 export function normalizeCategoryId(value) {
-  const match = String(value ?? '').match(/\d{4,}/);
+  const text = String(value ?? '').trim();
+  if (/^[1-9]\d{0,11}$/.test(text)) return text;
+  const match = text.match(/\d{4,}/);
   return match?.[0] || '';
 }
 
@@ -15,7 +17,7 @@ export function categoryIdFromUrl(value) {
     return normalizeCategoryId(
       url.searchParams.get('catId')
       || url.searchParams.get('categoryId')
-      || url.pathname.match(/(?:cid|category)[-_]?(\d{4,})/i)?.[1]
+      || url.pathname.match(/(?:cid|category)[-_]?(\d+)/i)?.[1]
     );
   } catch {
     return normalizeCategoryId(String(value || '').match(/(?:catId|categoryId)=([^&#]+)/i)?.[1]);

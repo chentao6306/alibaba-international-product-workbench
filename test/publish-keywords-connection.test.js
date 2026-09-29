@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { chromium } from 'playwright-core';
 import { findChromium } from '../server/browser-runtime.js';
 import { browserStep } from '../server/browser-step.js';
-import { fillProductKeywords, SellerPublisher } from '../server/publisher.js';
+import { fillProductKeywords, fillOriginCountry, SellerPublisher } from '../server/publisher.js';
 
 test('keywords survive removal of hidden clones and input replacement without modifying other textareas', { skip: !findChromium() }, async () => {
   const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
@@ -24,6 +24,42 @@ test('keywords survive removal of hidden clones and input replacement without mo
     assert.equal(await fillProductKeywords(page, { keywords: ['Do not insert here'] }), false);
     await page.setContent('<div class="posting-field-keywords"><textarea oninput="this.remove()"></textarea></div>');
     await assert.rejects(fillProductKeywords(page, { keywords: ['Watch'] }), { code: 'PUBLISH_FIELD_NOT_READY' });
+  } finally { await browser.close(); }
+});
+
+test('commits keywords and selects origin without accepting immediate or delayed keyword recommendations', { skip: !findChromium(), timeout: 45000 }, async (t) => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1000, height: 700 } });
+    for (const delay of [0, 900]) await t.test(`recommendations arrive after ${delay}ms`, async () => {
+      await page.goto('about:blank');
+      await page.setContent(`<style>body{margin:0;min-height:100vh}.sell-catProp-item{position:absolute;top:210px;left:100px}
+        .posting-field-keywords-overlay{position:fixed;top:150px;left:50px;width:650px;height:350px;background:white;z-index:100}
+        .next-menu-item-inner{height:300px}</style>
+        <h2>Basic information</h2><div class="posting-field-keywords"><textarea></textarea></div>
+        <div class="sell-catProp-item"><label class="label">Place of Origin</label><input readonly role="combobox"></div>
+        <div class="next-overlay-wrapper"><ul class="next-menu next-ver next-overlay-inner posting-field-keywords-overlay" role="menu" hidden>
+          <li role="menuitem" class="next-menu-item next-menu-group-item"><div class="next-menu-item-inner"><span class="next-menu-item-text">Unrelated recommendation</span></div></li></ul></div>
+        <div class="sell-o-select-options" hidden><div class="options-item" role="option">中国</div></div>
+        <script>(()=>{
+          const field=document.querySelector('textarea'),suggestions=document.querySelector('ul'),origin=document.querySelector('[role=combobox]'),countries=document.querySelector('.sell-o-select-options');
+          window.recommended=0;window.selected=0;
+          field.oninput=()=>setTimeout(()=>{suggestions.hidden=false},${delay});
+          suggestions.onclick=()=>{window.recommended++;field.value='Unrelated recommendation'};
+          document.addEventListener('mousedown',e=>{if(!suggestions.contains(e.target)&&e.target!==field)suggestions.hidden=true});
+          origin.onclick=()=>{countries.hidden=false};
+          countries.onclick=()=>{window.selected++;origin.value='China';countries.hidden=true};
+        })();</script>`);
+      const keywords = 'Drone Battery Charger';
+      assert.equal(await fillProductKeywords(page, { keywords: [keywords] }), true);
+      if (delay) await page.locator('.posting-field-keywords-overlay').waitFor({ state: 'visible' });
+      else assert.equal(await page.locator('.posting-field-keywords-overlay').isVisible(), false);
+      assert.equal(await fillOriginCountry(page, 'China'), true);
+      assert.equal(await page.locator('.posting-field-keywords-overlay').isVisible(), false);
+      assert.equal(await page.locator('textarea').inputValue(), keywords);
+      assert.equal(await page.locator('[role=combobox]').inputValue(), 'China');
+      assert.deepEqual(await page.evaluate(() => [window.recommended, window.selected]), [0, 1]);
+    });
   } finally { await browser.close(); }
 });
 

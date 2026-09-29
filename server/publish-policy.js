@@ -1,6 +1,15 @@
 const present = (value) => value != null && String(value).trim() !== '';
 const quantity = (value) => Number(String(value ?? '').replace(/,/g, '').match(/\d+(?:\.\d+)?/)?.[0]) || 0;
 
+export const DEFAULT_FREIGHT_TEMPLATE = '买卖双方协商物流';
+export const DEFAULT_CARTON_MODE = '一箱多件';
+export function cartonModeForProduct(product) {
+  return String(product.shipping?.cartonMode || '').trim() || DEFAULT_CARTON_MODE;
+}
+export function freightTemplateForProduct(product, selected = '') {
+  return String(product.freightTemplate || '').trim() || String(selected || '').trim() || DEFAULT_FREIGHT_TEMPLATE;
+}
+
 export function minimumOrderQuantity(product) {
   const tiers = (product.priceTiers || []).map((tier) => quantity(tier.minQuantity)).filter((value) => value > 0);
   return Math.ceil(tiers.length ? Math.min(...tiers) : quantity(product.minOrder || product.moq)) || 1;

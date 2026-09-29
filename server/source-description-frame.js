@@ -39,7 +39,7 @@ export async function readSourceDescriptionFrame(page, { selector, waitForFrame 
         return { html: root.innerHTML, text: clean(root.textContent), images, videos };
       }).catch(() => null);
       if (result) {
-        result.attributes = await frame.evaluate(readAlibabaAttributeRows).catch(() => []);
+        result.attributes = await frame.evaluate(readAlibabaAttributeRows, { description: true }).catch(() => []);
         last = result;
       }
       if (result?.images.length || (result?.text.length > 120 && !/^(?:loading|加载中|正在加载)/i.test(result.text))) return result;

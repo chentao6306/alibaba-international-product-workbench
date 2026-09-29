@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { sanitizeTemplateHtml, templatePublishHtml, placeTemplateImages } from './description-templates.js';
 import { readSellerReference } from './seller-reference.js';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -9,10 +10,12 @@ import { extractAlibabaDescription, extractAlibabaSourceData, parseAlibabaDetail
 import { SOURCE_LANGUAGE_HEADERS, withSourceLocale } from './source-locale.js';
 import { buildAlibabaPublishUrl, categoryIdFromUrl, normalizeCategoryId } from './category-routing.js';
 import { REQUIRED_ATTRIBUTE_ALIASES, requiredAttributeKey } from './publish-reference.js';
+import { attributeOptionMatchScore, attributeValueList, attributeTextValue } from './attribute-values.js';
+export { attributeOptionMatchScore } from './attribute-values.js';
 import { sourcePlatform, crossPlatformPublishErrors } from './source-platform.js';
-import { submitWithRepairs } from './publish-recovery.js';
-import { readPostingLogistics, logisticsControlValue, missingLogisticsFields, fillLogisticsAttributes, sourceLogisticsAttributes, capturePostingLogistics } from './posting-logistics.js';
-import { applyStockPolicy, normalizeListingMode, packagingDisplayRows } from './publish-policy.js';
+import { SPECIFICATION_IMAGE_REQUIRED_TEXT, submitWithRepairs } from './publish-recovery.js';
+import { readPostingLogistics, logisticsControlValue, missingLogisticsFields, fillLogisticsAttributes, sourceLogisticsAttributes, capturePostingLogistics, isLogisticsReadinessHint } from './posting-logistics.js';
+import { applyStockPolicy, normalizeListingMode, packagingDisplayRows, freightTemplateForProduct, cartonModeForProduct } from './publish-policy.js';
 import { readSellerGroups, applySellerGroup } from './seller-groups.js';
 import { ImageDownloadQueue } from './image-download-queue.js';
 import { ORIGIN_COUNTRIES, originCountry, isOriginRegionAttribute, productOrigin, synchronizeProductOrigin } from './origin-country.js';
@@ -21,10 +24,14 @@ import { fillReferencedSkuRows } from './sku-reference.js';
 import { findNormalDescriptionControl, findPostingTitle, requirePostingPageAvailable, revealDescriptionSection, waitForDescriptionEditor, waitForPostingTitle } from './posting-readiness.js';
 import { readSourceDescriptionFrame } from './source-description-frame.js';
 import { collectSourceAttributeSections } from './source-attributes.js';
-import { categoryRequirementSchema } from './category-readiness.js';
+import { categoryRequirementSchema, postingSchemaWithKnownLabels } from './category-readiness.js';
 import { browserResourcePolicy } from './browser-resource-policy.js';
 import { browserStep } from './browser-step.js';
-import { userFacingError } from './browser-error.js';
+import { choosePostingFile, clickPostingControl as performPostingClick, configurePostingInteractions, postingInteractionFailure } from './posting-interaction.js';
+import { acknowledgePolicyWarning, acknowledgeSalesRules, isBlockingPolicyFeedback, POLICY_WARNING_TEXT, POLICY_RULE_CONFIRMATION_TEXT, policyAcknowledgements, policyWarningPublishingAllowed, requireNoPolicyWarning, withPostingPolicy } from './posting-policy.js';
+import { attributeMenuForControl, closePostingAttributeMenus, POSTING_DIALOG, targetPopupContext, VISIBLE_ATTRIBUTE_MENU } from './posting-popups.js';
+export { closePostingAttributeMenus } from './posting-popups.js';
+import { isBrowserInteractionError, userFacingError } from './browser-error.js';
 import { ensureSimplifiedChinese } from './posting-language.js';
 import { attributeId, extractAlibabaAttributes, mergeSourceAttributes, packagingFromAttributes, readAlibabaAttributeRows, readPostingAttributeSchema, sourceAttributeForField, SOURCE_ATTRIBUTE_SCHEMA_VERSION, bindSourceAttributesToPostingSchema } from './category-attributes.js';
 
@@ -51,7 +58,7 @@ export function sanitizeCollectedProduct(product) {
   const keywords = (Array.isArray(product.keywords) ? product.keywords : []).filter((value) => !isPromotionalText(value));
   const subtitle = isPromotionalText(product.subtitle) ? '' : product.subtitle;
   let description = String(product.description || '').replace(/供应商的产品说明\s*报告可疑活动/gi, '').trim();
-  const descriptionHtml = sanitizeSourceDescriptionHtml(product.descriptionHtml || '');
+  const descriptionHtml = product.descriptionTemplate ? sanitizeTemplateHtml(product.descriptionHtml || '') : sanitizeSourceDescriptionHtml(product.descriptionHtml || '');
   if (/with\s*\(document\)|insertBefore\s*\(createElement\(['"]script/i.test(description)) {
     description = descriptionHtml ? load(descriptionHtml).text().replace(/\s+/g, ' ').trim() : '';
   }
@@ -247,6 +254,11 @@ export async function fillProductKeywords(page, product) {
   const editable = page.locator(selector.split(',').map((part) => `${part.trim()}:not([disabled]):not([readonly])`).join(',')).filter({ visible: true }).first();
   if (!await page.locator(selector).count()) return false;
   await fillAndVerify(editable, alibabaKeywordText(product), '商品关键词');
+  if (!await closePostingAttributeMenus(page)) {
+    throw Object.assign(new Error('商品关键词填写尚未完成，已保留当前商品进度'),
+      { code: 'PUBLISH_FIELD_NOT_READY', fieldName: '商品关键词' });
+  }
+  await requireClearPostingOverlays(page);
   return true;
 }
 
@@ -304,22 +316,27 @@ function compactText(value, limit = 220) {
 export async function visibleFeedback(page) {
   const selectors = [
     '.sell-error-message .msg-text', '.error-sell-info + .sell-error-message',
-    '[role="alert"]', '.next-message', '.next-notice', '.next-feedback',
+    '[role="alert"]', '[role="dialog"]', '[aria-modal="true"]', '.next-message', '.next-notice', '.next-feedback',
     '.next-balloon', '.next-dialog', '[class*="toast"]', '[class*="message"]',
     '[class*="error"]', '[class*="invalid"]', '[class*="feedback"]'
   ];
   return page.evaluate((patterns) => {
-    const messages = new Set();
+    const messages = new Map();
+    const errors = '.sell-error-message, [role="alert"], .next-message-error, .next-notice-error, .next-feedback-error, .next-form-item-help, [aria-invalid="true"]';
     for (const pattern of patterns) {
       for (const node of [...document.querySelectorAll(pattern)].slice(0, 20)) {
         const style = getComputedStyle(node);
         if (!node.getClientRects().length || style.visibility === 'hidden' || style.display === 'none') continue;
         const text = String(node.innerText || '').replace(/\s+/g, ' ').trim();
-        if (text) messages.add(text.slice(0, 2000));
+        if (text) {
+          const message = text.slice(0, 2000);
+          messages.set(message, Boolean(messages.get(message) || node.closest(errors) || node.querySelector(errors)));
+        }
       }
     }
-    return [...messages];
-  }, selectors).catch((error) => {
+    return [...messages].map(([text, error]) => ({ text, error }));
+  }, selectors).then((messages) => messages.filter((message) => message.error || !isLogisticsReadinessHint(message.text))
+    .map((message) => message.text)).catch((error) => {
     // Navigation after a successful save can invalidate a read. The result
     // polling loop will read the new document; never repeat the submission.
     if (/Execution context was destroyed|Cannot find context|navigation/i.test(error.message)) return [];
@@ -330,17 +347,7 @@ export async function visibleFeedback(page) {
 const SUBMIT_SUCCESS_TEXT = /(?:发布成功|提交成功|已提交发布|审核中|产品信息已经成功提交|产品已经进入审核流程|您的产品信息已经成功提交|您的产品已经进入审核流程|successfully\s+(?:submitted|published)|submitted successfully)/i;
 const DRAFT_SUCCESS_TEXT = /(?:保存成功|草稿.*成功|已保存|successfully\s+saved|saved successfully)/i;
 const ACCOUNT_LIMIT_TEXT = /(?:产品|商品)(?:总量|数量).{0,20}(?:超出|超过|上限)|product.{0,30}(?:quota|limit).{0,20}(?:exceed|reach)/i;
-const POLICY_WARNING_TEXT = /疑似涉及禁限售|涉嫌侵权|疑似侵权|(?:产品|商品).{0,40}(?:违反禁限售|涉及违禁)|(?:suspected|potential).{0,40}(?:restricted|prohibited|infringement)/i;
 const BLOCKING_FEEDBACK_TEXT = /(?:报错反馈|错误项|必填项.*不能为空|无效起订量|物流属性.*(?:请填写完整|不能为空)|重量、体积.*(?:请填写完整|不能为空)|logistics attribute.*(?:fill in completely|remove all)|请上传相关产品图片|请不要输入如下(?:非英文)?字符|required|invalid)/i;
-
-function requireNoPolicyWarning(feedback) {
-  const warnings = feedback.filter((text) => POLICY_WARNING_TEXT.test(text));
-  if (!warnings.length) return;
-  const detail = warnings.find((text) => /商品名称|产品名称|product name/i.test(text)) || warnings[0];
-  const error = new Error(`国际站提示商品需人工核对禁限售或侵权风险，未继续提交：${compactText(detail, 700)}`);
-  error.code = 'PUBLISH_POLICY_REVIEW_REQUIRED';
-  throw error;
-}
 
 export function alibabaKeywordText(product) {
   const keywords = (product.keywords || []).length
@@ -352,12 +359,12 @@ export function alibabaKeywordText(product) {
   return normalized.length <= 384 ? normalized : normalized.slice(0, 384).replace(/\s+\S*$/, '').trim();
 }
 
-export function classifyAlibabaActionResult({ mode = 'draft', url = '', originalUrl = '', feedback = [], bodyText = '' } = {}) {
+export function classifyAlibabaActionResult({ mode = 'draft', url = '', originalUrl = '', feedback = [], bodyText = '', allowPolicyWarningPublish = false } = {}) {
   const messages = Array.isArray(feedback) ? feedback.filter(Boolean) : [];
   const feedbackText = messages.join(' ');
   const combinedText = `${feedbackText} ${String(bodyText || '')}`;
   if (ACCOUNT_LIMIT_TEXT.test(combinedText)) return { succeeded: false, verifiedBy: '', blockingFeedback: true };
-  if (POLICY_WARNING_TEXT.test(feedbackText)) return { succeeded: false, verifiedBy: '', blockingFeedback: true };
+  if (isBlockingPolicyFeedback(feedbackText, allowPolicyWarningPublish === true)) return { succeeded: false, verifiedBy: '', blockingFeedback: true };
   let currentUrl = null;
   let initialUrl = null;
   try { currentUrl = new URL(url); } catch {}
@@ -375,7 +382,7 @@ export function classifyAlibabaActionResult({ mode = 'draft', url = '', original
     return { succeeded: true, verifiedBy: 'success-url', blockingFeedback: false };
   }
 
-  const blockingFeedback = BLOCKING_FEEDBACK_TEXT.test(feedbackText);
+  const blockingFeedback = BLOCKING_FEEDBACK_TEXT.test(feedbackText) || SPECIFICATION_IMAGE_REQUIRED_TEXT.test(feedbackText);
   const successText = mode === 'submit' ? SUBMIT_SUCCESS_TEXT : DRAFT_SUCCESS_TEXT;
   if (successText.test(combinedText) && !(mode === 'submit' && blockingFeedback)) {
     return {
@@ -681,8 +688,55 @@ export async function captureCategoryAttributes(page) {
     .map((field) => ({ name: field.label, value: field.values.length > 1 ? field.values : field.values[0] }));
 }
 
-export async function waitForActionResult(page, action, mode, originalUrl) {
+async function qualityScoreConfirmation(page) {
+  const titles = page.getByText('质量分检测提示', { exact: true });
+  for (let index = 0; index < await titles.count(); index += 1) {
+    const title = titles.nth(index);
+    if (!await title.isVisible()) continue;
+    let container = title;
+    for (let depth = 0; depth < 6; depth += 1) {
+      if (await container.evaluate((node) => /^(?:BODY|HTML|FORM)$/.test(node.tagName))) break;
+      const proceed = container.getByRole('button', { name: '继续提交', exact: true });
+      const back = container.getByRole('button', { name: '返回修改', exact: true });
+      if (await proceed.count() === 1 && await back.count() === 1
+        && await proceed.isVisible() && await back.isVisible()) {
+        const text = compactText(await container.innerText(), 1200);
+        requireNoPolicyWarning([text]);
+        return {
+          text, proceed,
+          recognized: !POLICY_WARNING_TEXT.test(text) && /商品信息质量分低于\s*4(?:\.0)?\s*分/.test(text) && /商品曝光/.test(text),
+        };
+      }
+      container = container.locator('..');
+    }
+  }
+  return null;
+}
+
+async function pendingPostingPrompts(page, mode) {
+  const messages = await page.locator(`.next-dialog:visible, ${POSTING_DIALOG}:visible, [aria-modal="true"]:visible, .mce-window:visible`)
+    .evaluateAll((nodes) => [...new Set(nodes.map((node) => String(node.innerText || node.getAttribute('aria-label') || '')
+      .replace(/\s+/g, ' ').trim()).filter(Boolean))]).catch((error) => {
+      if (/Execution context was destroyed|Cannot find context|navigation/i.test(error.message)) return [];
+      throw error;
+    });
+  // An explicit success receipt can itself be a dialog. Keep confirmation
+  // prompts pending even if their text mentions a successful submission.
+  const successText = mode === 'submit' ? SUBMIT_SUCCESS_TEXT : DRAFT_SUCCESS_TEXT;
+  return messages.filter((text) => !successText.test(text)
+    || /继续提交|返回修改|确认(?:发布|提交|保存)|confirm\s+(?:publication|submission)|continue\s+(?:publishing|submission)/i.test(text));
+}
+
+function postingConfirmationError(message, code = 'PUBLISH_CONFIRMATION_PENDING') {
+  return Object.assign(new Error(message), { code, diagnostics: { section: 'submission-confirmation' } });
+}
+
+export async function waitForActionResult(page, action, mode, originalUrl, { timeoutMs = 15000 } = {}) {
   const responses = [];
+  let qualityConfirmationAttempted = false;
+  let qualityConfirmationFeedback = [];
+  let policyConfirmationAttempted = false;
+  let salesRulesResubmitted = false;
   const onResponse = (response) => {
     const request = response.request();
     if (!['POST', 'PUT', 'PATCH'].includes(request.method())) return;
@@ -691,27 +745,79 @@ export async function waitForActionResult(page, action, mode, originalUrl) {
   page.on('response', onResponse);
   try {
     await requireClearPostingOverlays(page);
+    if (mode === 'submit') await acknowledgeSalesRules(page);
     const requiredAttributes = await captureCategoryAttributes(page);
     const acceptedLogistics = await capturePostingLogistics(page);
-    await action.click();
-    let deadline = Date.now() + 15000;
+    await clickPostingControl(page, action, {
+      beforeRetry: async () => {
+        await requireClearPostingOverlays(page);
+        if (mode === 'submit') await requireSpecificationImagesAccepted(page);
+      },
+    });
+    let deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      if (await waitForHumanVerification(page)) deadline = Date.now() + 15000;
+      if (await waitForHumanVerification(page)) deadline = Date.now() + timeoutMs;
       await page.waitForTimeout(400);
       const url = page.url();
       const feedback = await visibleFeedback(page);
       requireNoPolicyWarning(feedback);
+      // Retry only after an explicit validation rejection and a newly checked
+      // rule field. A slow/unknown receipt must never cause another submission.
+      if (mode === 'submit' && !salesRulesResubmitted && feedback.some(text => POLICY_RULE_CONFIRMATION_TEXT.test(text))) {
+        const acknowledged = await acknowledgeSalesRules(page, { required: true });
+        if (acknowledged) {
+          salesRulesResubmitted = true;
+          await requireClearPostingOverlays(page);
+          await clickPostingControl(page, action);
+          deadline = Date.now() + timeoutMs;
+          continue;
+        }
+      }
+      const policyNotice = await acknowledgePolicyWarning(page, { submission: mode === 'submit' });
+      if (policyNotice) {
+        policyConfirmationAttempted = true;
+        deadline = Date.now() + timeoutMs;
+        continue;
+      }
+      const qualityNotice = await qualityScoreConfirmation(page);
+      const pendingPrompts = await pendingPostingPrompts(page, mode);
+      requireNoPolicyWarning(pendingPrompts);
+      if (qualityNotice || pendingPrompts.length) {
+        if (mode === 'submit' && qualityNotice?.recognized && !qualityConfirmationAttempted
+          && !await qualityNotice.proceed.isDisabled()) {
+          // This is the known, optional quality-score notice shown only after
+          // submission. A confirmation is not a successful publication receipt.
+          qualityConfirmationAttempted = true;
+          qualityConfirmationFeedback = feedback;
+          try { await clickPostingControl(page, qualityNotice.proceed, { timeout: 5000 }); }
+          catch (error) {
+            postingInteractionFailure(error);
+            throw postingConfirmationError('国际站质量分检测提示未能确认，请检查发布页面的“继续提交”按钮；已保留当前商品进度');
+          }
+          deadline = Date.now() + timeoutMs;
+        }
+        // Background readiness hints and old success text are not the result
+        // while a confirmation is still open. Never click it repeatedly.
+        continue;
+      }
       const accountLimit = await page.locator('body').innerText().then((value) => value.match(/[^\n]*您发布的产品总量已超出限制[^\n]*/)?.[0]).catch(() => '');
       if (accountLimit) {
         const error = new Error(`国际站账号发布额度不足：${accountLimit.trim()}`);
         error.code = 'PUBLISH_ACCOUNT_LIMIT';
         throw error;
       }
-      const result = classifyAlibabaActionResult({ mode, url, originalUrl, feedback });
+      const result = classifyAlibabaActionResult({ mode, url, originalUrl, feedback, allowPolicyWarningPublish: policyWarningPublishingAllowed() });
       if (result.succeeded) return { verifiedBy: result.verifiedBy, feedback, responses, requiredAttributes, acceptedLogistics };
     }
     const feedback = await visibleFeedback(page);
     requireNoPolicyWarning(feedback);
+    const qualityNotice = await qualityScoreConfirmation(page);
+    const pendingPrompts = await pendingPostingPrompts(page, mode);
+    requireNoPolicyWarning(pendingPrompts);
+    if (qualityNotice || pendingPrompts.length) {
+      const detail = qualityNotice?.text || pendingPrompts[0];
+      throw postingConfirmationError(`国际站提交确认尚未完成：${compactText(detail, 700)}${qualityConfirmationAttempted ? '；已点击一次“继续提交”，未重复点击' : ''}`);
+    }
     const bodyText = await page.locator('body').innerText().catch(() => '');
     // The success page can render immediately after the polling deadline. The
     // final snapshot must be classified before it is used to build an error.
@@ -720,25 +826,49 @@ export async function waitForActionResult(page, action, mode, originalUrl) {
       url: page.url(),
       originalUrl,
       feedback,
-      bodyText
+      bodyText,
+      allowPolicyWarningPublish: policyWarningPublishingAllowed(),
     });
     if (finalResult.succeeded) {
       return { verifiedBy: finalResult.verifiedBy, feedback, responses, requiredAttributes, acceptedLogistics };
     }
-    const relevant = feedback
-      .filter((text) => /必填|不能为空|请填写|请输入|无效|未填写|请上传|请不要输入|非英文|至少|错误|失败|error|required|invalid/i.test(text))
+    let validationFeedback = feedback;
+    if (qualityConfirmationAttempted || policyConfirmationAttempted) {
+      validationFeedback = feedback.filter((text) => !qualityConfirmationFeedback.includes(text))
+        .filter((text) => BLOCKING_FEEDBACK_TEXT.test(text) || SPECIFICATION_IMAGE_REQUIRED_TEXT.test(text));
+      if (!validationFeedback.length) {
+        throw postingConfirmationError('已确认平台提示，但尚未收到国际站的明确发布结果；请先在商品管理中核对，避免重复发布', 'PUBLISH_SUBMIT_RESULT_UNKNOWN');
+      }
+    }
+    if (mode === 'submit') await requireSpecificationImagesAccepted(page, validationFeedback);
+    const relevant = validationFeedback
+      .filter((text) => SPECIFICATION_IMAGE_REQUIRED_TEXT.test(text) || /必填|不能为空|请填写|请输入|无效|未填写|请上传|请不要输入|非英文|至少|错误|失败|error|required|invalid/i.test(text))
       .sort((left, right) => left.length - right.length);
     const errorPanel = bodyText.match(/(?:报错反馈|请发布前修改以下出错项)[\s\S]{0,1200}/)?.[0]
       ?.split(/商品质量助手|基本信息|当前商品类型/)[0]
       ?.replace(/\s+/g, ' ')
       ?.trim() || '';
-    const detail = relevant.slice(0, 8).join('；') || errorPanel || feedback[0] || '';
-    const error = new Error(`${mode === 'submit' ? '提交' : '保存草稿'}后未检测到国际站成功反馈${detail ? `：${detail}` : ''}`);
+    const detail = [...new Set(relevant)].slice(0, 8).join('；') || errorPanel;
+    if (!detail) {
+      throw postingConfirmationError(mode === 'submit'
+        ? '已提交，等待国际站确认发布结果；请先在商品管理中核对，避免重复发布'
+        : '保存操作已提交，等待国际站确认草稿结果；请先在草稿箱中核对，避免重复保存', 'PUBLISH_SUBMIT_RESULT_UNKNOWN');
+    }
+    const error = new Error(`国际站提示：${detail}`);
     error.requiredFields = [...new Set([...await visibleEmptyAttributeLabels(page), ...requiredLabelsFromError(detail)])];
     throw error;
   } finally {
     page.off('response', onResponse);
   }
+}
+
+async function requireSpecificationImagesAccepted(page, feedback = null) {
+  const messages = feedback || await visibleFeedback(page);
+  if (!messages.some((text) => SPECIFICATION_IMAGE_REQUIRED_TEXT.test(text))) return;
+  const error = new Error('国际站商品规格缺少图片：请选择一个规格上传图片；请在商品编辑的“产品规格”中，选择支持传图的规格（如颜色或型号），填写真实规格值并绑定对应图片');
+  error.code = 'PUBLISH_SPEC_IMAGE_REQUIRED';
+  error.diagnostics = { section: 'specifications', reason: 'image-required' };
+  throw error;
 }
 
 function escapeHtml(value) {
@@ -796,15 +926,15 @@ const ATTRIBUTE_NAME_TRANSLATIONS = new Map(Object.entries({
 const SOURCE_ATTRIBUTE_LABEL_ALIASES = new Map([
   ['private mold', ['私模']],
   ['material', ['材质']],
-  ['feature', ['功能', '特性', '功能/特性']],
-  ['features', ['功能', '特性', '功能/特性']],
+  ['feature', ['特性', '功能/特性']],
+  ['features', ['特性', '功能/特性']],
   ['brand name', ['品牌名称']],
   ['place of origin', ['产地']],
   ['model number', ['型号']],
   ['output power', ['输出功率']],
   ['multi function integrated', ['多功能一体化']],
   ['multi-function integrated', ['多功能一体化']],
-  ['function', ['功能', '功能/特性', '特性', 'Function', 'Features']],
+  ['function', ['功能', 'Function']],
   ['port', ['端口', '接口', 'Port']],
   ['input', ['输入', 'Input']],
   ['output', ['输出', 'Output']],
@@ -939,6 +1069,7 @@ export function sanitizeSourceDescriptionHtml(value) {
 }
 
 export function buildLegacyDescriptionHtml(product) {
+  if (product.descriptionTemplate) return templatePublishHtml(product);
   const attributes = [...(product.attributes || []), ...packagingDisplayRows(product.packaging)].map((item, index) => ({
     name: englishAttributeName(item.name, index),
     value: englishSpecText(item.value, 'See product images')
@@ -1052,7 +1183,7 @@ export function validateProductData(product, { mode = 'submit' } = {}) {
   if (!String(product.title || '').trim()) errors.push('缺少商品标题');
   if (numericValue(product.price) <= 0) errors.push('销售价格无效');
   if (mainImages.length < 4) errors.push(`主图不足 4 张（当前 ${mainImages.length} 张）`);
-  if (!(product.detailImages || []).length) errors.push('缺少详情图片');
+  if (!(product.detailImages || []).length && !product.descriptionTemplate) errors.push('缺少详情图片');
   if (sourceDetailHasBrokenImages(product.descriptionHtml)) errors.push('详情描述包含失效图片，请先清理后再发布');
   // Attribute and logistics requirements belong to the selected category's
   // actual form. Do not reject all categories with a fixed attribute count or
@@ -1108,8 +1239,8 @@ export function preparePublishProduct(product, options = {}) {
   next.mainImages = distinctAlibabaImageUrls((product.mainImages || product.images || []).filter(usable));
   next.images = next.mainImages;
   next.detailImages = [...new Set((product.detailImages || []).filter(usable))];
-  next.descriptionHtml = sanitizeSourceDescriptionHtml(product.descriptionHtml || '');
-  if (!next.detailImages.length && (next.descriptionHtml || product.structuredDescription?.html)) {
+  next.descriptionHtml = product.descriptionTemplate ? sanitizeTemplateHtml(product.descriptionHtml || '') : sanitizeSourceDescriptionHtml(product.descriptionHtml || '');
+  if (!product.imageEdits?.detail && !next.detailImages.length && (next.descriptionHtml || product.structuredDescription?.html)) {
     const $ = load(next.descriptionHtml || sanitizeSourceDescriptionHtml(product.structuredDescription.html));
     next.detailImages = [...new Set($('img').toArray().map((node) => {
       const url = $(node).attr('data-src') || $(node).attr('data-original') || $(node).attr('src') || '';
@@ -1120,6 +1251,27 @@ export function preparePublishProduct(product, options = {}) {
   const fallbackPrice = numericValue(product.price) || numericValue(product.sourcePriceRange?.minPrice) || 1;
   const fallbackStock = product.stock != null && product.stock !== '' ? Number(product.stock) : 100;
   const groups = Array.isArray(product.variantGroups) ? product.variantGroups : [];
+  // The editor can store an image on the SKU or the color/model map while
+  // the collected group has no optionImages. Preserve explicit associations;
+  // never choose between conflicting images for the same option.
+  next.variantGroups = groups.map((group) => {
+    const optionImages = { ...(group.optionImages || {}) };
+    if (!/颜色|colou?r|^(?:model(?: number)?|型号)$/i.test(group.name) && group.type !== 'IMAGE') {
+      return { ...group, optionImages };
+    }
+    const key = requiredAttributeKey(group.name);
+    const imageMap = /颜色|colou?r/i.test(group.name) ? product.colorImages
+      : /^(?:model(?: number)?|型号)$/i.test(group.name) ? product.modelImages : null;
+    for (const value of group.options || []) {
+      if (optionImages[value]) continue;
+      if (imageMap?.[value]) { optionImages[value] = imageMap[value]; continue; }
+      const matchingImages = [...new Set((product.skus || []).filter((sku) => sku.image
+        && Object.entries(sku.attributes || {}).some(([name, option]) => requiredAttributeKey(name) === key
+          && String(option).trim() === String(value).trim())).map((sku) => sku.image))];
+      if (matchingImages.length === 1) optionImages[value] = matchingImages[0];
+    }
+    return { ...group, optionImages };
+  });
   if (groups.length && Array.isArray(product.skus)) {
     next.skus = product.skus.map((sku, index) => ({
       ...sku,
@@ -1281,6 +1433,50 @@ export function mainImageSlotsComplete(initialSlotCount, remainingSlotCount, exp
   const remaining = Math.max(0, Number(remainingSlotCount) || 0);
   const expected = Math.max(0, Number(expectedCount) || 0);
   return remaining <= Math.max(0, initial - expected);
+}
+
+function mainImageControlPending(cause) {
+  return Object.assign(new Error('国际站主图上传入口暂未就绪，自动恢复后仍未能选择图片；已保留当前商品进度，请稍后继续', { cause }), {
+    code: 'MAIN_IMAGE_CONTROL_NOT_READY', diagnostics: { section: 'main-images' },
+  });
+}
+
+async function revealMainImageControl(page, locator) {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      // Scroll the current slot directly: an inline upload label can animate
+      // or be replaced during scrolling and never pass a stability check.
+      await locator.evaluate((node) => (node.closest('.image-upload-list-item') || node)
+        .scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }), undefined, { timeout: 2000 });
+      if (await locator.isVisible()) return;
+    } catch (error) {
+      lastError = error;
+      if (!isBrowserInteractionError(error)) throw error;
+    }
+    await page.waitForTimeout(200);
+  }
+  throw mainImageControlPending(lastError);
+}
+
+async function hoverMainImageControl(page, trigger) {
+  await page.mouse.move(0, 0);
+  try { await trigger.hover({ timeout: 1200 }); }
+  catch (error) {
+    if (!isBrowserInteractionError(error)) throw error;
+    // Moving the pointer opens a hover menu even while the label animates.
+    // Hit-test its current position; never force a click through a notice.
+    const point = await trigger.evaluate((node) => {
+      const rect = node.getBoundingClientRect();
+      const left = Math.max(0, rect.left), right = Math.min(innerWidth, rect.right);
+      const top = Math.max(0, rect.top), bottom = Math.min(innerHeight, rect.bottom);
+      if (left >= right || top >= bottom) return null;
+      const x = (left + right) / 2, y = (top + bottom) / 2;
+      const hit = document.elementFromPoint(x, y);
+      return hit && (hit === node || node.contains(hit)) ? { x, y } : null;
+    }, undefined, { timeout: 1500 }).catch(() => null);
+    if (point) await page.mouse.move(point.x, point.y);
+  }
 }
 
 export async function mainImageUploadRecords(page, removeNames = []) {
@@ -1576,19 +1772,20 @@ async function postingLogisticsState(page, product, { complete = false, projectS
   if (controls.attributes.present && (active || controls.attributes.required) && !attributesMatch) {
     missing.push({ label: '物流属性', reason: sourceAttributes.length ? 'not_committed' : 'missing_source' });
   }
-  const freight = projectSource && String(product.freightTemplate || '').trim() ? product.freightTemplate : accepted.freightTemplate;
-  const expectedFreight = String(product.freightTemplate || '').trim();
+  const expectedFreight = freightTemplateForProduct(product, accepted.freightTemplate);
+  const freight = projectSource ? expectedFreight : accepted.freightTemplate;
   const freightMatches = String(freight || '').trim() && (!expectedFreight
     || (projectSource && expectedFreight) || normalized(expectedFreight) === normalized(freight)
     || expectedFreight === controls.freight.value);
   if (controls.freight.present && (active || controls.freight.required) && !freightMatches) {
-    missing.push({ label: '运费模板', reason: String(product.freightTemplate || '').trim() ? 'not_committed' : 'missing_source' });
+    missing.push({ label: '运费模板', reason: 'not_committed' });
   }
   return { fields, missing, required: fields.some((field) => field.required) || controls.attributes.required || controls.freight.required };
 }
 
 export async function applyPostingLogistics(page, product, options = {}) {
   const requested = normalizeListingMode(options.listingMode);
+  await fillCartonMode(page, product);
   let effective = requested;
   let state;
   let opportunity = false;
@@ -1623,6 +1820,7 @@ export async function applyPostingLogistics(page, product, options = {}) {
     throw Object.assign(new Error('当前类目要求完整运输资料，不能使用询盘展示省略物流信息'), { code: 'PUBLISH_SALES_MODE_MISMATCH' });
   }
   await forceClearLogisticsSection(page);
+  await fillFreightTemplate(page, product);
   if ((await page.evaluate(readPostingLogistics)).some((field) => String(field.value).trim())) {
     throw Object.assign(new Error('询盘展示的物流设置未生效，已停止提交'), { code: 'PUBLISH_FIELD_NOT_READY' });
   }
@@ -1678,155 +1876,179 @@ export async function requireLogisticsReady(page, product, options = {}) {
   });
 }
 
-async function fillFreightTemplate(page, product) {
-  if (!String(product.freightTemplate || '').trim()) return false;
-  const field = await firstVisible(page, ['#shippingTemplateId input', '#shippingTemplateId select', 'input[name="shippingTemplateId"]', 'select[name="shippingTemplateId"]'])
-    || await fieldByAnyLabel(page, ['运费模板', '物流提供方式', 'Shipping template', 'Freight template']);
-  return field ? fillChoice(page, field, product.freightTemplate) : false;
+export async function fillCartonMode(page, product) {
+  const expected = cartonModeForProduct(product);
+  const radio = page.getByRole('radio', { name: expected, exact: true }).first();
+  if (await radio.isVisible().catch(() => false) && !await radio.isDisabled()) {
+    if (!await radio.isChecked()) await clickPostingControl(page, radio, { timeout: 3000 });
+    if (await radio.isChecked()) return true;
+    throw Object.assign(new Error('箱规选项尚未生效，已保留当前商品进度，请稍后继续'), { code: 'PUBLISH_FIELD_NOT_READY', fieldName: '箱规' });
+  }
+  const labelled = page.getByRole('combobox', { name: /^(?:箱规|装箱方式)/ }).first();
+  const field = await labelled.isVisible().catch(() => false) ? labelled : await fieldByAnyLabel(page, ['箱规', '装箱方式']);
+  if (!field || await field.isDisabled()) return false;
+  return fillChoice(page, field, expected, { minimumScore: 100 });
 }
 
-export function attributeOptionMatchScore(source, option) {
-  const normalize = (value) => String(value ?? '').toLowerCase()
-    .replace(/[＜]/g, '<').replace(/[＞]/g, '>')
-    .replace(/[–—～~]/g, '-')
-    .replace(/\b(?:years? old|years?|yrs?)\b|岁/g, 'year')
-    .replace(/(\d)\s*y\b/g, '$1year')
-    .replace(/\b(?:months?|mos?)\b|个月/g, 'month')
-    .replace(/\s+(?:to)\s+/g, '-')
-    .replace(/英寸|inch(?:es)?|["“”]/g, '')
-    .replace(/[\s'‘’（）()]/g, '');
-  const wanted = normalize(source);
-  const offered = normalize(option);
-  if (!wanted || !offered) return 0;
-  if (wanted === offered) return 100;
-  if ([['yes', 'true', '是'], ['no', 'false', '否'], ['unisex', '男女通用', '男女皆宜'], ['boys', 'boy', '男孩'], ['girls', 'girl', '女孩']]
-    .some((values) => values.includes(wanted) && values.includes(offered))) return 100;
-  const numbers = (value) => value.match(/\d+(?:\.\d+)?/g) || [];
-  const a = numbers(wanted);
-  const b = numbers(offered);
-  if (a.length || b.length) {
-    if ((wanted.includes('month') || offered.includes('month')) && wanted.includes('month') !== offered.includes('month')) return 0;
-    const unit = (value) => value.match(/(?:\d)(year|month|mm|cm|km|m|kg|mg|g|mah|ah|ml|l|kw|w|kv|v|hz|khz|mhz|ghz)(?:$|[<>+])/i)?.[1] || '';
-    if (unit(wanted) && unit(offered) && unit(wanted) !== unit(offered)) return 0;
-    if (a.length !== b.length || !a.length) {
-      // A single measurement may be represented by a containing interval.
-      if (a.length === 1 && b.length === 2 && /^\d+(?:\.\d+)?-\d/.test(offered)
-        && Number(a[0]) >= Number(b[0]) && Number(a[0]) <= Number(b[1])) return 70;
-      return 0;
-    }
-    const comparator = (value) => (value.match(/^[<>]=?|^[≤≥]/)?.[0] || '') + (/\+$/.test(value) ? '+' : '');
-    return comparator(wanted) === comparator(offered) && a.join(',') === b.join(',') ? 90 : 0;
-  }
-  if (/^others?$/.test(wanted) && /^(?:others?|其他)$/.test(offered)) return 90;
-  return offered.includes(wanted) || wanted.includes(offered) ? 50 : 0;
+async function fillFreightTemplate(page, product) {
+  const accepted = await capturePostingLogistics(page);
+  const expected = freightTemplateForProduct(product, accepted.freightTemplate);
+  if (accepted.freightTemplate === expected) return true;
+  const field = await firstVisible(page, ['#shippingTemplateId input', '#shippingTemplateId select', 'input[name="shippingTemplateId"]', 'select[name="shippingTemplateId"]'])
+    || await fieldByAnyLabel(page, ['运费模板', '物流提供方式', 'Shipping template', 'Freight template']);
+  if (!field || await field.isDisabled()) return false;
+  if (await field.evaluate((node) => node.readOnly && !node.closest('.next-select, [role="combobox"]') && node.getAttribute('role') !== 'combobox')) return false;
+  if (!await fillChoice(page, field, expected, { minimumScore: 100 })) return false;
+  return (await capturePostingLogistics(page)).freightTemplate === expected;
 }
 
 export async function fillOriginCountry(page, value) {
   const country = originCountry(value);
   if (!country) return false;
-  const field = await fieldByAnyLabel(page, ['原产地', '产地', 'Place of Origin', 'Country of Origin', 'Origin']);
-  if (!field) return false;
-  if (await field.evaluate((node) => node.tagName === 'SELECT')) {
-    const options = await field.locator('option:not(:disabled)').evaluateAll((nodes) => nodes.map((node) => ({ value: node.value, label: node.textContent })));
-    const match = options.find((option) => option.value && (originCountry(option.label) === country || originCountry(option.value) === country));
-    if (!match) return false;
-    if (!await field.selectOption(match.value, { timeout: 4000 }).then(() => true, () => false)) return false;
-    return await field.inputValue() === match.value;
-  }
-  const committedValues = async (clicked = false) => field.evaluate((node, clicked) => {
-    const row = node.closest('.sell-catProp-item, .next-form-item') || node.parentElement;
-    const selected = [...row.querySelectorAll('.next-select-values, .next-tag-body, [class*="selected-value"]')].map((item) => item.textContent);
-    if (node.readOnly || (clicked && node.getAttribute('role') !== 'combobox')) selected.push(node.value);
-    return selected;
-  }, clicked);
-  if ((await committedValues()).some((item) => originCountry(item) === country)) return true;
-  const menus = '.sell-o-select-options:visible, .next-select-popup:visible, [role="listbox"]:visible:not(.next-select-popup [role="listbox"]):not(.sell-o-select-options [role="listbox"])';
-  try {
-    await field.click({ timeout: 4000 });
-    const menu = page.locator(menus).last();
-    if (!await menu.waitFor({ state: 'visible', timeout: 4000 }).then(() => true, () => false)) return false;
-    const options = menu.locator('.options-item:visible, [role="option"]:visible, .next-menu-item:visible');
+  const labels = ['原产地', '产地', 'Place of Origin', 'Country of Origin', 'Origin'];
+  const diagnostics = { section: 'origin-country', field: '产地', attempts: 0, step: 'find-control' };
+  let field;
+  let seenField = false;
+  let lastError;
+  // Do not persist exception text: browser call logs can contain form data.
+  // Structured reasons and control state are sufficient to locate this step.
+  const retryable = (error) => !error.code && isBrowserInteractionError(error)
+    && /timeout|not attached|Execution context was destroyed|Cannot find context/i.test(error.message)
+    && !/Target.*closed|browser has been closed/i.test(error.message);
+  const readCurrent = async (clicked = false) => {
+    field = await fieldByAnyLabel(page, labels);
+    diagnostics.control = { present: Boolean(field) };
+    if (!field) return false;
+    seenField = true;
+    const state = await field.evaluate((node, wasClicked) => {
+      const row = node.closest('.sell-catProp-item, .next-form-item') || node.parentElement;
+      const values = [...row.querySelectorAll('.next-select-values, .next-tag-body, [class*="selected-value"]')].map((item) => item.textContent);
+      if (node.tagName === 'SELECT') values.push(...[...node.selectedOptions].flatMap((option) => [option.value, option.textContent]));
+      else if (node.readOnly || (wasClicked && node.getAttribute('role') !== 'combobox')) values.push(node.value);
+      return { values, tag: node.tagName, role: node.getAttribute('role') || '', readOnly: Boolean(node.readOnly), disabled: Boolean(node.disabled) };
+    }, clicked, { timeout: 1000 });
+    const { values, ...control } = state;
+    diagnostics.control = { present: true, ...control, hasValue: values.some((item) => String(item || '').trim()) };
+    return values.some((item) => originCountry(item) === country);
+  };
+  const waitForCommit = async () => {
+    diagnostics.step = 'verify-selection';
+    const deadline = Date.now() + 1800;
+    do {
+      if (await readCurrent(true)) return true;
+      await page.waitForTimeout(100);
+    } while (Date.now() < deadline);
+    return false;
+  };
+  const select = async () => {
+    diagnostics.step = 'find-control';
+    if (await readCurrent()) return true;
+    if (!field) { diagnostics.reason = 'control-missing'; return false; }
+    if (diagnostics.control.disabled) { diagnostics.reason = 'control-disabled'; return false; }
+    if (diagnostics.control.tag === 'SELECT') {
+      diagnostics.step = 'select-option';
+      const options = await field.locator('option:not(:disabled)').evaluateAll((nodes) => nodes.map((node) => ({ value: node.value, label: node.textContent })));
+      const match = options.find((option) => option.value && (originCountry(option.label) === country || originCountry(option.value) === country));
+      if (!match) { diagnostics.reason = 'option-unmatched'; return false; }
+      await field.selectOption(match.value, { timeout: 4000 });
+      diagnostics.reason = 'selection-uncommitted';
+      return waitForCommit();
+    }
+    diagnostics.step = 'open-menu';
+    await clickPostingControl(page, field);
+    await page.locator(VISIBLE_ATTRIBUTE_MENU).first().waitFor({ state: 'visible', timeout: 4000 });
     const definition = ORIGIN_COUNTRIES.find((item) => item.name === country);
     // Inspect the unfiltered list first: English searches can hide Chinese options.
     for (const query of [null, country, definition?.label, definition?.code].filter((item) => item !== undefined)) {
+      await readCurrent();
+      if (!field) { diagnostics.reason = 'control-missing'; return false; }
+      let menu = await attributeMenuForControl(page, field);
+      if (!menu) { diagnostics.reason = 'menu-unavailable'; return false; }
       if (query !== null) {
+        diagnostics.step = 'search-option';
         const search = menu.locator('input:not([readonly]):not([type="hidden"])').first();
         if (await search.isVisible()) await search.fill(query, { timeout: 2000 });
-        else if (await field.evaluate((node) => !node.readOnly && !node.disabled)) await field.fill(query, { timeout: 2000 });
+        else if (!diagnostics.control.readOnly && !diagnostics.control.disabled) await field.fill(query, { timeout: 2000 });
         else break;
       }
-      const deadline = Date.now() + 1000;
+      diagnostics.step = 'read-options';
+      const deadline = Date.now() + 1200;
       do {
+        // Both the input and portal can be replaced while options are loading.
+        await readCurrent();
+        if (!field) { diagnostics.reason = 'control-missing'; return false; }
+        menu = await attributeMenuForControl(page, field);
+        if (!menu) { diagnostics.reason = 'menu-unavailable'; return false; }
+        const options = menu.locator('.options-item:visible, [role="option"]:visible, .next-menu-item:visible');
         const entries = await options.evaluateAll((nodes) => nodes.map((node) => ({
           label: node.textContent, value: node.getAttribute('data-value') || node.getAttribute('value'),
           disabled: node.getAttribute('aria-disabled') === 'true' || node.classList.contains('disabled') || node.classList.contains('next-disabled'),
         })));
         const index = entries.findIndex((item) => !item.disabled && (originCountry(item.label) === country || originCountry(item.value) === country));
         if (index >= 0) {
-          await options.nth(index).click({ timeout: 4000 });
-          if (!await menu.waitFor({ state: 'hidden', timeout: 4000 }).then(() => true, () => false)) return false;
-          const committedDeadline = Date.now() + 1500;
-          do {
-            if ((await committedValues(true)).some((item) => originCountry(item) === country)) return true;
-            await page.waitForTimeout(100);
-          } while (Date.now() < committedDeadline);
-          return false;
+          diagnostics.step = 'select-option';
+          await clickPostingControl(page, options.nth(index));
+          diagnostics.reason = 'selection-uncommitted';
+          return waitForCommit();
         }
         await page.waitForTimeout(100);
       } while (Date.now() < deadline);
     }
+    diagnostics.reason = 'option-unmatched';
     return false;
-  } finally {
-    await page.keyboard.press('Escape').catch(() => {});
-  }
-}
+  };
 
-// Attribute menus sometimes ignore Escape. Close them through the same blur
-// or click-away actions a user can perform, without changing option values.
-export async function closePostingAttributeMenus(page) {
-  const menus = page.locator('.sell-o-select-options:visible, .next-select-popup:visible')
-    .filter({ hasNot: page.locator('[aria-modal="true"]') });
-  if (!await menus.count()) return true;
-  // Never click through a modal prompt that contains a select control.
-  if (await page.locator('.next-dialog:visible, [aria-modal="true"]:visible, .mce-window:visible').count()) return false;
-  if (await page.locator(`${POSTING_DIALOG}:visible`).evaluateAll((nodes) => nodes.some((node) => !node.closest('.sell-o-select-options, .next-select-popup')))) return false;
-  await page.keyboard.press('Escape');
-  if (!await menus.count()) return true;
-  await page.keyboard.press('Tab');
-  if (!await menus.count()) return true;
-  // Some portals close only on a document mousedown outside the popup. The
-  // nearest row label can be covered by the popup, so also use section titles.
-  const labels = page.locator('.sell-catProp-item > .label:visible, .sell-catProp-item label:visible, .next-form-item-label:visible, #desc-card-title:visible, h2:visible, h3:visible');
-  for (let index = 0; index < Math.min(await labels.count(), 24); index++) {
-    const label = labels.nth(index);
-    const safe = await label.evaluate((node) => !node.matches('label[for]') && !node.querySelector('input, button, select, a, textarea')
-      && !node.closest('[role="dialog"], .sell-o-select-options, .next-select-popup')).catch(() => false);
-    if (!safe) continue;
-    if (!await label.click({ timeout: 500 }).then(() => true, () => false)) continue;
-    if (await menus.first().waitFor({ state: 'hidden', timeout: 500 }).then(() => true, () => false)) return true;
-  }
-  // A menu may cover every label on a narrow display. Click an observed blank
-  // area only after hit-testing it; never submit, change a field or click an
-  // unknown modal while trying to dismiss an attribute popup.
-  const point = await page.evaluate(() => {
-    const menus = [...document.querySelectorAll('.sell-o-select-options, .next-select-popup')]
-      .filter((node) => node.getClientRects().length && getComputedStyle(node).visibility !== 'hidden');
-    const safeBackground = 'body, main, section, .next-form, .next-form-item, .sell-catProp-item, #struct-desc-card, #desc-card';
-    for (const y of [24, innerHeight / 3, innerHeight / 2, innerHeight - 160]) {
-      for (const x of [24, innerWidth / 4, innerWidth / 2, innerWidth - 24]) {
-        const node = document.elementFromPoint(x, y);
-        if (!node || !node.matches(safeBackground) || menus.some((menu) => menu.contains(node))) continue;
-        if (node.closest('[role="dialog"], [aria-modal="true"], .next-dialog, .next-overlay-backdrop, .mce-window, button, a, label, [role="button"], [onclick]')) continue;
-        return { x, y };
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    diagnostics.attempts = attempt + 1;
+    delete diagnostics.reason;
+    delete diagnostics.browserOperation;
+    lastError = null;
+    let accepted = false;
+    try {
+      accepted = await select();
+    } catch (error) {
+      if (!retryable(error) || page.isClosed()) {
+        error.diagnostics = { ...diagnostics, ...(error.diagnostics || {}) };
+        throw error;
       }
+      lastError = error;
+      diagnostics.reason = 'browser-control-changed';
+      diagnostics.browserOperation = error.message.match(/(?:locator|page|frame)\.[a-zA-Z]+(?=:)/)?.[0] || 'read-control';
     }
-    return null;
-  });
-  if (point) {
-    await page.mouse.click(point.x, point.y);
-    await menus.first().waitFor({ state: 'hidden', timeout: 700 }).catch(() => {});
+    // Policy, cancellation and closed-page errors above propagate immediately.
+    // Only retry this field; never reload the form or repeat save/submit.
+    try {
+      if (seenField && !await closePostingAttributeMenus(page) && diagnostics.reason !== 'option-unmatched') {
+        accepted = false;
+        diagnostics.step = 'close-menu';
+        diagnostics.reason = 'menu-still-open';
+        await requireClearPostingOverlays(page);
+      }
+      if (accepted) {
+        diagnostics.step = 'verify-selection';
+        accepted = await readCurrent(true);
+        if (!accepted) diagnostics.reason = 'selection-uncommitted';
+      }
+    } catch (error) {
+      if (!retryable(error) || page.isClosed()) {
+        error.diagnostics = { ...diagnostics, ...(error.diagnostics || {}) };
+        throw error;
+      }
+      accepted = false;
+      lastError ||= error;
+      diagnostics.step = 'close-menu';
+      diagnostics.reason = 'browser-control-changed';
+    }
+    if (accepted) return true;
+    if (attempt < 2) await page.waitForTimeout(250 * (attempt + 1));
   }
-  return !await menus.count();
+  if (lastError || ['menu-unavailable', 'menu-still-open', 'control-disabled'].includes(diagnostics.reason)
+    || (seenField && diagnostics.reason === 'control-missing')) {
+    throw Object.assign(new Error('国际站产地控件在重试 3 次后仍未就绪，已保留当前商品进度，请稍后继续', { cause: lastError }), {
+      code: 'PUBLISH_FIELD_NOT_READY', fieldName: '产地', diagnostics,
+    });
+  }
+  return false;
 }
 
 // Prefer stable IDs, then a unique semantic match. A stale ID must not suppress
@@ -1859,10 +2081,10 @@ async function fillOtherAttributeText(locator, value) {
   return (await input.inputValue().catch(() => '')).trim() === String(value).trim();
 }
 
-export async function fillChoice(page, locator, value, { valueIds = {}, minimumScore = 70, labels = {}, onValueCommitted = () => {} } = {}) {
+export async function fillChoice(page, locator, value, { valueIds = {}, minimumScore = 70, labels = {}, multiple, onValueCommitted = () => {} } = {}) {
   if (!locator || value == null || value === '') return false;
   if (!await locator.count().catch(() => 0)) return false;
-  const expected = String(value).trim();
+  const expected = attributeTextValue(value);
   const kind = await locator.evaluate((node) => ({ tag: node.tagName, type: node.type })).catch(() => null);
   if (!kind) return false;
   if (kind.tag === 'SELECT') {
@@ -1871,8 +2093,7 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
     const multiple = await locator.evaluate((node) => node.multiple);
     // A DOM capture joins multi-select labels into one string; keep a literal
     // comma when that complete label is itself an available option.
-    const values = [value].flat().flatMap((item) => multiple && !options.some((option) => attributeOptionMatchScore(item, option.label) >= 90)
-      ? String(item).split(/\s*[,;，；]\s*/).filter(Boolean) : [String(item)]);
+    const values = attributeValueList(value, { multiple, options, valueIds });
     const targets = values.map((item) => chooseAttributeOption(options, item, valueIds[item], minimumScore) || otherAttributeOption(options));
     if (targets.some((item) => !item) || (targets.length > 1 && !multiple)) return false;
     const custom = targets.flatMap((option, index) => isOtherOption(option.label) && !isOtherOption(values[index]) ? [values[index]] : []);
@@ -1889,10 +2110,11 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
     return committed;
   }
   if (['checkbox', 'radio'].includes(kind.type)) {
-    const values = Array.isArray(value) ? value : expected.split(/\s*[,;，；]\s*/).filter(Boolean);
-    if (values.length > 1 && kind.type === 'radio') return false;
     const row = locator.locator('xpath=ancestor::*[@data-posting-attribute-row or starts-with(@id,"p-") or contains(concat(" ", normalize-space(@class), " "), " sell-catProp-item ")][1]');
     const checkboxLabels = row.locator('label').filter({ has: page.locator('input[type="checkbox"], input[type="radio"]') });
+    const initialOptions = await checkboxLabels.evaluateAll((nodes) => nodes.map((node) => ({ label: node.textContent })));
+    const values = attributeValueList(value, { multiple: kind.type === 'checkbox', options: initialOptions, valueIds });
+    if (values.length > 1 && kind.type === 'radio') return false;
     const findOption = async (candidate) => {
       const options = await checkboxLabels.evaluateAll((nodes) => nodes.map((node) => ({ value: node.querySelector('input')?.value,
         label: node.textContent, disabled: node.querySelector('input')?.disabled })));
@@ -1903,7 +2125,7 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
       // Required sale attributes such as Type expose a real Add control.
       const add = row.locator('.sell-sequential-combocheckbox button.add-button:visible').last();
       if (!await add.isVisible().catch(() => false) || await add.isDisabled()) return false;
-      await add.click({ timeout: 4000 });
+      await clickPostingControl(page, add);
       const custom = row.locator('.sell-sequential-combobox-custom-wrap input:visible').last();
       if (!await custom.waitFor({ state: 'visible', timeout: 2000 }).then(() => true, () => false)) return false;
       await custom.fill(String(candidate));
@@ -1924,12 +2146,12 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
       const label = checkboxLabels.nth(index), input = label.locator('input').first();
       const desired = indexes.has(index);
       if (kind.type === 'radio' && !desired) continue;
-      if (await input.isChecked() !== desired) await label.click({ timeout: 4000 });
+      if (await input.isChecked() !== desired) await clickPostingControl(page, label);
     }
     if (custom.length && !await fillOtherAttributeText(locator, custom[0])) {
       for (let index = 0; index < previous.length; index++) {
         const label = checkboxLabels.nth(index);
-        if (await label.locator('input').first().isChecked() !== previous[index]) await label.click({ timeout: 1000 }).catch(() => {});
+        if (await label.locator('input').first().isChecked() !== previous[index]) await clickPostingControl(page, label, { timeout: 1000 }).catch(postingInteractionFailure);
       }
       return false;
     }
@@ -1948,14 +2170,11 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
   const chooseVisibleOption = async (candidate, allowOther = false) => {
     // On slow desktops the trigger expands before the portal/search input
     // mounts. Wait for the actual popup before binding its options and search.
-    const popups = '.sell-o-select-options:visible, .next-select-popup:visible, [role="listbox"]:visible';
-    if (!await page.locator(`${popups}, [role="option"]:visible, .next-menu-item:visible`).first()
+    if (!await page.locator(VISIBLE_ATTRIBUTE_MENU).first()
       .waitFor({ state: 'visible', timeout: 5000 }).then(() => true, () => false)) return false;
-    let menu = page.locator('.sell-o-select-options:visible, .next-select-popup:visible').last();
-    if (!await menu.count()) menu = page.locator('[role="listbox"]:visible').last();
-    const options = await menu.count()
-      ? menu.locator('.options-item:visible, [role="option"]:visible, .next-menu-item:visible, .next-select-menu-item:visible')
-      : page.locator('[role="option"]:visible, .next-menu-item:visible, .next-select-menu-item:visible');
+    const menu = await attributeMenuForControl(page, locator);
+    if (!menu) return false;
+    const options = menu.locator('.options-item:visible, [role="option"]:visible, .next-menu-item:visible, .next-select-menu-item:visible');
     // Alibaba's search can return no results for a complete option label
     // containing parentheses. Select an already loaded exact value first.
     const chooseLoaded = async () => {
@@ -1975,7 +2194,7 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
       const match = chooseAttributeOption(available, candidate, valueIds[candidate], minimumScore) || (allowOther ? otherAttributeOption(available) : null);
       if (!match) return false;
       chosenLabel = match.label;
-      return options.nth(match.index).click({ timeout: 4000 }).then(() => true, () => false);
+      return clickPostingControl(page, options.nth(match.index)).then(() => true, postingInteractionFailure);
     };
     if (await chooseLoaded()) return true;
     // The menu virtualizes its options. Search reveals values outside the
@@ -2000,7 +2219,26 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
   const isCombo = await locator.getAttribute('role').catch(() => '') === 'combobox'
     || await locator.getAttribute('readonly').catch(() => null) !== null;
   if (isCombo) {
-    const candidates = (Array.isArray(value) ? value : expected.split(/\s*[,;，；]\s*/)).map((item) => String(item).trim()).filter(Boolean);
+    const declaredMultiple = multiple ?? await locator.evaluate((node) => {
+      const root = node.closest('.next-select') || node;
+      const flag = node.getAttribute('aria-multiselectable') ?? root.getAttribute('aria-multiselectable');
+      return flag != null ? flag === 'true' : root.classList.contains('next-select-single') ? false : undefined;
+    });
+    let visibleOptions = [];
+    // Inspect complete labels before splitting a joined source value. This is
+    // shared by all categories, including literal comma-bearing fabric names.
+    if (declaredMultiple !== false && /[,;，；]/.test(expected)) {
+      await clickPostingControl(page, locator).catch(postingInteractionFailure);
+      await page.locator(VISIBLE_ATTRIBUTE_MENU).first().waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+      const popup = await attributeMenuForControl(page, locator);
+      if (popup) {
+        visibleOptions = await popup.locator('.options-item, [role="option"], .next-menu-item, .next-select-menu-item')
+          .evaluateAll((nodes) => nodes.map((node) => ({ label: node.textContent })));
+      }
+      await closePostingAttributeMenus(page);
+    }
+    const candidates = attributeValueList(value, { multiple: declaredMultiple !== false, options: visibleOptions, valueIds });
+    if (declaredMultiple === false && candidates.length > 1) return false;
     let selected = true;
     const selectedValues = () => locator.evaluate((node) => {
       const root = node.closest('.next-select, [data-posting-attribute-row], .sell-catProp-item');
@@ -2022,7 +2260,7 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
       const remove = selectRoot.locator('.next-tag-close-btn:visible, .next-select-values .next-icon-close:visible, [data-selected-value] [aria-label="Remove"]:visible');
       for (let attempt = 0; attempt < 24 && await remove.count(); attempt++) {
         const before = JSON.stringify(await selectedValues());
-        if (!await remove.first().click({ timeout: 1000 }).then(() => true, () => false)) break;
+        if (!await clickPostingControl(page, remove.first(), { timeout: 1000 }).then(() => true, postingInteractionFailure)) break;
         const deadline = Date.now() + 1000;
         while (JSON.stringify(await selectedValues()) === before && Date.now() < deadline) await page.waitForTimeout(50);
         if (JSON.stringify(await selectedValues()) === before) break;
@@ -2035,7 +2273,7 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
       const knownLabel = labels[valueIds[candidate]] || candidate;
       if (selectedTexts.some((text) => attributeOptionMatchScore(knownLabel, text) >= minimumScore)) { committed.push(knownLabel); continue; }
       if (await locator.getAttribute('aria-expanded').catch(() => '') !== 'true') {
-        await locator.click({ timeout: 4000 }).catch(() => {});
+        await clickPostingControl(page, locator).catch(postingInteractionFailure);
       }
       await page.waitForTimeout(180);
       // Opening an option menu can replace its input during a category rerender.
@@ -2051,8 +2289,9 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
       if (!chose) {
         // Search may have hidden Other. Restore the unfiltered menu before
         // looking for its genuine custom-value entry.
-        const search = page.locator('.sell-o-select-options:visible input:not([readonly]), .next-select-popup:visible input:not([readonly])').first();
-        if (await search.count()) { await search.fill(''); await page.waitForTimeout(200); }
+        const popup = await attributeMenuForControl(page, locator);
+        const search = popup?.locator('input:not([readonly]):visible').first();
+        if (search && await search.count()) { await search.fill(''); await page.waitForTimeout(200); }
         chose = await chooseVisibleOption(candidate, true);
       }
       if (chose && isOtherOption(chosenLabel) && !isOtherOption(candidate)) {
@@ -2090,9 +2329,10 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
     if (!await locator.count().catch(() => 0)) return false;
     await page.waitForTimeout(350);
     if (!await locator.count().catch(() => 0)) return false;
-    const exactOption = page.locator('[role="option"]:visible, .next-menu-item:visible')
-      .filter({ hasText: new RegExp(`^${expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }).last();
-    if (await exactOption.isVisible().catch(() => false)) await exactOption.click({ force: true, timeout: 4000 }).catch(() => {});
+    const popup = await attributeMenuForControl(page, locator);
+    const exactOption = popup?.locator('[role="option"]:visible, .next-menu-item:visible')
+      .filter({ hasText: new RegExp(`^${expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') });
+    if (exactOption && await exactOption.count() === 1) await clickPostingControl(page, exactOption).catch(postingInteractionFailure);
     // Editable model rows cancel and remove themselves on Escape while
     // focused. Blur first to commit the value, then close any suggestion menu.
     await locator.evaluateAll((nodes) => {
@@ -2101,7 +2341,7 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
       node.blur();
       node.dispatchEvent(new Event('change', { bubbles: true }));
     });
-    await page.keyboard.press('Escape');
+    await closePostingAttributeMenus(page);
     await page.waitForTimeout(300);
     const committed = await locator.evaluateAll((nodes, expectedValue) => {
       const node = nodes[0];
@@ -2133,7 +2373,7 @@ export async function fillModelNumber(page, value) {
       if (!input) {
         const add = row.locator('.posting-field-multi-text button.add-button').last();
         if (!await add.isVisible().catch(() => false)) return false;
-        await add.click({ timeout: 3000 });
+        await clickPostingControl(page, add, { timeout: 3000 });
         input = await waitForFirstVisible(page, ['#struct-p-3 input:not([type="hidden"])'], 3000);
       }
       if (await fillChoice(page, input, value)) return true;
@@ -2193,7 +2433,8 @@ export async function fillColorSpec(page, values) {
       const control = controls.nth(index);
       if (!await control.isVisible().catch(() => false)) continue;
       for (let attempt = 0; attempt < 3; attempt += 1) {
-        await control.click({ force: true }).catch(() => {});
+        await closePostingAttributeMenus(page);
+        await clickPostingControl(page, control).catch(postingInteractionFailure);
         const deadline = Date.now() + 1800;
         while (Date.now() < deadline) {
           const refreshed = await visibleColorSpecRow(page);
@@ -2242,7 +2483,7 @@ export async function fillColorSpec(page, values) {
     if (!input) break;
     const existingValue = String(await input.inputValue().catch(() => '')).trim();
     if (existingValue.toLowerCase() !== color.toLowerCase()) {
-      await input.click({ force: true });
+      await clickPostingControl(page, input);
       await input.fill(color);
       await page.waitForTimeout(500);
     }
@@ -2251,20 +2492,14 @@ export async function fillColorSpec(page, values) {
     // match so we commit the suggestion instead of leaving raw text in the
     // combobox, which later produces “颜色规格未成功添加”.
     let committed = false;
-    const option = page.getByRole('option', { name: color, exact: true }).last();
-    if (await option.isVisible().catch(() => false)) {
-      await option.click({ force: true }).catch(() => {});
-      committed = true;
+    const colorMenu = await attributeMenuForControl(page, input);
+    const option = (colorMenu || colorRow).getByRole('option', { name: color, exact: true });
+    if (await option.count() === 1 && await option.isVisible().catch(() => false)) {
+      committed = await clickPostingControl(page, option).then(() => true, postingInteractionFailure);
     } else {
-      committed = await page.evaluate((expected) => {
-        const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
-        const candidates = [...document.querySelectorAll('li, [role="option"], [class*="menu-item"], [class*="option-item"], [class*="select-option"]')]
-          .filter((node) => visible(node) && String(node.textContent || '').replace(/\s+/g, ' ').trim() === expected);
-        const target = candidates.at(-1);
-        if (!target) return false;
-        target.click();
-        return true;
-      }, color).catch(() => false);
+      const suggestions = (colorMenu || colorRow).locator('li:visible, [class*="menu-item"]:visible, [class*="option-item"]:visible, [class*="select-option"]:visible')
+        .filter({ hasText: new RegExp(`^${color.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') });
+      if (await suggestions.count() === 1) committed = await clickPostingControl(page, suggestions).then(() => true, postingInteractionFailure);
     }
     if (!committed) {
       await input.press('ArrowDown').catch(() => {});
@@ -2530,7 +2765,7 @@ export async function fillVariantSpecs(page, product) {
       if (!await input.count().catch(() => 0)) continue;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         if (await input.isChecked().catch(() => false)) return true;
-        await input.check({ timeout: 4000 }).catch(() => {});
+        await clickPostingControl(page, label).catch(postingInteractionFailure);
         await page.waitForTimeout(250);
       }
       if (await input.isChecked().catch(() => false)) return true;
@@ -2540,7 +2775,7 @@ export async function fillVariantSpecs(page, product) {
   const addCustomVariantValue = async (row, value) => {
     const sequentialAdd = row.locator('.sell-sequential-combocheckbox button.add-button:visible').last();
     if (await sequentialAdd.isVisible().catch(() => false)) {
-      if (!await sequentialAdd.isDisabled()) await sequentialAdd.click();
+      if (!await sequentialAdd.isDisabled()) await clickPostingControl(page, sequentialAdd);
       const custom = row.locator('.sell-sequential-combobox-custom-wrap input:visible').last();
       if (await custom.isVisible().catch(() => false)) {
         await custom.fill(value);
@@ -2564,7 +2799,8 @@ export async function fillVariantSpecs(page, product) {
     if (!customInput) {
       const add = row.locator('[role="btn-add"], .add-color-btn, button.add-button').last();
       if (!await add.isVisible().catch(() => false)) return false;
-      await add.click({ force: true }).catch(() => {});
+      await closePostingAttributeMenus(page);
+      await clickPostingControl(page, add).catch(postingInteractionFailure);
       await page.waitForTimeout(300);
       inputs = row.locator('input[role="colorCombobox"], input[placeholder*="输入"], input[placeholder*="enter" i]');
       inputCount = await inputs.count().catch(() => 0);
@@ -2577,11 +2813,11 @@ export async function fillVariantSpecs(page, product) {
     if (!customInput) return false;
     await fillAndVerify(customInput, value, '商品规格');
     await page.waitForTimeout(350);
-    const exactOption = page.getByRole('option', { name: value, exact: true }).last();
+    const popup = await attributeMenuForControl(page, customInput);
+    const exactOption = (popup || row).getByRole('option', { name: value, exact: true });
     let selectedPreset = false;
-    if (await exactOption.isVisible().catch(() => false)) {
-      await exactOption.click({ force: true }).catch(() => {});
-      selectedPreset = true;
+    if (await exactOption.count() === 1 && await exactOption.isVisible().catch(() => false)) {
+      selectedPreset = await clickPostingControl(page, exactOption).then(() => true, postingInteractionFailure);
     }
     await page.waitForTimeout(250);
     if (selectedPreset && await selectExactValue(row, value)) return true;
@@ -2590,7 +2826,7 @@ export async function fillVariantSpecs(page, product) {
     if (await selectExactValue(row, value)) return true;
     const retained = String(await customInput.inputValue().catch(() => '')).trim();
     if (retained.toLowerCase() === value.toLowerCase()) return true;
-    await customInput.click({ force: true }).catch(() => {});
+    await clickPostingControl(page, customInput).catch(postingInteractionFailure);
     await customInput.fill(value).catch(() => {});
     await customInput.dispatchEvent('change').catch(() => {});
     await customInput.dispatchEvent('blur').catch(() => {});
@@ -3114,7 +3350,7 @@ async function ensureCategoryFieldControl(page, field) {
     : page.locator(`[data-posting-attribute-row="${field.rowIndex}"]`);
   const add = row.locator('.posting-field-multi-text button.add-button:visible').last();
   if (!await add.isVisible().catch(() => false) || await add.isDisabled()) return null;
-  await add.click({ timeout: 3000 });
+  await clickPostingControl(page, add, { timeout: 3000 });
   if (!await row.locator(CATEGORY_INPUTS).first().waitFor({ state: 'visible', timeout: 3000 }).then(() => true, () => false)) return null;
   return (await page.evaluate(readPostingAttributeSchema)).find((entry) => field.id ? entry.id === field.id : entry.rowIndex === field.rowIndex);
 }
@@ -3133,17 +3369,34 @@ function optionLabels(page, field) {
 
 export function attributeFieldMatchesValue(field, value, { valueIds = {}, labels = {} } = {}) {
   const values = field.values || [];
+  // A plain text control stores the full source array as one string. Compare
+  // that same representation, not each array item against the joined text.
+  // Selects and multi-select chips must still match every individual option.
+  if (Array.isArray(value) && ['text', 'textarea'].includes(field.controlType) && values.length === 1
+    && attributeOptionMatchScore(attributeTextValue(value), values[0]) === 100) return true;
   const minimumScore = ['Age', 'Age Range'].some((name) => requiredAttributeKey(field.label) === requiredAttributeKey(name)) ? 90 : 70;
-  const candidates = [value].flat().flatMap((item) => {
-    if (values.some((selected) => attributeOptionMatchScore(item, selected) >= minimumScore)) return [item];
-    return ['combobox', 'multiSelect', 'checkbox'].includes(field.controlType)
-      ? String(item).split(/\s*[,;，；]\s*/).filter(Boolean) : [item];
+  const candidates = attributeValueList(value, {
+    multiple: field.multiple ?? ['combobox', 'multiSelect', 'checkbox'].includes(field.controlType),
+    options: values, valueIds,
   });
   if (requiredAttributeKey(field.label) === requiredAttributeKey('产地')) {
     return values.some((selected) => originCountry(selected) && originCountry(selected) === originCountry(value));
   }
   return candidates.length > 0 && candidates.every((item) => values.some((selected) => attributeOptionMatchScore(labels[valueIds[item]] || item, selected) >= minimumScore))
     && values.every((selected) => candidates.some((item) => attributeOptionMatchScore(labels[valueIds[item]] || item, selected) >= minimumScore));
+}
+
+function categoryAttributeValue(product, field, source) {
+  if (requiredAttributeKey(field.label) === '产地') return productOrigin(product);
+  // Attribute lookup above already rejected nonmatching property IDs. Limit
+  // fallback to top-level metadata, SKU groups and supported title inference.
+  return source?.value ?? inferRequiredAttributeValue({ ...product, attributes: [], customAttributes: [] }, ...(field.labels || [field.label]));
+}
+
+function hasSourceSpecification(product, field) {
+  return field.saleSpecification && (product.variantGroups || []).some((group) => group.options?.length
+    && ((field.id && attributeId(group) === field.id)
+      || (field.labels || [field.label]).some((label) => requiredAttributeKey(label) === requiredAttributeKey(group.name))));
 }
 
 export async function fillCategoryAttributes(page, product, onProgress = () => {}) {
@@ -3160,19 +3413,21 @@ export async function fillCategoryAttributes(page, product, onProgress = () => {
       if (await page.locator(POSTING_BLOCKERS).count()) await requireClearPostingOverlays(page);
       const current = await page.evaluate(readPostingAttributeSchema);
       let field = current.find((entry) => initial.id ? entry.id === initial.id : entry.label === initial.label);
-      if (!field || field.disabled || isOriginRegionAttribute(field.label) || (field.saleSpecification && !field.required)) continue;
+      if (!field || field.disabled || isOriginRegionAttribute(field.label) || (field.saleSpecification && !field.required)
+        || hasSourceSpecification(product, field)) continue;
       const source = sourceAttributeForField(product, field);
       if (source?.conflict) continue;
-      const value = source?.value ?? inferRequiredAttributeValue(product, ...field.labels);
+      const value = categoryAttributeValue(product, field, source);
       if (value == null || value === '') continue;
+      onProgress(`填写类目属性：${field.label}`);
+      await closePostingAttributeMenus(page);
       field = await ensureCategoryFieldControl(page, field);
       if (!field || field.inputIndex < 0) continue;
-      const choiceOptions = { valueIds: source?.matchedById ? source.valueIds : {}, labels: optionLabels(page, field) };
+      const choiceOptions = { valueIds: source?.matchedById ? source.valueIds : {}, labels: optionLabels(page, field), multiple: field.multiple };
       if (field.hasValue && attributeFieldMatchesValue(field, value, choiceOptions)) {
         mapped.add(source?.name || field.label); continue;
       }
       pending++;
-      onProgress(`填写类目属性：${field.label}`);
       let filled;
       try {
         filled = requiredAttributeKey(field.label) === requiredAttributeKey('产地')
@@ -3181,7 +3436,7 @@ export async function fillCategoryAttributes(page, product, onProgress = () => {
           ...choiceOptions,
           onValueCommitted: (id, label) => { choiceOptions.labels[id] = label; },
           minimumScore: ['Age', 'Age Range'].some((name) => requiredAttributeKey(field.label) === requiredAttributeKey(name)) ? 90 : 70,
-        }).catch(() => false);
+        }).catch(postingInteractionFailure);
       } catch (error) {
         if (!await page.locator(POSTING_BLOCKERS).count()) throw error;
         await requireClearPostingOverlays(page);
@@ -3203,11 +3458,14 @@ export async function fillCategoryAttributes(page, product, onProgress = () => {
 export async function requireCategoryAttributes(page, product) {
   const schema = await page.evaluate(readPostingAttributeSchema);
   const incomplete = schema.filter((field) => {
-    if (!field.required || field.disabled || field.saleSpecification || isOriginRegionAttribute(field.label)) return false;
-    if (!field.hasValue) return true;
+    if (field.disabled || field.saleSpecification || isOriginRegionAttribute(field.label)) return false;
     const source = sourceAttributeForField(product, field);
+    // Supplied optional values also need read-back: a dependent field can
+    // clear them after they were filled successfully earlier in the pass.
+    if (!field.required && !source) return false;
+    if (!field.hasValue) return true;
     if (source?.conflict) return true;
-    const value = source?.value;
+    const value = requiredAttributeKey(field.label) === '产地' ? productOrigin(product) : source?.value;
     return value != null && value !== '' && !attributeFieldMatchesValue(field, value, {
       valueIds: source?.matchedById ? source.valueIds : {}, labels: optionLabels(page, field),
     });
@@ -3245,7 +3503,9 @@ export async function recoverRequiredAttributes(page, product, labels, onProgres
     if (aliases.some(isOriginRegionAttribute)) continue;
     if (!aliases.length) continue;
     let descriptor = schema.find((field) => field.labels.some((label) => requiredAttributeKey(label) === requiredAttributeKey(rawLabel)));
-    if (descriptor?.saleSpecification && !descriptor.required) continue;
+    // The specification writer owns values and images together. A descriptive
+    // Color attribute must not create an extra, image-less SKU color.
+    if (descriptor?.saleSpecification && (!descriptor.required || hasSourceSpecification(product, descriptor))) continue;
     const source = descriptor && sourceAttributeForField(product, descriptor);
     if (source?.conflict) continue;
     if (descriptor && source?.value != null && source.value !== '') descriptor = await ensureCategoryFieldControl(page, descriptor);
@@ -3253,8 +3513,9 @@ export async function recoverRequiredAttributes(page, product, labels, onProgres
     if (!field) continue;
     onProgress(`补填必填属性：${aliases[0]}`);
     const wanted = new Set(aliases.map(normalized));
-    let value = source?.value ?? items.find((item) => wanted.has(normalized(item.name)))?.value ?? '';
-    if (value == null || value === '') value = inferRequiredAttributeValue(product, ...aliases);
+    let value = descriptor ? categoryAttributeValue(product, descriptor, source)
+      : items.find((item) => wanted.has(normalized(item.name)))?.value ?? '';
+    if (!descriptor && (value == null || value === '')) value = inferRequiredAttributeValue(product, ...aliases);
     if (aliases.some((label) => requiredAttributeKey(label) === requiredAttributeKey('产地'))) {
       if (await fillOriginCountry(page, product.origin || value)) recovered.push(aliases[0]);
       continue;
@@ -3264,8 +3525,11 @@ export async function recoverRequiredAttributes(page, product, labels, onProgres
     for (const candidate of [value].filter((item) => item != null && item !== '')) {
       if (await fillChoice(page, field, candidate, {
         valueIds: source?.matchedById ? source.valueIds : {},
+        multiple: descriptor?.multiple,
+        labels: descriptor ? optionLabels(page, descriptor) : {},
+        onValueCommitted: (id, label) => { if (descriptor) optionLabels(page, descriptor)[id] = label; },
         minimumScore: ['Age', 'Age Range'].some((name) => requiredAttributeKey(rawLabel) === requiredAttributeKey(name)) ? 90 : 70,
-      }).catch(() => false)) {
+      }).catch(postingInteractionFailure)) {
         filled = true;
         break;
       }
@@ -3319,7 +3583,7 @@ export async function requiredAttributeFailure(page, product, labels) {
     const field = schema.find((field) => field.label === label) || { label };
     const source = sourceAttributeForField(product, field);
     if (source?.conflict) { conflicts.push(label); continue; }
-    const value = source?.value ?? inferRequiredAttributeValue(product, label);
+    const value = categoryAttributeValue(product, field, source);
     (value == null || value === '' || (Array.isArray(value) && !value.length) ? missing : unmatched).push(label);
   }
   const reasons = [];
@@ -3475,15 +3739,11 @@ async function uploadSpecFile(page, item, file) {
     } else {
       const localButton = item.getByRole('button', { name: /本地选取|本地上传|local/i }).last();
       const action = await localButton.isVisible().catch(() => false) ? localButton : trigger;
-      const chooserPromise = page.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null);
-      await action.click({ force: true }).catch(() => {});
-      let chooser = await chooserPromise;
+      let chooser = await choosePostingFile(page, action, { recover: (target) => recoverPostingClick(page, target) });
       if (!chooser) {
         const portal = page.getByText(/^(?:本地上传|本地选取)$/).last();
         if (await portal.isVisible().catch(() => false)) {
-          const portalChooser = page.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null);
-          await portal.click({ force: true }).catch(() => {});
-          chooser = await portalChooser;
+          chooser = await choosePostingFile(page, portal, { recover: (target) => recoverPostingClick(page, target) });
         }
       }
       if (!chooser) return false;
@@ -3543,36 +3803,64 @@ export async function enableImageBackedVariantSpecs(page, product, groups, downl
 // TinyMCE gives its non-modal table toolbar role="dialog". It can remain
 // visible after editing without blocking the form; actual editor windows
 // and modal backdrops must still be handled as blockers.
-const POSTING_DIALOG = '[role="dialog"]:not(.mce-tinymce-inline:not([aria-modal="true"]):has([role="toolbar"]))';
-const POSTING_BLOCKERS = `.next-overlay-backdrop:visible, .next-dialog:visible, ${POSTING_DIALOG}:visible, .mce-window:visible, #mce-modal-block:visible`;
+const POSTING_GUIDE = '.next-balloon[role="tooltip"]:has(.next-balloon-close)';
+const POSTING_BLOCKERS = `.next-overlay-backdrop:visible, .next-dialog:visible, ${POSTING_DIALOG}:visible, .mce-window:visible, #mce-modal-block:visible, ${POSTING_GUIDE}:visible`;
 
-export async function dismissPostingOverlays(page) {
+export async function recoverPostingClick(page, target) {
   requireNoPolicyWarning(await visibleFeedback(page));
-  await closePostingAttributeMenus(page);
+  // Keep the popup/dialog being operated on open. Closing it would discard
+  // a logistics selection or remove the option the next click must select.
+  const context = await targetPopupContext(target);
+  if (context.inMenu || context.inDialog) {
+    await dismissPostingNotice(page, target);
+    if (context.inDialog && !context.inMenu) await closePostingAttributeMenus(page, target);
+  }
+  else await requireClearPostingOverlays(page);
+}
+
+export function clickPostingControl(page, target, options = {}) {
+  return performPostingClick(page, target, { recover: (control) => recoverPostingClick(page, control), ...options });
+}
+
+async function dismissPostingNotice(page, protectedTarget) {
+  const handle = protectedTarget ? await protectedTarget.elementHandle({ timeout: 1000 }).catch(() => null) : null;
+  if (protectedTarget && !handle) return false;
   const harmlessActions = [
     /^(?:我知道了|知道了|关闭|取消|稍后再说|暂不|以后再说|Got it|Close|Cancel)$/i,
     /^(?:继续返回旧版|确认返回旧版)$/i
   ];
-  for (let pass = 0; pass < 4; pass += 1) {
-    if (!await page.locator(POSTING_BLOCKERS).count()) return true;
-    const overlays = page.locator(`.next-dialog:visible, ${POSTING_DIALOG}:visible, .mce-window:visible`);
-    let acted = false;
+  try {
+    const overlays = page.locator(`.next-dialog:visible, ${POSTING_DIALOG}:visible, .mce-window:visible, ${POSTING_GUIDE}:visible`);
     for (let index = (await overlays.count().catch(() => 0)) - 1; index >= 0; index -= 1) {
       const overlay = overlays.nth(index);
       if (!await overlay.isVisible().catch(() => false)) continue;
+      if (handle && await overlay.evaluate((node, target) => node.contains(target) || target.contains(node), handle).catch(() => true)) continue;
+      if (await overlay.evaluate((node, selector) => node.matches(selector), POSTING_GUIDE)) {
+        const close = overlay.locator('.next-balloon-close').last();
+        if (await close.click({ timeout: 1500 }).then(() => true, () => false)) return true;
+        continue;
+      }
       for (const pattern of harmlessActions) {
         const action = overlay.getByRole('button', { name: pattern }).last();
         if (!await action.isVisible().catch(() => false)) continue;
-        acted = await action.click({ timeout: 1500 }).then(() => true).catch(() => false);
-        if (acted) break;
+        if (await action.click({ timeout: 1500 }).then(() => true).catch(() => false)) return true;
       }
-      if (acted) break;
       const close = overlay.locator('.next-dialog-close, .next-overlay-close, .mce-close, [aria-label="关闭"], [aria-label="close" i]').last();
       if (await close.isVisible().catch(() => false)) {
-        acted = await close.click({ timeout: 1500 }).then(() => true).catch(() => false);
-        if (acted) break;
+        if (await close.click({ timeout: 1500 }).then(() => true).catch(() => false)) return true;
       }
     }
+    return false;
+  } finally { await handle?.dispose(); }
+}
+
+export async function dismissPostingOverlays(page) {
+  requireNoPolicyWarning(await visibleFeedback(page));
+  await acknowledgePolicyWarning(page);
+  await closePostingAttributeMenus(page);
+  for (let pass = 0; pass < 4; pass += 1) {
+    if (!await page.locator(POSTING_BLOCKERS).count()) return true;
+    const acted = await dismissPostingNotice(page);
     if (!acted) {
       await page.keyboard.press('Escape').catch(() => {});
       await page.waitForTimeout(200);
@@ -3598,7 +3886,7 @@ async function requireClearPostingOverlays(page) {
     text: String(node.innerText || node.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim().slice(0, 200),
   }))).catch(() => []);
   const prompt = overlays.find((overlay) => overlay.text)?.text;
-  const error = new Error(`国际站页面仍有弹窗遮罩${prompt ? `（${prompt}）` : ''}，请关闭提示后重试`);
+  const error = new Error(`国际站有待处理的页面提示${prompt ? `：${prompt}` : ''}；已保留当前商品进度，请处理后继续`);
   error.code = 'PUBLISH_OVERLAY_BLOCKED';
   error.diagnostics = { section: 'overlays', overlays };
   throw error;
@@ -3690,7 +3978,7 @@ async function activateEditorControl(page, control, key) {
     // a locator so layout shifts and replaced nodes are retried by Playwright.
     // Centering also avoids sticky headers/footers on small remote desktops.
     await control.evaluate((node) => node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' })).catch(() => {});
-    await control.click({ timeout: 5000 });
+    await clickPostingControl(page, control, { timeout: 5000 });
     const clickedHandle = await control.count().then((count) => count ? control.elementHandle() : null).catch(() => null);
     await previous?.handle.dispose().catch(() => {});
     if (clickedHandle) await handle.dispose().catch(() => {});
@@ -3735,6 +4023,7 @@ export class SellerPublisher {
     this.page = null;
     this.visible = false;
     this.publishingVisible = false;
+    this.backgroundPublishing = false;
     this.publishStops = new Map();
     this.imageDownloads = new ImageDownloadQueue(browserResourcePolicy().imageConcurrency);
   }
@@ -3808,16 +4097,19 @@ export class SellerPublisher {
       if (error.code === 'PUBLISH_PAUSED') throw error;
       progress('卖家窗口同步暂不可用，使用已保存会话连接');
     });
-    if (options.showPublishing && !this.publishingVisible) {
+    if (((options.showPublishing || options.reveal) && !this.publishingVisible)
+      || (options.backgroundPublishing && (!this.backgroundPublishing || this.publishingVisible))) {
       const previous = this.context;
       this.context = null;
       this.page = null;
-      await step('切换到可见发布浏览器', () => previous?.close());
-      this.publishingVisible = true;
+      await step(options.backgroundPublishing ? '准备后台发布会话' : '打开发布检查窗口', () => previous?.close());
+      this.publishingVisible = !options.backgroundPublishing;
+      this.backgroundPublishing = Boolean(options.backgroundPublishing);
     }
     if (!this.context) {
       const opened = await step('启动内置发布浏览器', () => launchPersistent(this.profileDir, {
-        headless: !this.publishingVisible, visible: this.publishingVisible, timeout: resources.navigationTimeoutMs
+        headless: !this.publishingVisible, visible: this.publishingVisible,
+        backgroundPublishing: this.backgroundPublishing, timeout: resources.navigationTimeoutMs
       }), resources.navigationTimeoutMs + 5000, (context) => context?.close());
       this.context = opened;
       opened.on('close', () => { if (this.context === opened) { this.context = null; this.page = null; } });
@@ -3852,12 +4144,15 @@ export class SellerPublisher {
   }
 
   async shutdown() {
+    this.publishPageSnapshot = null;
+    this.publishingPage = null;
     const contexts = [...new Set([this.context, this.sourceContext].filter(Boolean))];
     this.context = null;
     this.sourceContext = null;
     this.page = null;
     this.visible = false;
     this.publishingVisible = false;
+    this.backgroundPublishing = false;
     await Promise.allSettled(contexts.map((context) => context.close()));
   }
 
@@ -3870,6 +4165,26 @@ export class SellerPublisher {
 
   clearPublishStop(jobId) {
     this.publishStops.delete(String(jobId || ''));
+  }
+
+  async capturePublishPage(jobId, productId) {
+    this.publishPageSnapshot = null;
+    const current = this.publishingPage;
+    if (!current || current.jobId !== String(jobId) || current.productId !== String(productId)
+      || current.page !== this.page || current.page.isClosed()) return false;
+    try {
+      const image = await current.page.screenshot({ type: 'jpeg', quality: 75, timeout: 3000,
+        mask: [current.page.locator('input[type="password"]')] });
+      if (this.publishingPage !== current || current.page !== this.page || current.page.isClosed()) return false;
+      this.publishPageSnapshot = { jobId: current.jobId, productId: current.productId,
+        capturedAt: new Date().toISOString(), image: `data:image/jpeg;base64,${image.toString('base64')}` };
+      return true;
+    } catch { return false; }
+  }
+
+  readPublishPageSnapshot(jobId, productId) {
+    const snapshot = this.publishPageSnapshot;
+    return snapshot?.jobId === String(jobId) && snapshot.productId === String(productId) ? snapshot : null;
   }
 
   async hide() {
@@ -4357,7 +4672,10 @@ export class SellerPublisher {
       const variantGroups = [...new Map(variantGroupsRaw.map((group) => [`${group.name}:${group.options.join('|')}`, group])).values()];
       const leadRows = [...document.querySelectorAll('[data-module-name="module_lead"] tr, [class*=lead-time] tr, [class*=shipping] tr')]
         .map((row) => [...row.cells].map((cell) => clean(cell.textContent))).filter((row) => row.length > 1);
-      const attrMap = Object.fromEntries(attributes.map((item) => [item.name.toLowerCase(), item.value]));
+      const sourceField = (...names) => {
+        const matches = attributes.filter((item) => names.includes(item.name.toLowerCase()));
+        return (matches.find((item) => !/^description-/.test(item.source || '')) || matches[0])?.value || '';
+      };
       const video = jsonObjects.find((item) => item['@type'] === 'VideoObject');
       const videos = [...document.querySelectorAll('video')].flatMap((node) => {
         if (node.closest('[data-module-name*="recommend" i], [data-module-name*="related" i], [class*="recommend" i]')) return [];
@@ -4424,9 +4742,9 @@ export class SellerPublisher {
         originalTitle: clean(document.querySelector('h1')?.textContent || productJson?.name || document.title),
         mainImages, detailImages, attributes, variantGroups, leadTime: leadRows,
         packaging: {},
-        origin: attrMap['产地'] || attrMap['原产地'] || attrMap['place of origin'] || attrMap['country/region of manufacture'] || '',
-        model: attrMap['型号'] || attrMap['model number'] || '',
-        brand: attrMap['品牌名称'] || attrMap['品牌'] || attrMap['brand name'] || attrMap['brand'] || '',
+        origin: sourceField('产地', '原产地', 'place of origin', 'country/region of manufacture'),
+        model: sourceField('型号', 'model number'),
+        brand: sourceField('品牌名称', '品牌', 'brand name', 'brand'),
         productType: categoryPath.at(-1) || '', categoryPath, categoryId: categoryDocument.id, priceText, subtitle, keywords,
         salesUnit, paymentMethod, shippingText, services: { sourceTexts: sourceServices, customizations }, certificates,
         descriptionHtml,
@@ -4698,11 +5016,13 @@ export class SellerPublisher {
         return result;
       }
       catch (error) {
-        if (error.code === 'IMAGE_UPLOAD_TIMEOUT' && attempt < 2) {
+        if (['IMAGE_UPLOAD_TIMEOUT', 'MAIN_IMAGE_CONTROL_NOT_READY'].includes(error.code) || isBrowserInteractionError(error)) {
           // A form rerender can hide/remove the portal after its input was
           // located. Resolve the current slot again; the next batch retains
           // accepted server records and waits for in-flight uploads.
-          await page.locator('.image-uploader:visible').first().scrollIntoViewIfNeeded({ timeout: 5000 });
+          if (attempt === 2 || page.isClosed()) throw mainImageControlPending(error);
+          await requireClearPostingOverlays(page);
+          await page.waitForTimeout(300 * (attempt + 1));
           continue;
         }
         if (error.code !== 'MAIN_IMAGE_UPLOAD_RETRYABLE' || attempt === 2) throw error;
@@ -4737,7 +5057,8 @@ export class SellerPublisher {
   }
 
   async uploadMainImageBatch(page, downloaded) {
-    await page.locator('.image-uploader:visible').first().scrollIntoViewIfNeeded({ timeout: 5000 });
+    await requireClearPostingOverlays(page);
+    await revealMainImageControl(page, page.locator('.image-uploader:visible').first());
     const records = await mainImageUploadRecords(page);
     const pendingDeadline = Date.now() + 60000;
     let pending = records.some((file) => file.status === 'uploading');
@@ -4745,6 +5066,7 @@ export class SellerPublisher {
       await page.waitForTimeout(400);
       pending = (await mainImageUploadRecords(page)).some((file) => file.status === 'uploading');
     }
+    if (pending) throw Object.assign(new Error('国际站主图仍在上传，已保留已接收的图片和当前商品进度，请稍后继续'), { code: 'MAIN_IMAGE_UPLOAD_PENDING' });
     const confirmedNames = new Set((await mainImageUploadRecords(page)).filter((file) => file.remote && file.status === 'done').map((file) => file.name));
     const placeholders = () => page.locator('.image-uploader .image-upload-list-item #image-placeholder-span:visible');
     const initialSlotCount = await placeholders().count().catch(() => 0);
@@ -4757,12 +5079,18 @@ export class SellerPublisher {
     const desiredTotal = Math.min(6, downloaded.length);
     const uploadCount = Math.min(initialSlotCount, Math.max(0, desiredTotal - initialOccupied));
     const images = downloaded.filter((file) => !confirmedNames.has(path.basename(file))).slice(0, uploadCount);
-    if (initialOccupied + images.length < 4) throw new Error(`国际站主图槽位不足：已有 ${initialOccupied} 张，可用空槽位 ${initialSlotCount} 个，至少需要 4 张`);
+    if (initialOccupied + images.length < 4) {
+      const error = mainImageControlPending();
+      error.diagnostics = { ...error.diagnostics, occupied: initialOccupied, empty: initialSlotCount };
+      throw error;
+    }
     const finishBatchUpload = async () => {
       const result = await this.waitForMainImageUploads(page, images.length, initialSlotCount);
       const finalState = await mainImageFormState(page);
       if (finalState.uploading || finalState.occupied < initialOccupied + images.length || finalState.occupied < 4) {
-        throw new Error(`国际站主图批量上传完成校验失败：表单已确认 ${finalState.occupied} 张，仍在上传 ${finalState.uploading} 张`);
+        throw Object.assign(new Error(`国际站主图尚未完成接收（已确认 ${finalState.occupied} 张），已保留当前商品进度，请稍后继续`), {
+          code: 'MAIN_IMAGE_UPLOAD_PENDING', diagnostics: { section: 'main-images', occupied: finalState.occupied, uploading: finalState.uploading },
+        });
       }
       return result;
     };
@@ -4833,7 +5161,7 @@ export class SellerPublisher {
       const before = await placeholders().count().catch(() => 0);
       const trigger = placeholders().first();
       if (!before || !await trigger.isVisible().catch(() => false)) {
-        throw new Error(`国际站主图第 ${index + 1} 个上传槽位不存在`);
+        throw mainImageControlPending();
       }
       const slot = trigger.locator('xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " image-upload-list-item ")][1]');
       let slotInput = slot.locator('input[type="file"][accept*="image" i], input[type="file"]');
@@ -4848,18 +5176,23 @@ export class SellerPublisher {
         // Scrolling from logistics can remount the placeholder and discard the
         // first hover. Clicking it opens the image bank on some form builds.
         // Re-enter the settled slot instead of changing the upload operation.
-        await trigger.scrollIntoViewIfNeeded({ timeout: 3000 });
+        await revealMainImageControl(page, trigger);
         let target = null;
         for (let attempt = 0; !target && attempt < 3; attempt++) {
-          await page.mouse.move(0, 0);
-          await trigger.hover({ timeout: 3000 }).catch(() => {});
+          await hoverMainImageControl(page, trigger);
           target = await findUploadTarget(trigger, 2500);
+          if (!target) {
+            await requireClearPostingOverlays(page);
+            await revealMainImageControl(page, trigger);
+          }
         }
         if (!target) {
           const menuText = compactText((await page.locator('[class*="menu"], [class*="popup"], [class*="overlay"]').evaluateAll((nodes) => nodes
             .filter((node) => Boolean(node.offsetWidth || node.offsetHeight || node.getClientRects().length))
             .map((node) => String(node.innerText || '').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(-4).join(' ')).catch(() => '')), 500);
-          throw new Error(`国际站主图第 ${index + 1} 个槽位未出现“本地上传”${menuText ? `，当前弹层：${menuText}` : ''}`);
+          const error = mainImageControlPending();
+          error.diagnostics = { ...error.diagnostics, slot: index + 1, menuText };
+          throw error;
         }
 
         if (target.input) {
@@ -4871,7 +5204,7 @@ export class SellerPublisher {
         } else {
           const localUpload = target.button;
           const chooserPromise = page.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null);
-          const clicked = await localUpload.click({ force: true }).then(() => true).catch(() => false);
+          const clicked = await localUpload.click({ timeout: 2500 }).then(() => true).catch(() => false);
           const chooser = await chooserPromise;
           if (chooser) {
             if (index === 0 && chooser.isMultiple()) {
@@ -4887,7 +5220,9 @@ export class SellerPublisher {
               if (await slotInput.count().catch(() => 0)) scopedInput = slotInput.last();
             }
             if (!await scopedInput.count().catch(() => 0)) {
-              throw new Error(`国际站主图第 ${index + 1} 个槽位未打开文件选择窗口${clicked ? '' : '（本地上传按钮点击失败）'}`);
+              const error = mainImageControlPending();
+              error.diagnostics = { ...error.diagnostics, slot: index + 1, chooserOpened: false, clicked };
+              throw error;
             }
             if (index === 0 && await scopedInput.getAttribute('multiple') !== null) {
               await assignFiles(scopedInput, images);
@@ -4910,7 +5245,9 @@ export class SellerPublisher {
       }
       const remainingAfter = await placeholders().count().catch(() => before);
       if (remainingAfter >= before) {
-        throw new Error(`国际站主图第 ${index + 1} 张上传超过 60 秒仍未完成`);
+        throw Object.assign(new Error(`国际站主图第 ${index + 1} 张尚未完成接收，已保留当前商品进度，请稍后继续`), {
+          code: 'MAIN_IMAGE_UPLOAD_PENDING', diagnostics: { section: 'main-images', slot: index + 1 },
+        });
       }
     }
     return finishBatchUpload();
@@ -5010,7 +5347,9 @@ export class SellerPublisher {
     const remainingSlots = await page.locator('.image-uploader .image-upload-list-item #image-placeholder-span:visible')
       .count().catch(() => initialSlotCount);
     const state = await mainImageFormState(page);
-    throw new Error(`国际站主图上传超过 60 秒仍未完成（已确认 ${state.occupied} 张，需上传 ${expectedCount} 张，空槽位 ${remainingSlots}）`);
+    throw Object.assign(new Error(`国际站主图尚未完成接收（已确认 ${state.occupied} 张），已保留当前商品进度，请稍后继续`), {
+      code: 'MAIN_IMAGE_UPLOAD_PENDING', diagnostics: { section: 'main-images', occupied: state.occupied, expectedCount, remainingSlots },
+    });
   }
 
   async fillProductFields(page, product, onProgress = () => {}, options = {}) {
@@ -5041,9 +5380,10 @@ export class SellerPublisher {
     const productTypeCandidate = [product.productType, ...categoryPath.slice().reverse()].find((value) => value && !isPromotionalText(value));
     const productType = englishSpecText(productTypeCandidate, 'Other');
     const normalizedName = requiredAttributeKey;
-    const attributeItems = [...new Map([...(product.attributes || []), ...(product.customAttributes || [])]
-      .filter((item) => item?.name && item.value != null && item.value !== '' && normalizedName(item.name) !== normalizedName(item.value))
-      .map((item) => [attributeId(item) || normalizedName(item.name), item])).values()];
+    // Preserve all source rows until the field resolver compares their values.
+    // Deduplicating by property name/ID here discarded core counts and ranges.
+    const attributeItems = [...(product.attributes || []), ...(product.customAttributes || [])]
+      .filter((item) => item?.name && item.value != null && item.value !== '' && normalizedName(item.name) !== normalizedName(item.value));
     // Some detail pages expose required category values only inside the SKU
     // matrix (for example compatible model/type). Keep the matrix intact, but
     // expose its first value to the corresponding required attribute control.
@@ -5081,9 +5421,9 @@ export class SellerPublisher {
     const fillRequiredChoice = async (labels, value, fallback = []) => {
       const field = await fieldByAnyLabel(page, labels);
       if (!field) return false;
-      if (value && await fillChoice(page, field, value).catch(() => false)) return true;
+      if (value && await fillChoice(page, field, value).catch(postingInteractionFailure)) return true;
       for (const candidate of fallback) {
-        if (await fillChoice(page, field, candidate).catch(() => false)) return true;
+        if (await fillChoice(page, field, candidate).catch(postingInteractionFailure)) return true;
       }
       const type = String(await field.getAttribute('type').catch(() => '')).toLowerCase();
       if (type !== 'checkbox' && type !== 'radio' && value) {
@@ -5113,6 +5453,7 @@ export class SellerPublisher {
     markSourceAttributes(['产品类型', 'product type', '类型', 'type'], productTypeFilled);
 
     const sourceOrigin = product.origin || attributeValue(product, '产地', 'Place of Origin');
+    onProgress('填写产地');
     const originFilled = await fillOriginCountry(page, sourceOrigin);
     markSourceAttributes(['产地', 'place of origin'], originFilled);
 
@@ -5127,20 +5468,9 @@ export class SellerPublisher {
       || await fillChoice(page, await fieldByAnyLabel(page, ['品牌名称', 'Brand Name']), brandValue);
     markSourceAttributes(['品牌名称', 'brand', 'brand name'], brandFilled);
 
-    onProgress('填写功能特性');
-    const featureValue = attributeValue(product, '功能/特性', 'Feature', 'Features');
-    const featureFilled = featureValue && (await fillFirst(page, ['input[name="p-373265001"]'], featureValue)
-      || await fillChoice(page, await fieldByAnyLabel(page, ['功能/特性', '功能', '特性', 'Feature', 'Features']), featureValue));
-    markSourceAttributes(['功能/特性', '功能', '特性', 'feature', 'features'], featureFilled);
-
-    onProgress('填写功能和接口');
-    const functionValue = attributeValue(product, '功能', 'Function', 'function');
-    const functionFilled = functionValue && await fillRequiredChoice(
-      ['功能', 'Function', '功能/特性', 'Features'],
-      functionValue
-    );
-    markSourceAttributes(['功能', 'Function', 'function'], functionFilled);
-
+    // Feature and Function are independent category properties. The schema
+    // writer below owns them; a legacy label fallback can overwrite either.
+    onProgress('填写接口');
     const portValue = attributeValue(product, '端口', '接口', 'Port', 'port');
     const portFilled = portValue && await fillRequiredChoice(['端口', '接口', 'Port'], portValue);
     markSourceAttributes(['端口', '接口', 'Port', 'port'], portFilled);
@@ -5307,7 +5637,7 @@ export class SellerPublisher {
         const add = root !== page && await root.locator('[role="btn-add"]:visible').count()
           ? root.locator('[role="btn-add"]:visible').first() : namedAdd.first();
         await waitUntil(async () => await add.isVisible().catch(() => false) && await add.isEnabled().catch(() => false), '新增价格区间按钮暂不可用');
-        await add.click({ timeout: timeoutMs }).catch(async () => { throw await notReady('未能新增价格区间'); });
+        await clickPostingControl(page, add, { timeout: Math.min(timeoutMs, 4000) }).catch(async (error) => { postingInteractionFailure(error); throw await notReady('未能新增价格区间'); });
         await waitUntil(async () => await rowCount() > index, '新增价格区间后尚未生成完整输入行');
       }
       await commitRow(index);
@@ -5317,7 +5647,7 @@ export class SellerPublisher {
       const previousCount = await rowCount();
       const remove = rows.last().locator('[role="remove"], button').filter({ visible: true }).last();
       await waitUntil(async () => await remove.isVisible().catch(() => false) && await remove.isEnabled().catch(() => false), '多余价格区间暂无法移除');
-      await remove.click({ timeout: timeoutMs }).catch(async () => { throw await notReady('未能移除多余价格区间'); });
+      await clickPostingControl(page, remove, { timeout: Math.min(timeoutMs, 4000) }).catch(async (error) => { postingInteractionFailure(error); throw await notReady('未能移除多余价格区间'); });
       await waitUntil(async () => await rowCount() < previousCount, '多余价格区间尚未移除');
     }
     for (let index = 0; index < tiers.length; index++) await commitRow(index);
@@ -5367,16 +5697,19 @@ export class SellerPublisher {
       }
     }
     await this.uploadLegacyDetailImages(page, product, onProgress);
+    if (product.descriptionTemplate) await placeTemplateImages(page, product);
     return true;
   }
 
   async uploadLegacyDetailImages(page, product, onProgress = () => {}) {
+    if (product.imageEdits?.detail && !product.detailImages?.length) return 0;
     onProgress('下载并缓存详情图片');
     // Uploading a very large detail-image batch is the main source of long
     // stalls on slower customer machines. Keep the first eight source images
     // (the useful product evidence) and leave the complete source list intact
     // in the workspace/audit record.
-    const imagePaths = await this.downloadImageSet(product, product.detailImages || [], 'detail', 8);
+    const imagePaths = await this.downloadImageSet(product, product.detailImages || [], 'detail', product.descriptionTemplate ? 30 : 8);
+    if (product.descriptionTemplate && imagePaths.length !== (product.detailImages || []).length) throw new Error('公司模板详情图片未全部下载成功，已停止提交，请检查图片后重试');
     if (!imagePaths.length) throw new Error('详情图下载失败，无法上传到国际站普通编辑器');
     onProgress(`上传详情图片 0/${imagePaths.length}`);
     const editorImageCount = async () => {
@@ -5479,6 +5812,7 @@ export class SellerPublisher {
     const initialEditorImages = await editorImageCount();
     const pluginInserted = await uploadEditorDetailImages(page, imagePaths, onProgress);
     if (pluginInserted !== null) return pluginInserted;
+    if (product.descriptionTemplate) throw new Error('详情模板需要国际站普通图文编辑器的图片上传组件，请重新加载发布页后继续；尚未提交商品');
 
     let uploadButton = null;
     const toolbarDeadline = Date.now() + 15000;
@@ -5800,7 +6134,10 @@ export class SellerPublisher {
   }
 
   async publishProduct(product, publishPageUrl, mode = 'draft', publishCategory = '', jobId = '', onStage = () => {}, options = {}) {
+    this.publishPageSnapshot = null;
+    let lastStage = '';
     const reportStage = (stage) => {
+      if (stage !== '正在恢复当前页面操作') lastStage = stage;
       try { onStage(stage); } catch {}
     };
     reportStage('检查商品资料');
@@ -5817,7 +6154,7 @@ export class SellerPublisher {
     this.imageDownloads.limit = browserResourcePolicy().imageConcurrency;
     const mediaReady = Promise.allSettled([
       this.downloadImageSet(product, product.mainImages?.length ? product.mainImages : [product.mainImage, ...(product.images || [])], 'main', 6),
-      this.downloadImageSet(product, product.detailImages || [], 'detail', 8),
+      this.downloadImageSet(product, product.detailImages || [], 'detail', product.descriptionTemplate ? 30 : 8),
       ...[...new Set((product.variantGroups || []).find((group) => /颜色|colou?r/i.test(group.name))?.options || [])].slice(0, 12).map((value, index) => {
         const group = product.variantGroups.find((item) => /颜色|colou?r/i.test(item.name));
         return this.downloadImageSet(product, [group.optionImages?.[value] || group.optionImages?.[englishSpecText(value)]], `spec-color-${index}`, 1);
@@ -5826,7 +6163,8 @@ export class SellerPublisher {
     try {
       for (let attempt = 0; ; attempt++) {
         try {
-          return await this.publishPreparedProduct(product, publishPageUrl, mode, publishCategory, jobId, reportStage, options);
+          return await withPostingPolicy({ ...options, onProgress: reportStage },
+            () => this.publishPreparedProduct(product, publishPageUrl, mode, publishCategory, jobId, reportStage, options));
         } catch (error) {
           // These typed errors only originate while preparing the form, before
           // any save/submit. Never replay a submission with an unknown receipt.
@@ -5834,6 +6172,9 @@ export class SellerPublisher {
           reportStage('发布页加载不完整，重新加载后重试一次');
         }
       }
+    } catch (error) {
+      error.diagnostics = { ...(error.diagnostics || {}), publishStage: lastStage };
+      throw error;
     } finally { await mediaReady; }
   }
 
@@ -5850,14 +6191,16 @@ export class SellerPublisher {
       page?.close().catch(() => {});
     });
     reportStage(resources.constrained ? '连接国际站发布浏览器（已自动降低图片处理并发，延长页面等待）' : '连接国际站发布浏览器');
-    page = await this.currentSellerPage(publishPageUrl, { skipNavigation: true, showPublishing: true, signal: connection.signal, onProgress: reportStage });
+    page = await this.currentSellerPage(publishPageUrl, { skipNavigation: true, backgroundPublishing: true, signal: connection.signal, onProgress: reportStage });
+    this.publishingPage = { page, jobId: String(jobId || ''), productId: String(product.id || '') };
     if (connection.signal.aborted) {
       page.close().catch(() => {});
       throw Object.assign(new Error('已暂停当前商品操作'), { code: 'PUBLISH_PAUSED' });
     }
     page.setDefaultTimeout(5000);
-    // Keep the actual automation page on-screen, including while readiness
-    // checks wait or pause, so the user can inspect the blocked step.
+    configurePostingInteractions(page, { recover: (target) => recoverPostingClick(page, target), onProgress: reportStage, signal: connection.signal });
+    // Publishing uses a normal headless viewport without a desktop window or
+    // taskbar entry. Progress and platform validation remain in the workbench.
     const publishNavigation = { timeout: resources.navigationTimeoutMs, attempts: 2 };
     reportStage('打开目标类目发布页');
     await gotoWithRetry(page, publishPageUrl, publishNavigation);
@@ -5883,11 +6226,11 @@ export class SellerPublisher {
     await enterPostingForm(page, publishPageUrl, expectedCategoryId);
     await requirePostingPageAvailable(page);
     await waitForPostingTitle(page, { verify: () => waitForHumanVerification(page), onProgress: reportStage });
-    const initialSchema = await page.evaluate(readPostingAttributeSchema);
+    const initialSchema = postingSchemaWithKnownLabels(product, await page.evaluate(readPostingAttributeSchema));
     product = bindSourceAttributesToPostingSchema(product, initialSchema);
     await ensureSimplifiedChinese(page, {
       onProgress: reportStage, verify: () => waitForHumanVerification(page),
-      beforeSwitch: () => requireClearPostingOverlays(page), signal: connection.signal,
+      beforeSwitch: () => requireClearPostingOverlays(page), signal: connection.signal, reloadOnMismatch: true,
     });
     const actualCategoryId = categoryIdFromUrl(page.url()) || categoryIdFromUrl(publishPageUrl);
     if (expectedCategoryId && actualCategoryId && expectedCategoryId !== actualCategoryId) {
@@ -6143,9 +6486,7 @@ export class SellerPublisher {
       if (await button.isVisible().catch(() => false)) { action = button; break; }
     }
     if (!action) {
-      await revealPage(page);
-      this.visible = true;
-      throw new Error('表单已填充，但未识别到保存或发布按钮；本商品尚未提交，请检查国际站页面后重试');
+      throw Object.assign(new Error('商品资料已填写，等待国际站提交入口就绪；已保留当前商品进度，请稍后继续'), { code: 'PUBLISH_CONTROL_NOT_READY' });
     }
     reportStage(mode === 'submit' ? '提交国际站并等待结果' : '保存国际站草稿');
     const originalUrl = page.url();
@@ -6178,7 +6519,7 @@ export class SellerPublisher {
       }[field]}`),
       repairs: {
         overlay: () => dismissPostingOverlays(page),
-        specifications: async () => {
+        specifications: async (error) => {
           const result = await fillVariantSpecs(page, product);
           const blocked = result.blockingUnmapped?.[0] || findBlockingUnmappedVariant(product, result.unmapped);
           if (blocked) throw new Error(`国际站规格修复失败：来源规格“${blocked}”未保留`);
@@ -6194,6 +6535,11 @@ export class SellerPublisher {
             }
           }
           await fillReferencedSkuRows(page, product, fillAndVerify, reportStage, { appliedGroups: result.groups, normalizeValue: englishSpecText });
+          if (SPECIFICATION_IMAGE_REQUIRED_TEXT.test(error.message || '')) {
+            // Filling plain specification values cannot repair a missing
+            // specification image. Retry only after a server image exists.
+            return specImagesRepaired && await specImageIsUploaded(page.locator('#struct-specification'));
+          }
           return specImagesRepaired && (result.groups.length > 0 || colorRepaired);
         },
         attributes: async (error) => {
@@ -6231,6 +6577,8 @@ export class SellerPublisher {
       feedback: verification.feedback,
       requiredAttributes: verification.requiredAttributes || [],
       acceptedLogistics: verification.acceptedLogistics,
+      allowPolicyWarningPublish: options.allowPolicyWarningPublish === true,
+      policyAcknowledgements: policyAcknowledgements(),
       listingMode: options.effectiveListingMode || normalizeListingMode(options.listingMode),
       requestedListingMode: normalizeListingMode(options.listingMode),
       ...(options.logisticsDecision ? { logisticsDecision: options.logisticsDecision } : {}),

@@ -12,6 +12,8 @@ import { showHumanVerification } from './human-verification.js';
 import { saveAccountCookies } from './seller-session.js';
 import { browserStep } from '../server/browser-step.js';
 import { captureSellerReferenceWithExecutor } from '../server/seller-reference.js';
+import { startLocalService } from './local-service.js';
+import { navigateSourceWindow, sourceProductUrl } from './source-navigation.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -28,6 +30,7 @@ const localPort = Number(process.env.KUA_YIPU_PORT || 8787);
 const authBaseUrl = authorizationEndpoint(app.isPackaged ? undefined : process.env.KUA_YIPU_AUTH_URL, { development: !app.isPackaged });
 process.env.KUA_YIPU_AUTH_URL = authBaseUrl;
 let serverModulePromise;
+let localService;
 let localServerPromise;
 let loginWindow;
 let mainWindow;
@@ -365,7 +368,7 @@ async function createMainWindow() {
   return window;
 }
 
-async function ensureAlibabaSellerWindow() {
+async function ensureAlibabaSellerWindow({ navigate = true } = {}) {
   const existing = currentAlibabaWindow({ preferPosting: true });
   if (isWindowAlive(existing)) return existing;
   const username = currentSession?.username;
@@ -390,7 +393,7 @@ async function ensureAlibabaSellerWindow() {
   seller.show();
   seller.maximize();
   seller.focus();
-  await Promise.race([
+  if (navigate) await Promise.race([
     seller.loadURL('https://i.alibaba.com/'),
     new Promise((_, reject) => setTimeout(() => reject(new Error('My Alibaba 页面加载超时，请在已打开的浏览器中检查登录或验证码')), 45000))
   ]);
@@ -421,22 +424,9 @@ async function showAlibabaSellerWindow() {
 }
 
 async function openAlibabaSourceWindow(sourceUrl) {
-  let parsed;
-  try { parsed = new URL(String(sourceUrl || '')); } catch { throw new Error('来源商品链接无效'); }
-  if (!/(^|\.)alibaba\.com$/i.test(parsed.hostname) || !/\/product-detail\//i.test(parsed.pathname)) {
-    throw new Error('仅支持打开阿里巴巴国际站来源商品');
-  }
-  const seller = await ensureAlibabaSellerWindow();
-  seller.setSkipTaskbar(false);
-  await Promise.race([
-    seller.loadURL(parsed.href),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('来源商品页面加载超时')), 60000))
-  ]);
-  seller.show();
-  if (seller.isMinimized()) seller.restore();
-  seller.maximize();
-  seller.focus();
-  return { browserOpen: true, visible: true, currentUrl: seller.webContents.getURL(), onAlibabaInternational: true };
+  const url = sourceProductUrl(sourceUrl);
+  const seller = await ensureAlibabaSellerWindow({ navigate: false });
+  return navigateSourceWindow(seller, url);
 }
 
 async function handleAlibabaHumanVerification(url, options = {}) {
@@ -548,7 +538,19 @@ async function startLocalServer() {
   process.env.APP_ROOT_DIR = app.isPackaged ? app.getAppPath() : rootDir;
   process.env.KUA_YIPU_DIST_DIR = path.join(process.env.APP_ROOT_DIR, 'dist');
   process.env.KUA_YIPU_ALIBABA_COOKIES_FILE = alibabaCookiesFile();
-  serverModulePromise ||= import(pathToFileURL(entry).href);
+  if (!serverModulePromise) {
+    localService = startLocalService({ entry, env: { ...process.env }, resourcesPath: process.resourcesPath,
+      handlers: {
+        ...Object.fromEntries(Object.entries(globalThis.__KUA_YIPU_SELLER_BRIDGE).map(([name, handler]) => [`seller.${name}`, handler])),
+        authorization: () => ({ valid: globalThis.__KUA_YIPU_AUTHORIZATION.valid(), canRead: globalThis.__KUA_YIPU_AUTHORIZATION.canRead(), account: currentSession?.username || readableAccount || 'local' }),
+        'secure.encrypt': (value) => globalThis.__KUA_YIPU_SECURE_STORAGE.encrypt(value),
+        'secure.decrypt': (value) => globalThis.__KUA_YIPU_SECURE_STORAGE.decrypt(Buffer.from(value)),
+      } });
+    serverModulePromise = localService.ready.then(() => ({
+      suspendAuthorizedWork: (options) => localService.call('suspendAuthorizedWork', options),
+      shutdownServer: () => localService.call('shutdownServer'),
+    }));
+  }
   const serverModule = await serverModulePromise;
   await serverModule.serverReady;
   for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -909,10 +911,8 @@ app.whenReady().then(() => {
   });
 });
 
-// The local server runs in this same Electron process. Exposing this narrow
-// bridge lets the seller page reuse the authenticated Electron session instead
-// of opening a second Playwright profile that would ask the user to log in
-// again.
+// The background service uses this narrow bridge to reuse the authenticated
+// Electron session. All window and credential APIs stay on the window thread.
 globalThis.__KUA_YIPU_SELLER_BRIDGE = {
   open: showAlibabaSellerWindow,
   openSource: openAlibabaSourceWindow,
@@ -972,6 +972,9 @@ app.on('before-quit', (event) => {
     } catch {}
   };
   // A normal quit lets Chromium persist its encryption key and profile state.
-  Promise.race([shutdown(), wait(4000)]).finally(() => { shutdownComplete = true; app.quit(); });
+  Promise.race([shutdown(), wait(4000)]).finally(async () => {
+    await localService?.terminate();
+    shutdownComplete = true; app.quit();
+  });
 });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin' && !shutdownStarted) app.quit(); });

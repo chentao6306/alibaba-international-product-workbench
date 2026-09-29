@@ -30,10 +30,15 @@ import { collectionUrls, convertProductPrices, crossPlatformPublishErrors, parse
 import { cleanupWorkspace } from './storage-cleanup.js';
 import { AnnouncementInbox } from './announcements.js';
 import { normalizeSellerGroup } from './seller-groups.js';
-import { productEditPatch } from './product-edit.js';
+import { categoryChangePatch, productEditPatch } from './product-edit.js';
+import { CATEGORY_CATALOG as categoryCatalog } from './category-catalog-data.js';
 import { SecureSettings } from './secure-settings.js';
 import { DEFAULT_PROCESSING, prepareMarketplaceProduct, processingSettings, translateProductTitle } from './product-processing.js';
 import { initializeCollectionFolders, requireCollectionFolder, saveCollectionFolder, deleteCollectionFolder, moveProductsToFolder, findCollectedProduct } from './collection-folders.js';
+import { createWorkbenchStateReader } from './workbench-state.js';
+import { registerProductImageApi, imageListPatch } from './product-image-api.js';
+import { editImageLists } from './product-images.js';
+import { registerDescriptionTemplateApi } from './description-templates.js';
 
 // APP_ROOT_DIR also supports desktop builds with assets inside app.asar.
 const rootDir = process.env.APP_ROOT_DIR
@@ -259,13 +264,19 @@ function queueCollection(jobId) {
   collectionQueue = collectionQueue.catch(() => {}).then(() => startCollectJob(jobId));
 }
 app.use(express.json({ limit: '12mb' }));
+registerProductImageApi(app, { store, mediaDir });
+registerDescriptionTemplateApi(app, { store, mediaDir });
 
 function publicState() {
   const state = store.read();
   return { ...state, browser: publisher.status(), collectorBrowser: collector.status() };
 }
 
+const readWorkbenchState = createWorkbenchStateReader(store);
 app.get('/api/state', (request, response) => {
+  if (request.query.view === 'summary') {
+    return response.json({ ...readWorkbenchState(request.query.revision), browser: publisher.status(), collectorBrowser: collector.status() });
+  }
   const revision = store.revision();
   response.json(request.query.revision === revision
     ? { unchanged: true, revision, jobs: store.read((state) => state.jobs), browser: publisher.status(), collectorBrowser: collector.status() }
@@ -584,6 +595,10 @@ app.post('/api/products/move-folder', (request, response, next) => {
   try { response.json(store.update((state) => moveProductsToFolder(state, Array.isArray(request.body.ids) ? request.body.ids : [], request.body.collectionFolderId))); } catch (error) { next(error); }
 });
 
+app.get('/api/categories/catalog', (request, response) => {
+  response.json(categoryCatalog);
+});
+
 app.post('/api/categories/from-product', async (request, response, next) => {
   try {
     const link = parseCollectionUrl(request.body.url, 'product', 'alibaba.com');
@@ -598,6 +613,12 @@ app.post('/api/collector/open', async (request, response, next) => {
   try { response.json(await collector.open(request.body.url)); } catch (error) { next(error); }
 });
 
+app.get('/api/products/:id', (request, response) => {
+  const product = store.read((state) => state.products.find((item) => item.id === request.params.id));
+  if (!product) return response.status(404).json({ error: '没有找到该商品' });
+  response.json(product);
+});
+
 app.patch('/api/products/:id', (request, response, next) => {
   const updated = store.update((state) => {
     const product = state.products.find((item) => item.id === request.params.id);
@@ -608,10 +629,7 @@ app.patch('/api/products/:id', (request, response, next) => {
     if (request.body.referenceReview) {
       applyReferencePreview(state, { ...request.body.referenceReview, ids: [product.id] });
     }
-    if (patch.categoryId != null && String(patch.categoryId) !== String(product.categoryId || '')) {
-      patch.categoryReference = null;
-      for (const key of ['targetCategory', 'targetCategoryId', 'targetCategoryPath', 'internationalCategory', 'internationalCategoryPath', 'publishCategory', 'publishCategoryId', 'categoryAttributes']) patch[key] = null;
-    }
+    Object.assign(patch, categoryChangePatch(product, patch));
     if (request.body.usdRate && product.currencySymbol !== '$') Object.assign(patch, convertProductPrices({ ...product, ...patch }, request.body.usdRate));
     recordProductMutation(product, patch, { actor: 'user', action: 'single-edit' });
     syncProductModel(attachCategoryRequirements(product, state.postingSchemas));
@@ -688,17 +706,7 @@ app.post('/api/products/batch-update', (request, response, next) => {
         if (patch.services) next.services = { ...(product.services || {}), ...patch.services };
         if (patch.regionalPricing) next.regionalPricing = { ...(product.regionalPricing || {}), ...patch.regionalPricing };
         if (patch.packaging) next.packaging = { ...(product.packaging || {}), ...patch.packaging };
-        if (patch.imageOperation === 'dedupe' || patch.imageOperation === 'copy-detail' || patch.imageOperation === 'clean' || patch.imageOperation === 'clear-main' || /^delete-main-\d+$/.test(String(patch.imageOperation || ''))) {
-          next.mainImages = [...new Set(product.mainImages || product.images || [])].filter(Boolean);
-          if (patch.imageOperation === 'clear-main') next.mainImages = [];
-          const deleteSlot = String(patch.imageOperation || '').match(/^delete-main-(\d+)$/);
-          if (deleteSlot) next.mainImages.splice(Number(deleteSlot[1]) - 1, 1);
-          next.images = next.mainImages;
-          next.mainImage = next.mainImages[0] || '';
-          next.detailImages = patch.imageOperation === 'copy-detail'
-            ? [...next.mainImages]
-            : [...new Set(product.detailImages || next.mainImages)].filter(Boolean);
-        }
+        if (patch.imageOperation) Object.assign(next, imageListPatch(product, editImageLists(product, patch.imageOperation)));
         if (patch.descriptionPrefix || patch.imageOperation) { delete next.descriptionPrefix; delete next.imageOperation; }
         delete next.priceTransform; delete next.skuTransform; delete next.skuRows;
         delete next.attributeOperation; delete next.variantOperation;
@@ -707,7 +715,7 @@ app.post('/api/products/batch-update', (request, response, next) => {
         delete next.source;
         delete next.sourceSnapshot;
         delete next.sourceSnapshotHash;
-        recordProductMutation(product, { ...next, status: 'ready' }, { actor: 'user', action: 'batch-edit' });
+        recordProductMutation(product, { ...categoryChangePatch(product, next), status: 'ready' }, { actor: 'user', action: 'batch-edit' });
         syncProductModel(attachCategoryRequirements(product, state.postingSchemas));
       });
       return state.products.filter((product) => ids.has(product.id));
@@ -817,6 +825,12 @@ app.post('/api/products/process', async (request, response, next) => {
 });
 
 app.patch('/api/settings', (request, response, next) => {
+  if (Object.hasOwn(request.body, 'allowPolicyWarningPublish')) {
+    if (typeof request.body.allowPolicyWarningPublish !== 'boolean') return next(Object.assign(new Error('风险提示上架开关必须为布尔值'), { status: 400 }));
+    if (request.body.allowPolicyWarningPublish && store.read().settings.allowPolicyWarningPublish !== true && request.body.confirmPolicyWarningPublish !== true) {
+      return next(Object.assign(new Error('请先确认启用风险提示商品上架'), { status: 400 }));
+    }
+  }
   if (Object.hasOwn(request.body, 'stockPolicy') && !['minimum-order', 'fixed'].includes(request.body.stockPolicy)) return next(Object.assign(new Error('不支持的默认库存规则'), { status: 400 }));
   if (Object.hasOwn(request.body, 'listingMode') && !['auto', 'inquiry', 'complete-logistics'].includes(request.body.listingMode)) return next(Object.assign(new Error('不支持的销售方式'), { status: 400 }));
   let delay;
@@ -824,9 +838,10 @@ app.patch('/api/settings', (request, response, next) => {
     const settings = store.read().settings;
     delay = publishDelayFromRequest(request.body, { minSeconds: settings.publishDelayMinSeconds, maxSeconds: settings.publishDelayMaxSeconds });
   } catch (error) { return next(error); }
-  const allowed = ['publishPageUrl', 'publishCategory', 'publishBindings', 'defaultStock', 'priceMarkup', 'publishMode', 'stockPolicy', 'listingMode', 'publishDelayMinSeconds', 'publishDelayMaxSeconds'];
+  const allowed = ['publishPageUrl', 'publishCategory', 'publishBindings', 'defaultStock', 'priceMarkup', 'publishMode', 'stockPolicy', 'listingMode', 'publishDelayMinSeconds', 'publishDelayMaxSeconds', 'allowPolicyWarningPublish'];
   const settings = store.update((state) => {
     for (const key of allowed) if (Object.hasOwn(request.body, key)) state.settings[key] = request.body[key];
+    if (request.body.allowPolicyWarningPublish === true && request.body.confirmPolicyWarningPublish === true) state.settings.policyWarningPublishConfirmedAt = new Date().toISOString();
     if (Object.hasOwn(request.body, 'publishDelayMinSeconds') || Object.hasOwn(request.body, 'publishDelayMaxSeconds')) {
       state.settings.publishDelayMinSeconds = delay.minSeconds;
       state.settings.publishDelayMaxSeconds = delay.maxSeconds;
@@ -878,8 +893,7 @@ async function runPublishJob(jobId) {
   if (activePublishJobs.has(jobId)) return;
   activePublishJobs.add(jobId);
   try {
-    let state = store.read();
-    let job = state.jobs.find((item) => item.id === jobId && item.type === 'publish');
+    let job = store.read((state) => state.jobs.find((item) => item.id === jobId && item.type === 'publish'));
     if (!job || !['queued', 'running'].includes(job.status)) return;
     const productIds = job.metadata?.productIds || [];
     const mode = job.metadata?.mode === 'submit' ? 'submit' : 'draft';
@@ -888,8 +902,7 @@ async function runPublishJob(jobId) {
     store.patchJob(jobId, { status: 'running', total, message: '正在连接阿里巴巴国际站卖家后台' });
 
     for (let index = Number(job.progress || 0); index < total; index += 1) {
-      state = store.read();
-      job = state.jobs.find((item) => item.id === jobId);
+      job = store.read((state) => state.jobs.find((item) => item.id === jobId));
       if (!job || job.status === 'cancelled') return;
       if (['pause_requested', 'paused'].includes(job.status)) {
         store.patchJob(jobId, { status: 'paused', progress: index, total, message: `已暂停，已处理 ${index}/${total} 件` });
@@ -911,7 +924,7 @@ async function runPublishJob(jobId) {
         waitedIndices.add(index);
       }
 
-      let product = state.products.find((item) => item.id === productIds[index]);
+      let product = store.read((state) => state.products.find((item) => item.id === productIds[index]));
       if (!product) {
         store.update((draft) => recordPublishOutcome(draft, jobId, productIds[index], { status: 'skipped' }, index + 1));
         store.patchJob(jobId, { progress: index + 1, total, message: `已跳过不存在的商品 ${index + 1}/${total}` });
@@ -925,8 +938,10 @@ async function runPublishJob(jobId) {
       store.update((draft) => {
         const target = draft.products.find((item) => item.id === product.id);
         if (target) Object.assign(target, product, { updatedAt: new Date().toISOString() });
+        const currentJob = draft.jobs.find((item) => item.id === jobId);
+        Object.assign(currentJob, { status: 'running', progress: index, total, waitingForDelay: false, currentProductId: product.id,
+          message: `正在处理 ${index + 1}/${total}：${product.title}`, updatedAt: new Date().toISOString() });
       });
-      store.patchJob(jobId, { status: 'running', progress: index, total, waitingForDelay: false, currentProductId: product.id, message: `正在处理 ${index + 1}/${total}：${product.title}` });
       try {
         // Publishing consumes saved product data only. Source visits belong to
         // collection or an explicit refresh, including missing-data repairs.
@@ -950,6 +965,7 @@ async function runPublishJob(jobId) {
           }, () => publisher.publishProduct(product, route.url, mode, route.category, jobId, reportStage, {
             sellerGroup: job.metadata?.sellerGroup || product.sellerGroup, listingMode: job.metadata?.listingMode,
             stockPolicy: job.metadata?.stockPolicy || 'preserve', defaultStock: job.metadata?.defaultStock,
+            allowPolicyWarningPublish: settings.allowPolicyWarningPublish === true,
             onCategorySchema: (schema) => store.update((state) => {
               rememberCategoryRequirements(state, schema);
               for (const item of state.products) {
@@ -966,9 +982,7 @@ async function runPublishJob(jobId) {
             onTimeout: () => publisher.requestPublishStop(jobId)
           }
         );
-        // Keep the real publishing page visible for inspection. The user
-        // explicitly requested to see the browser while an item is being
-        // uploaded and submitted; collection still uses the hidden context.
+        // The publishing session remains in the background after completion.
         store.update((draft) => {
           const target = draft.products.find((item) => item.id === product.id);
           if (target) Object.assign(target, {
@@ -990,14 +1004,13 @@ async function runPublishJob(jobId) {
         store.patchJob(jobId, { progress: index + 1, total, message: `已处理 ${index + 1}/${total}：${product.title}` });
       } catch (error) {
         const message = userFacingError(error);
-        const requiresHuman = error.code === 'LOGIN_REQUIRED' || /captcha|verify|人机验证|安全验证|滑块|登录(?:状态)?(?:已)?失效|人工验证/i.test(message);
+        const requiresHuman = ['LOGIN_REQUIRED', 'HUMAN_VERIFICATION_REQUIRED'].includes(error.code) || /captcha|verify|人机验证|安全验证|滑块|登录(?:状态)?(?:已)?失效|人工验证/i.test(message);
         const environmentNotReady = publishEnvironmentBlockCode(error);
         const currentJobStatus = store.read((state) => state.jobs.find((item) => item.id === jobId)?.status);
         if (currentJobStatus === 'cancelled') return;
         const pauseRequested = ['pause_requested', 'paused'].includes(currentJobStatus) || ['PUBLISH_PAUSED', 'COLLECT_PAUSED'].includes(error.code);
-        // Preserve the visible publishing page on both success and failure so
-        // the user can inspect Alibaba's exact validation state. It can be
-        // hidden later through the normal seller-browser lifecycle.
+        // Preserve the background session and its validation state. A paused
+        // operation must not open a browser window or lose completed work.
         if (!pauseRequested && !requiresHuman && !environmentNotReady) store.update((draft) => {
           const target = draft.products.find((item) => item.id === product.id);
           if (target) {
@@ -1009,7 +1022,7 @@ async function runPublishJob(jobId) {
             Object.assign(target, { status: 'publish_failed', publishResult: result, updatedAt: new Date().toISOString() });
             if (target.referenceRecovery) target.referenceRecovery.state = 'failed';
             target.publishHistory = Array.isArray(target.publishHistory) ? target.publishHistory : [];
-            const failureRoute = resolvePublishRoute(target, store.read().settings);
+            const failureRoute = resolvePublishRoute(target, draft.settings);
             target.publishHistory.unshift({ ...createPublishSnapshot(target, { mode, category: failureRoute.category, categoryId: failureRoute.categoryId, publishPageUrl: failureRoute.url }), result });
             syncProductModel(target);
           }
@@ -1025,7 +1038,7 @@ async function runPublishJob(jobId) {
         if (product.categoryReference && !pauseRequested && !requiresHuman && !environmentNotReady && error.code !== 'PUBLISH_POLICY_REVIEW_REQUIRED' && requiredFields.length && attempted.length < 2) {
           const frozen = product.categoryReference.template;
           const candidates = frozen ? [{ ...frozen, id: product.categoryReference.referenceId, status: 'published' }]
-            : store.read().products.filter((candidate) => candidate.id === product.categoryReference.referenceId);
+            : store.read((state) => state.products.filter((candidate) => candidate.id === product.categoryReference.referenceId));
           const repair = ['full', 'failed-fields', undefined].includes(product.categoryReference.scope)
             ? findPublishedReferenceRepair(product, candidates, requiredFields, attempted) : null;
           if (repair) {
@@ -1052,10 +1065,12 @@ async function runPublishJob(jobId) {
           return;
         }
         if (requiresHuman || environmentNotReady) {
+          const pageSnapshotAvailable = await publisher.capturePublishPage(jobId, product.id);
           store.patchJob(jobId, {
             status: 'paused', progress: index, total,
+            pageSnapshotAvailable,
             diagnostics: { ...(error.diagnostics || {}), stage: environmentNotReady || error.code },
-            message: `已暂停：${product.title} - ${message}。处理后可继续`
+            message: `已暂停：${product.title} - ${message}。${pageSnapshotAvailable ? '可点击“查看暂停画面”核对。' : ''}处理后可继续`
           });
           return;
         }
@@ -1193,6 +1208,15 @@ app.post('/api/jobs/:id/resume', (request, response, next) => {
   });
   response.json(updated);
   setImmediate(() => job.type === 'collect' ? queueCollection(job.id) : runPublishJob(job.id));
+});
+
+app.get('/api/jobs/:id/publish-page', (request, response, next) => {
+  const job = store.read((state) => state.jobs.find((item) => item.id === request.params.id && item.type === 'publish'));
+  if (!job) return next(Object.assign(new Error('没有找到该上架任务'), { status: 404 }));
+  if (job.status !== 'paused') return next(Object.assign(new Error('任务已继续，请关闭暂停画面'), { status: 409 }));
+  const snapshot = publisher.readPublishPageSnapshot(job.id, job.currentProductId);
+  if (!snapshot) return next(Object.assign(new Error('本次暂停画面不可用，可能在暂停后重启过软件。任务进度已保留。'), { status: 410 }));
+  response.set('Cache-Control', 'no-store').json(snapshot);
 });
 
 app.post('/api/jobs/:id/cancel', (request, response, next) => {
