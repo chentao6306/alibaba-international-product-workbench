@@ -68,7 +68,7 @@ parentPort.on('message', async (message) => {
   } else if (message.type === 'progress') pending.get(message.id)?.onProgress?.(message.value);
   else if (message.type === 'call') {
     try {
-      if (!['suspendAuthorizedWork', 'shutdownServer'].includes(message.method)) throw new Error('不支持的后台服务请求');
+      if (!['suspendAuthorizedWork', 'shutdownServer', 'prepareForUpdate', 'cancelUpdatePreparation'].includes(message.method)) throw new Error('不支持的后台服务请求');
       const module = await service;
       const value = await module[message.method](...message.args);
       parentPort.postMessage({ type: 'result', id: message.id, value });

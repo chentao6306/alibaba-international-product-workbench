@@ -161,8 +161,8 @@ $('previewNotice').onclick = () => preview({ title: $('noticeTitle').value, cont
 $('cancelNotice').onclick = () => $('noticeDialog').close();
 $('createNotice').onclick = () => editNotice();
 document.querySelectorAll('.close-dialog').forEach((button) => { button.onclick = () => button.closest('dialog').close(); });
-for (const name of ['accounts', 'announcements']) $(name + 'Tab').onclick = () => {
-  for (const other of ['accounts', 'announcements']) { $(other + 'Panel').hidden = other !== name; $(other + 'Tab').setAttribute('aria-selected', String(other === name)); }
+for (const name of ['accounts', 'announcements', 'updates']) $(name + 'Tab').onclick = () => {
+  for (const other of ['accounts', 'announcements', 'updates']) { $(other + 'Panel').hidden = other !== name; $(other + 'Tab').setAttribute('aria-selected', String(other === name)); }
   if (name === 'announcements') loadNotices().catch((error) => message(error.message));
 };
 $('loginForm').onsubmit = async (event) => {

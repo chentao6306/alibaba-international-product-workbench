@@ -39,6 +39,7 @@ import { createWorkbenchStateReader } from './workbench-state.js';
 import { registerProductImageApi, imageListPatch } from './product-image-api.js';
 import { editImageLists } from './product-images.js';
 import { registerDescriptionTemplateApi } from './description-templates.js';
+import { createUpdateGuard } from './update-guard.js';
 
 // APP_ROOT_DIR also supports desktop builds with assets inside app.asar.
 const rootDir = process.env.APP_ROOT_DIR
@@ -259,6 +260,10 @@ if (process.env.KUA_YIPU_DESKTOP === '1') {
 app.use('/media', express.static(mediaDir, { fallthrough: false, maxAge: '1d' }));
 const activePublishJobs = new Set();
 const activeCollectJobs = new Set();
+const updateGuard = createUpdateGuard(() => activePublishJobs.size || activeCollectJobs.size
+  || processingProducts.size || readingSellerGroups
+  || store.read().jobs.some((job) => ['queued', 'running', 'pause_requested'].includes(job.status)));
+app.use('/api', updateGuard.middleware);
 let collectionQueue = Promise.resolve();
 function queueCollection(jobId) {
   collectionQueue = collectionQueue.catch(() => {}).then(() => startCollectJob(jobId));
@@ -1400,6 +1405,9 @@ export async function shutdownServer() {
   if (!active?.listening) return;
   await new Promise((resolve) => active.close(() => resolve()));
 }
+
+export function prepareForUpdate() { return updateGuard.acquire(); }
+export function cancelUpdatePreparation() { updateGuard.release(); }
 
 export async function suspendAuthorizedWork({ graceful = false } = {}) {
   const jobs = store.read().jobs.filter((job) => ['queued', 'running', 'pause_requested'].includes(job.status));

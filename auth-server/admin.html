@@ -6,7 +6,7 @@
   <section id="loginBox"><h2>管理员登录</h2><form id="loginForm" class="row"><label class="field">管理员账号<input id="adminUser" autocomplete="username" required></label><label class="field">管理员密码<input id="adminPass" type="password" autocomplete="current-password" required></label><button>登录</button></form></section>
   <div id="app" hidden>
     <div id="stats" class="stats"></div>
-    <nav class="tabs" role="tablist"><button role="tab" id="accountsTab" aria-selected="true">授权账号</button><button role="tab" id="announcementsTab" aria-selected="false">公告管理</button></nav>
+    <nav class="tabs" role="tablist"><button role="tab" id="accountsTab" aria-selected="true">授权账号</button><button role="tab" id="announcementsTab" aria-selected="false">公告管理</button><button role="tab" id="updatesTab" aria-selected="false">系统更新</button></nav>
     <div id="accountsPanel">
       <section><h2>添加或延长授权</h2><form id="activateForm" class="row"><label class="field">Alibaba 登录账号<input id="account" required maxlength="200"></label><label class="field">授权天数<select id="days"><option value="1">1 天</option><option value="30" selected>30 天</option><option value="90">90 天</option><option value="180">180 天</option><option value="365">365 天</option><option value="custom">自定义</option></select></label><label id="customDaysField" class="field" hidden>自定义天数<input id="customDays" type="number" min="1" max="36500" value="30"></label><label class="field grow">备注<input id="note" maxlength="2000"></label><button>保存授权</button></form></section>
       <section><form id="filterForm">
@@ -14,10 +14,22 @@
         <fieldset id="statusFilters"><legend>账号状态</legend><label><input type="checkbox" name="status" value="active">正常授权</label><label><input type="checkbox" name="status" value="expired">已到期</label><label><input type="checkbox" name="status" value="paused">已停用</label><label><input type="checkbox" name="status" value="revoked">已注销</label><label><input type="checkbox" name="status" value="deleted">已删除</label></fieldset>
       </form><div id="licenses" class="table-wrap"></div><div id="licensePages" class="pagination"></div></section>
     </div>
+    <div id="updatesPanel" hidden><section>
+      <div class="row"><h2 class="grow">发布软件更新</h2><button id="newUpdate" class="secondary">新建版本</button></div>
+      <p>上传正式版安装包和对应签名文件，填写更新说明。先保存草稿，点击“正式发布”后客户才能检测到更新。上传中断后可选择相同文件继续。</p>
+      <p id="updateEditing">上传新版本</p>
+      <form id="updateForm">
+        <div class="row"><label class="field grow">安装包 EXE<input id="updateInstaller" type="file" accept=".exe"></label><label class="field grow">安装包签名文件（.exe.update.json）<input id="updateSignature" type="file" accept=".json"></label></div>
+        <label class="field">更新标题<input id="updateTitle" maxlength="100" required></label>
+        <label class="field">本次更新说明<textarea id="updateNotes" maxlength="10000" rows="8" placeholder="1. 新增…&#10;2. 修复…"></textarea></label>
+        <progress id="updateUploadProgress" max="100" value="0" aria-label="安装包上传进度" style="width:100%"></progress>
+        <div class="row"><button id="uploadUpdate">上传并保存草稿</button><button id="stopUpdateUpload" class="secondary" type="button" hidden>暂停上传</button><button id="saveUpdateNotes" class="secondary" type="button" disabled>保存说明</button><button id="publishUpdate" type="button" disabled>正式发布</button><button id="withdrawUpdate" class="danger" type="button" disabled>撤回版本</button></div>
+      </form><p id="updateMessage" role="status" aria-live="polite"></p>
+    </section><section><h2>版本记录</h2><div id="updateVersions"></div></section></div>
     <div id="announcementsPanel" hidden><section><div class="row"><h2 style="flex:1;margin:0">公告管理</h2><button id="createNotice">新建公告</button></div><div id="announcements" class="table-wrap"></div><div id="noticePages" class="pagination"></div></section></div>
   </div>
   <dialog id="noticeDialog"><button class="close-dialog" aria-label="关闭">×</button><h2 id="noticeHeading">新建公告</h2><form id="noticeForm"><label class="field">标题<input id="noticeTitle" maxlength="160" required></label><label class="field">展示方式<select id="noticeKind"><option value="notice">公告列表</option><option value="popup">弹窗公告（同时进入公告列表）</option></select></label><label class="field">正文<textarea id="noticeContent" maxlength="20000" required></textarea></label><label class="field">发布状态<select id="noticeStatus"><option value="draft">草稿</option><option value="published">发布</option><option value="withdrawn">撤回</option></select></label><div class="dialog-actions"><button type="button" class="secondary" id="previewNotice">预览</button><button type="button" class="secondary" id="cancelNotice">取消</button><button id="saveNotice">保存公告</button></div><div id="noticeError" class="status-message" role="status"></div></form></dialog>
   <dialog id="credentialDialog"><button class="close-dialog" aria-label="关闭">×</button><h2>软件授权码</h2><p id="credentialAccount"></p><label class="field">授权码<input id="credentialValue" readonly autocomplete="off"></label><p>仅本次显示，请妥善保存。客户需要使用 1.4.6 或更新版本，首次登录填写后会加密保存。</p><p id="credentialEffect"></p><div class="dialog-actions"><button id="copyCredential" type="button">复制授权码</button></div><p id="credentialMessage" role="status"></p></dialog>
   <dialog id="previewDialog"><button class="close-dialog" aria-label="关闭">×</button><h2 id="previewTitle"></h2><div id="previewContent" class="notice-preview"></div></dialog>
   <dialog id="actionDialog"><h2 id="actionHeading"></h2><form id="actionForm"><p id="actionText"></p><p id="revokeSessionsField" hidden><label class="switch-label"><input id="revokeSessions" type="checkbox" disabled>同时退出已登录设备</label></p><label id="connectionField" class="field" hidden>断线后保持登录<select id="offlineGraceMinutes" required disabled><option value="60">1 小时</option><option value="1440">1 天</option><option value="4320">3 天</option><option value="21600">15 天</option></select></label><label id="extendField" class="field" hidden><span id="daysLabel">调整天数</span><input id="extendDays" type="number" min="1" max="36500" value="30" required></label><p id="expiryPreview" class="expiry-preview" hidden></p><div class="dialog-actions"><button type="button" id="cancelAction" class="secondary">取消</button><button id="confirmAction">确认</button></div><div id="actionError" class="status-message" role="alert"></div></form></dialog>
-</main><script src="/admin.js"></script></body></html>
+</main><script src="/admin.js"></script><script src="/admin-updates.js" type="module"></script></body></html>

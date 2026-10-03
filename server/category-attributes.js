@@ -260,11 +260,13 @@ export function readPostingAttributeSchema() {
     // Never discard a value that the editable input actually contains.
     const committedValues = customValues.length ? values.filter((value) => customValues.includes(value)
       || !/^(?:other|others|其他|其它|自定义)$/i.test(value)) : values;
-    const controlType = field?.tagName === 'SELECT' ? (field.multiple ? 'multiSelect' : 'select')
+    const repeatableText = Boolean(row.querySelector('.posting-field-multi-text'))
+      && !enabled.some((node) => node.tagName === 'SELECT' || node.getAttribute('role') === 'combobox' || ['checkbox', 'radio'].includes(node.type));
+    const controlType = repeatableText ? 'multiText' : field?.tagName === 'SELECT' ? (field.multiple ? 'multiSelect' : 'select')
       : field?.getAttribute('role') === 'combobox' || field?.readOnly ? 'combobox' : field?.type || '';
     const selectRoot = field?.closest('.next-select') || field?.closest('[role="combobox"]');
     const multiFlag = field?.getAttribute('aria-multiselectable') ?? selectRoot?.getAttribute('aria-multiselectable');
-    const multiple = controlType === 'multiSelect' || controlType === 'checkbox' ? true
+    const multiple = ['multiSelect', 'checkbox', 'multiText'].includes(controlType) ? true
       : ['select', 'radio', 'number'].includes(controlType) ? false
         : multiFlag != null ? multiFlag === 'true'
           : selectRoot?.classList.contains('next-select-multiple') ? true

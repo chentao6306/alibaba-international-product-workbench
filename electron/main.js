@@ -14,6 +14,9 @@ import { browserStep } from '../server/browser-step.js';
 import { captureSellerReferenceWithExecutor } from '../server/seller-reference.js';
 import { startLocalService } from './local-service.js';
 import { navigateSourceWindow, sourceProductUrl } from './source-navigation.js';
+import { Updater } from './updater.js';
+import { launchInstaller } from './update-install.js';
+import { UPDATE_CONFIG } from './update-config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -51,6 +54,9 @@ let authorizationConnection = { state: 'connected', message: '' };
 let authorizationWorkPaused = false;
 let nextHeartbeat = 0;
 let hasSingleInstanceLock = false;
+let updater;
+let updaterError = '';
+let installingUpdate = false;
 
 function alibabaCookiesFile() {
   return path.join(app.getPath('userData'), 'alibaba-cookies.json');
@@ -549,6 +555,8 @@ async function startLocalServer() {
     serverModulePromise = localService.ready.then(() => ({
       suspendAuthorizedWork: (options) => localService.call('suspendAuthorizedWork', options),
       shutdownServer: () => localService.call('shutdownServer'),
+      prepareForUpdate: () => localService.call('prepareForUpdate'),
+      cancelUpdatePreparation: () => localService.call('cancelUpdatePreparation'),
     }));
   }
   const serverModule = await serverModulePromise;
@@ -574,6 +582,40 @@ function handleLocalIpc(channel, handler) {
 }
 
 handleLocalIpc('credentials:load', () => loadCredentials());
+function requireUpdater() { if (!updater) throw new Error(updaterError || '更新服务尚未就绪'); return updater; }
+handleLocalIpc('update:state', () => ({ ...(updater?.state() || { currentVersion: app.getVersion(), status: 'error', error: updaterError }), canInstall: Boolean(updater) && app.isPackaged && process.platform === 'win32' && !process.env.PORTABLE_EXECUTABLE_FILE }));
+handleLocalIpc('update:check', () => requireUpdater().check());
+handleLocalIpc('update:download', () => { const active = requireUpdater(); void active.download().catch((error) => active.set({ status: 'error', error: error.message })); return active.state(); });
+handleLocalIpc('update:cancel', () => { const active = requireUpdater(); active.cancel(); return active.state(); });
+handleLocalIpc('update:install', async (event) => {
+  requireUpdater();
+  if (installingUpdate || shutdownStarted) throw new Error('正在准备安装更新');
+  if (!app.isPackaged || process.platform !== 'win32' || process.env.PORTABLE_EXECUTABLE_FILE) throw new Error('请使用 Windows 安装版进行在线更新');
+  installingUpdate = true;
+  let service;
+  try {
+    await updater.prepare();
+    const answer = await dialog.showMessageBox(BrowserWindow.fromWebContents(event.sender), {
+      type: 'question', title: '安装抄得快更新', buttons: ['退出并安装', '暂不安装'], defaultId: 1, cancelId: 1,
+      message: `安装 ${updater.state().release.version}？`,
+      detail: '软件将退出，安装完成后自动打开。商品、图片、模板、授权和任务记录保留；未完成的任务需要您确认后继续。',
+    });
+    if (answer.response !== 0) return updater.state();
+    await ensureLocalServer();
+    service = await serverModulePromise;
+    await service.prepareForUpdate();
+    const file = await updater.prepare();
+    updater.set({ status: 'installing', error: '' });
+    await launchInstaller({ file, directory: updater.directory, target: path.dirname(app.getPath('exe')) });
+    skipQuitPrompt = true;
+    app.quit();
+    return updater.state();
+  } catch (error) {
+    await service?.cancelUpdatePreparation().catch(() => {});
+    updater.set({ status: updater.state().release ? 'ready' : 'error', error: error.message });
+    throw error;
+  } finally { installingUpdate = false; }
+});
 handleLocalIpc('credentials:clear', () => { clearCredentials(); return true; });
 handleLocalIpc('activation:status', (_event, username) => Boolean(activationCredentials(String(username || '').trim())));
 handleLocalIpc('auth:login', async (_event, payload) => {
@@ -885,6 +927,10 @@ async function startAlibabaLogin(username, password) {
 app.whenReady().then(() => {
   hasSingleInstanceLock = app.requestSingleInstanceLock();
   if (!hasSingleInstanceLock) { app.quit(); return; }
+  try {
+    updater = new Updater({ directory: path.join(app.getPath('userData'), 'updates'), version: app.getVersion(), config: UPDATE_CONFIG });
+    updater.start();
+  } catch (error) { updaterError = `更新目录暂时不可用，请检查磁盘空间和权限：${error.message}`; }
   app.on('second-instance', () => {
     for (const window of [loginWindow, mainWindow, ...liveAlibabaWindows()]) {
       if (isWindowAlive(window)) {
@@ -961,6 +1007,7 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   if (shutdownStarted) return;
   shutdownStarted = true;
+  updater?.close();
   currentSession = null;
   if (isWindowAlive(loginWindow)) loginWindow.destroy();
   if (isWindowAlive(mainWindow)) mainWindow.destroy();

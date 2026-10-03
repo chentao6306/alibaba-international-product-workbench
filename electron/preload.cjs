@@ -10,5 +10,10 @@ contextBridge.exposeInMainWorld('kuaYipu', {
   heartbeat: () => ipcRenderer.invoke('auth:heartbeat'),
   showLogin: () => ipcRenderer.invoke('auth:show-login'),
   connection: () => ipcRenderer.invoke('auth:connection'),
+  updateState: () => ipcRenderer.invoke('update:state'),
+  checkUpdate: () => ipcRenderer.invoke('update:check'),
+  downloadUpdate: () => ipcRenderer.invoke('update:download'),
+  cancelUpdate: () => ipcRenderer.invoke('update:cancel'),
+  installUpdate: () => ipcRenderer.invoke('update:install'),
   openSource: (url) => ipcRenderer.invoke('alibaba:open-source', url)
 });

@@ -3355,6 +3355,34 @@ async function ensureCategoryFieldControl(page, field) {
   return (await page.evaluate(readPostingAttributeSchema)).find((entry) => field.id ? entry.id === field.id : entry.rowIndex === field.rowIndex);
 }
 
+async function fillRepeatableCategoryText(page, field, value) {
+  const values = attributeValueList(value, { multiple: true });
+  if (!values.length || values.length > 100) return false;
+  const row = field.rowId ? page.locator(`[id="${field.rowId.replace(/["\\]/g, '')}"]`)
+    : page.locator(`[data-posting-attribute-row="${field.rowIndex}"]`);
+  const inputs = row.locator('.posting-field-multi-text input:not([type="hidden"]):not([disabled]):visible, .posting-field-multi-text textarea:not([disabled]):visible');
+  // Clear obsolete entries from the end: committing an empty entry can remove
+  // its row. Never retain a previous product's extra codes on the posting page.
+  for (let index = await inputs.count() - 1; index >= values.length; index--) {
+    const input = inputs.nth(index);
+    await input.fill('');
+    await input.evaluate((node) => { node.blur(); node.dispatchEvent(new Event('change', { bubbles: true })); });
+  }
+  for (let index = 0; index < values.length; index++) {
+    if (index >= await inputs.count()) {
+      const add = row.locator('.posting-field-multi-text button.add-button:visible').last();
+      if (!await add.isVisible().catch(() => false) || await add.isDisabled()) return false;
+      await clickPostingControl(page, add, { timeout: 3000 });
+      if (!await inputs.nth(index).waitFor({ state: 'visible', timeout: 3000 }).then(() => true, () => false)) return false;
+    }
+    const input = inputs.nth(index);
+    const limit = Number(await input.getAttribute('maxlength'));
+    if (limit > 0 && values[index].length > limit) return false;
+    if (!await fillChoice(page, input, values[index])) return false;
+  }
+  return true;
+}
+
 // Learn display labels only after an exact option-ID click was verified.
 // The cache never substitutes for reading current chips and is scoped to the
 // live page and property ID, so translated labels survive subsequent passes.
@@ -3369,6 +3397,12 @@ function optionLabels(page, field) {
 
 export function attributeFieldMatchesValue(field, value, { valueIds = {}, labels = {} } = {}) {
   const values = field.values || [];
+  if (field.controlType === 'multiText') {
+    const expected = attributeValueList(value, { multiple: true });
+    const key = (item) => String(item).normalize('NFKC').trim().toLowerCase();
+    return expected.length > 0 && expected.every((item) => values.some((selected) => key(item) === key(selected)))
+      && values.every((selected) => expected.some((item) => key(item) === key(selected)));
+  }
   // A plain text control stores the full source array as one string. Compare
   // that same representation, not each array item against the joined text.
   // Selects and multi-select chips must still match every individual option.
@@ -3432,6 +3466,7 @@ export async function fillCategoryAttributes(page, product, onProgress = () => {
       try {
         filled = requiredAttributeKey(field.label) === requiredAttributeKey('产地')
           ? await fillOriginCountry(page, product.origin || value)
+          : field.controlType === 'multiText' ? await fillRepeatableCategoryText(page, field, value)
           : await fillChoice(page, categoryFieldLocator(page, field), value, {
           ...choiceOptions,
           onValueCommitted: (id, label) => { choiceOptions.labels[id] = label; },
@@ -3522,6 +3557,10 @@ export async function recoverRequiredAttributes(page, product, labels, onProgres
     }
 
     let filled = false;
+    if (descriptor?.controlType === 'multiText' && value) {
+      if (await fillRepeatableCategoryText(page, descriptor, value)) recovered.push(aliases[0]);
+      continue;
+    }
     for (const candidate of [value].filter((item) => item != null && item !== '')) {
       if (await fillChoice(page, field, candidate, {
         valueIds: source?.matchedById ? source.valueIds : {},

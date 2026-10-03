@@ -7,6 +7,7 @@ import { clientAllowed, licenseState, pagination, announcementInput, licenseFilt
 import { configureHttpSecurity } from './http-security.js';
 import { createActivationCredential, credentialResetRevokesSessions, validActivation, publicLicense, clientSessionAllowed, clientSession, tokenCodec, requireCredentialTransport, offlineGraceMinutes } from './security.js';
 import { promisify } from 'node:util';
+import { registerUpdateRoutes } from './updates.js';
 
 const app = express();
 configureHttpSecurity(app);
@@ -37,6 +38,7 @@ const requireAdmin = async (request, response, next) => {
   request.admin = auth; next();
 };
 const session = (license, deviceId, version) => clientSession(license, deviceId, sign, version);
+registerUpdateRoutes(app, { requireAdmin, directory: process.env.KUA_YIPU_UPDATE_DIR || path.join(__dirname, '.data', 'updates') });
 async function transaction(work) {
   const client = await pool.connect();
   try { await client.query('BEGIN'); const result = await work(client); await client.query('COMMIT'); return result; }
@@ -45,9 +47,9 @@ async function transaction(work) {
 }
 const event = (client, licenseId, action, actor, metadata = {}) => client.query('INSERT INTO license_events (id,license_id,action,actor,metadata) VALUES ($1,$2,$3,$4,$5)', [id(), licenseId, action, actor, JSON.stringify(metadata)]);
 
-app.get('/health', (_request, response) => response.json({ ok: true, service: 'kua-yipu-auth', version: '1.4.9' }));
+app.get('/health', (_request, response) => response.json({ ok: true, service: 'kua-yipu-auth', version: '1.4.53' }));
 app.get('/', (_request, response) => response.sendFile(path.join(__dirname, 'admin.html')));
-for (const file of ['admin.js', 'admin.css']) app.get(`/${file}`, (_request, response) => response.sendFile(path.join(__dirname, file)));
+for (const file of ['admin.js', 'admin.css', 'admin-updates.js']) app.get(`/${file}`, (_request, response) => response.sendFile(path.join(__dirname, file)));
 app.post('/api/admin/login', async (request, response) => {
   const username = normalize(request.body?.username);
   if (username.length > 200 || typeof request.body?.password !== 'string' || request.body.password.length > 1024) throw fail('管理员账号或密码格式不正确');

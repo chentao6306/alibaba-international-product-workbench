@@ -1,6 +1,6 @@
 # 抄得快 · 阿里巴巴国际站商品工作台
 
-当前版本：**1.4.52**，更新日期：**2026-09-30**。最新完整源码以默认 **main** 分支为准。
+当前版本：**1.4.53**，更新日期：**2026-10-03**。最新完整源码以默认 **main** 分支为准。
 
 ## 常用命令速查
 
@@ -20,10 +20,18 @@ npm run prepare:chromium
 | 启动浏览器版 | `npm start` | 先构建前端，打开 `http://127.0.0.1:8787` |
 | 运行全部测试 | `npm test` | 部分用例会启动内置 Chromium |
 | 减少测试并发 | `npm test -- --test-concurrency=2` | 减少浏览器同时运行数量 |
-| 生成安装版 EXE | `npm run dist:win:installer` | `release-installer/chaodekuai-1.4.52-setup.exe` |
-| 生成便携版 EXE | `npm run dist:win:portable` | `release/chaodekuai-1.4.52-win-x64.exe` |
+| 生成安装版 EXE | `npm run dist:win:installer` | `release-installer/chaodekuai-1.4.53-setup.exe` |
+| 生成便携版 EXE | `npm run dist:win:portable` | `release/chaodekuai-1.4.53-win-x64.exe` |
 
 最常用：改代码用 `npm run dev`；测试桌面端先 `npm run build` 再 `npm run desktop`；给客户打包用 `npm run dist:win:installer`。
+
+## 在线更新和管理员发布
+
+1.4.53 新增“设置 → 软件更新”：显示版本与更新说明、自动检查、下载进度、断点续传、退出后安装。正在执行任务或保存资料时不会开始安装。旧客户端需要先手动安装一次 1.4.53，以后可在软件中更新。
+
+授权管理后台新增“系统更新”：上传 EXE 和配套 `.exe.update.json`，填写标题和说明，保存草稿后正式发布。支持上传续传、修改说明与撤回版本。打包命令自动生成两个文件，**不要发送 `inner.exe`**。
+
+安装中断恢复、签名私钥备份、后台部署和完整发布流程见 [在线更新说明](docs/software-updates.md)。此版本同时修复重复文本控件把多个 OE 代码拼到第一行的问题，逐行填写并回读校验；未取得客户实际商品，真实商品需客户重试确认。
 
 ## 当前功能与验证
 
@@ -33,7 +41,7 @@ npm run prepare:chromium
 - 修复必填/选填缺失属性首次输入后失焦问题，支持已知下拉、多选项。已验证编辑保存后发布填写新值，并取消旧多选值、清除旧选项 ID。
 - 包含此前授权码重置、多端登录、临时断线保持、后台任务线程、产品链接与浏览器窗口处理修复。
 
-已有商品无需删除或重新采集，修改保存后再重试发布。验证边界和结果见 [1.4.52 验证记录](docs/verification-1.4.52.md)。
+已有商品无需删除或重新采集，修改保存后再重试发布。本次验证边界和结果见 [1.4.53 验证记录](docs/verification-1.4.53.md)；历史功能见 [1.4.52 验证记录](docs/verification-1.4.52.md)。
 
 采集列表中途暂停后，点击“采集已发现的 N 件商品”即可停止继续翻页、转为读取这些商品的详情；点击原来的继续按钮则接着翻页。详情采集仍支持断点继续。上架时遇到登录失效或发布表单反复加载不完整，任务暂停并保留当前商品；重新登录或处理页面问题后点击继续。国际站明确提示类目不存在或失效时，暂停并保留进度，需选择有效类目后继续。上架只使用已保存资料，不再自动访问来源商品页；需要更新来源资料时，在商品工作台主动重新采集。
 
@@ -43,7 +51,7 @@ Windows 桌面客户端，提供国际站、1688、速卖通商品采集、资�
 
 ## 源码与备份范围
 
-- [当前 1.4.52 完整源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/main)
+- [当前 1.4.53 完整源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/main)
 - [1.4.52 修复和验证记录](docs/verification-1.4.52.md)
 - [备份范围、解密和恢复说明](docs/stable-backup.md)
 
@@ -131,10 +139,10 @@ npm test -- --test-concurrency=2
 npm run dist:win:installer
 ```
 
-输出：`release-installer/chaodekuai-1.4.52-setup.exe`。脚本依次构建前端、准备 Chromium，再执行 Electron Builder NSIS x64 打包。安装包支持选择安装目录、桌面和开始菜单快捷方式。
+输出：`release-installer/chaodekuai-1.4.53-setup.exe`。脚本依次构建前端、准备 Chromium，再执行 Electron Builder NSIS x64 打包。安装包支持选择安装目录、桌面和开始菜单快捷方式。
 
 ```powershell
-npm run dist:win:portable   # release/chaodekuai-1.4.52-win-x64.exe
+npm run dist:win:portable   # release/chaodekuai-1.4.53-win-x64.exe
 npm run dist:win            # 按 package.json 构建 Windows 目标
 ```
 
@@ -159,8 +167,8 @@ npx --no-install electron-builder --win nsis --x64 `
 ```powershell
 node tools/desktop-package-qa.mjs release-installer
 npx --no-install electron tools/verification-window-qa.mjs .packaged/electron/human-verification.js
-Get-Item .\release-installer\chaodekuai-1.4.52-setup.exe
-Get-FileHash .\release-installer\chaodekuai-1.4.52-setup.exe -Algorithm SHA256
+Get-Item .\release-installer\chaodekuai-1.4.53-setup.exe
+Get-FileHash .\release-installer\chaodekuai-1.4.53-setup.exe -Algorithm SHA256
 ```
 
 包检查核对版本、打包源码、浏览器、安全开关、登录窗口和未登录 API 鉴权，使用隔离用户目录。当前 EXE 未配置 Authenticode 签名；有证书后按 Electron Builder 签名配置构建。`publish` 地址是占位配置，目前通过 GitHub Release 手工分发，没有启用可用的自动更新服务。

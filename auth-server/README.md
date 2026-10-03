@@ -159,3 +159,8 @@ node tools/admin-qa.mjs
 ```
 
 PostgreSQL 集成测试仅允许 `AUTH_TEST_DATABASE_URL` 指向名称以 `auth_qa_` 开头的独立测试数据库。不要把生产连接串传给测试。
+# 在线更新管理（1.4.53）
+
+登录后台后进入“系统更新”，上传正式安装包及构建生成的 `.exe.update.json`，填写标题和说明，保存草稿再正式发布。支持分块续传、修改说明和撤回，只有管理员可写。
+
+部署需配置 `KUA_YIPU_UPDATE_DIR` 和目录写权限，使用 `deploy/updates.conf`；Nginx 只需为 `/api/admin/updates/` 放行 5 MB 分块请求。完整说明见 [软件更新与部署](../docs/software-updates.md)。私钥只在构建电脑，不能上传到服务器。
