@@ -9,7 +9,14 @@ const escape = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '
 const time = (value) => value ? new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '-';
 const badge = (status) => `<span class="badge ${escape(status)}">${escape(names[status] || status)}</span>`;
 function message(text = '', success = false) { $('msg').textContent = text; $('msg').classList.toggle('success', success); }
-function loggedIn(value) { $('loginBox').hidden = value; $('app').hidden = !value; $('logout').hidden = !value; }
+function loggedIn(value) {
+  $('loginBox').hidden = value; $('app').hidden = !value; $('logout').hidden = !value;
+  $('adminSidebar').hidden = !value; $('adminIdentity').hidden = !value;
+  document.body.classList.toggle('authenticated', value);
+  $('adminIdentity').textContent = `${sessionStorage.getItem('auth-admin-name') || '已登录'} · 管理员`;
+  if (value) $('pageTitle').textContent = document.querySelector('.admin-navigation [aria-selected="true"]').textContent;
+  else $('pageTitle').textContent = '抄得快授权管理';
+}
 function showCredential(item) {
   if (!item.activationCode) return;
   $('credentialAccount').textContent = item.alibaba_account;
@@ -164,10 +171,16 @@ document.querySelectorAll('.close-dialog').forEach((button) => { button.onclick 
 for (const name of ['accounts', 'announcements', 'updates']) $(name + 'Tab').onclick = () => {
   for (const other of ['accounts', 'announcements', 'updates']) { $(other + 'Panel').hidden = other !== name; $(other + 'Tab').setAttribute('aria-selected', String(other === name)); }
   if (name === 'announcements') loadNotices().catch((error) => message(error.message));
+  $('pageTitle').textContent = $(name + 'Tab').textContent;
+  message();
+  window.scrollTo({ top: 0 });
 };
+$('addAccountNav').onclick = () => { $('accountsTab').click(); $('activateForm').scrollIntoView({ behavior: 'smooth', block: 'center' }); $('account').focus({ preventScroll: true }); };
+$('updateHistoryNav').onclick = () => { $('updatesTab').click(); document.querySelector('.update-history').scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+$('newNoticeNav').onclick = () => { $('announcementsTab').click(); $('createNotice').click(); };
 $('loginForm').onsubmit = async (event) => {
   event.preventDefault(); const button = event.target.querySelector('button'); button.disabled = true;
-  try { const data = await api('/api/admin/login', { method: 'POST', body: JSON.stringify({ username: $('adminUser').value, password: $('adminPass').value }) }); token = data.token; sessionStorage.setItem('auth-admin-token', token); $('adminPass').value = ''; loggedIn(true); await Promise.all([stats(), loadAccounts()]); message(); }
+  try { const data = await api('/api/admin/login', { method: 'POST', body: JSON.stringify({ username: $('adminUser').value, password: $('adminPass').value }) }); token = data.token; sessionStorage.setItem('auth-admin-token', token); sessionStorage.setItem('auth-admin-name', data.username || $('adminUser').value); $('adminPass').value = ''; loggedIn(true); await Promise.all([stats(), loadAccounts()]); message(); }
   catch (error) { message(error.message); } finally { button.disabled = false; }
 };
 $('logout').onclick = async () => {

@@ -1,32 +1,51 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>抄得快授权管理</title><link rel="stylesheet" href="/admin.css"></head>
-<body><main class="wrap">
-  <header><h1>抄得快授权管理</h1><button id="logout" class="secondary" hidden>退出登录</button></header>
+<body>
+<aside id="adminSidebar" class="admin-sidebar" hidden>
+  <div class="admin-brand"><strong>抄得快</strong><span>管理员后台</span></div>
+  <p class="nav-caption">管理工作台</p>
+  <nav class="admin-navigation" role="tablist" aria-label="管理导航" aria-orientation="vertical">
+    <details class="nav-group" open><summary>授权管理</summary><button role="tab" id="accountsTab" aria-controls="accountsPanel" aria-selected="true">授权账号</button><button id="addAccountNav" type="button">新增授权</button></details>
+    <details class="nav-group" open><summary>软件管理</summary><button role="tab" id="updatesTab" aria-controls="updatesPanel" aria-selected="false">系统更新</button><button id="updateHistoryNav" type="button">版本记录</button></details>
+    <details class="nav-group" open><summary>内容管理</summary><button role="tab" id="announcementsTab" aria-controls="announcementsPanel" aria-selected="false">公告管理</button><button id="newNoticeNav" type="button">新建公告</button></details>
+  </nav>
+  <div class="sidebar-footer">抄得快 · 管理中心</div>
+</aside>
+<main class="wrap">
+  <header class="admin-header"><h1 id="pageTitle">抄得快授权管理</h1><div class="admin-session"><span id="adminIdentity" hidden>管理员</span><button id="logout" class="secondary" hidden>退出登录</button></div></header>
   <div id="msg" class="status-message" role="status" aria-live="polite"></div>
   <section id="loginBox"><h2>管理员登录</h2><form id="loginForm" class="row"><label class="field">管理员账号<input id="adminUser" autocomplete="username" required></label><label class="field">管理员密码<input id="adminPass" type="password" autocomplete="current-password" required></label><button>登录</button></form></section>
   <div id="app" hidden>
-    <div id="stats" class="stats"></div>
-    <nav class="tabs" role="tablist"><button role="tab" id="accountsTab" aria-selected="true">授权账号</button><button role="tab" id="announcementsTab" aria-selected="false">公告管理</button><button role="tab" id="updatesTab" aria-selected="false">系统更新</button></nav>
-    <div id="accountsPanel">
+    <div id="accountsPanel" role="tabpanel" aria-labelledby="accountsTab">
+      <div id="stats" class="stats"></div>
       <section><h2>添加或延长授权</h2><form id="activateForm" class="row"><label class="field">Alibaba 登录账号<input id="account" required maxlength="200"></label><label class="field">授权天数<select id="days"><option value="1">1 天</option><option value="30" selected>30 天</option><option value="90">90 天</option><option value="180">180 天</option><option value="365">365 天</option><option value="custom">自定义</option></select></label><label id="customDaysField" class="field" hidden>自定义天数<input id="customDays" type="number" min="1" max="36500" value="30"></label><label class="field grow">备注<input id="note" maxlength="2000"></label><button>保存授权</button></form></section>
       <section><form id="filterForm">
         <div class="row"><label class="field grow">搜索账号或备注<input id="search" type="search" placeholder="搜索账号或备注"></label><label class="field">最近活动<select id="activity"><option value="all">全部时间</option><option value="24h">24 小时内活跃</option><option value="30d">30 天内活跃</option><option value="never">从未登录</option></select></label><label class="field">多端登录<select id="devices"><option value="all">全部策略</option><option value="multiple">允许多端</option><option value="single">仅单设备</option></select></label><label class="field">每页<select id="pageSize"><option>10</option><option selected>20</option><option>50</option><option>100</option></select></label><button class="secondary">查询</button><button type="button" id="resetFilters" class="secondary">重置</button></div>
         <fieldset id="statusFilters"><legend>账号状态</legend><label><input type="checkbox" name="status" value="active">正常授权</label><label><input type="checkbox" name="status" value="expired">已到期</label><label><input type="checkbox" name="status" value="paused">已停用</label><label><input type="checkbox" name="status" value="revoked">已注销</label><label><input type="checkbox" name="status" value="deleted">已删除</label></fieldset>
       </form><div id="licenses" class="table-wrap"></div><div id="licensePages" class="pagination"></div></section>
     </div>
-    <div id="updatesPanel" hidden><section>
-      <div class="row"><h2 class="grow">发布软件更新</h2><button id="newUpdate" class="secondary">新建版本</button></div>
-      <p>上传正式版安装包和对应签名文件，填写更新说明。先保存草稿，点击“正式发布”后客户才能检测到更新。上传中断后可选择相同文件继续。</p>
-      <p id="updateEditing">上传新版本</p>
-      <form id="updateForm">
-        <div class="row"><label class="field grow">安装包 EXE<input id="updateInstaller" type="file" accept=".exe"></label><label class="field grow">安装包签名文件（.exe.update.json）<input id="updateSignature" type="file" accept=".json"></label></div>
-        <label class="field">更新标题<input id="updateTitle" maxlength="100" required></label>
-        <label class="field">本次更新说明<textarea id="updateNotes" maxlength="10000" rows="8" placeholder="1. 新增…&#10;2. 修复…"></textarea></label>
-        <progress id="updateUploadProgress" max="100" value="0" aria-label="安装包上传进度" style="width:100%"></progress>
-        <div class="row"><button id="uploadUpdate">上传并保存草稿</button><button id="stopUpdateUpload" class="secondary" type="button" hidden>暂停上传</button><button id="saveUpdateNotes" class="secondary" type="button" disabled>保存说明</button><button id="publishUpdate" type="button" disabled>正式发布</button><button id="withdrawUpdate" class="danger" type="button" disabled>撤回版本</button></div>
-      </form><p id="updateMessage" role="status" aria-live="polite"></p>
-    </section><section><h2>版本记录</h2><div id="updateVersions"></div></section></div>
-    <div id="announcementsPanel" hidden><section><div class="row"><h2 style="flex:1;margin:0">公告管理</h2><button id="createNotice">新建公告</button></div><div id="announcements" class="table-wrap"></div><div id="noticePages" class="pagination"></div></section></div>
+    <div id="updatesPanel" role="tabpanel" aria-labelledby="updatesTab" hidden>
+      <section class="update-card" id="updateEditor">
+        <div class="update-card-heading"><h2>发布软件更新</h2><button id="newUpdate" class="secondary" type="button" hidden>新建版本</button></div>
+        <p class="update-intro">上传正式版安装包和构建时生成的签名文件，填写更新说明。上传完成后点击“正式发布”，客户的软件即可检查到更新。只有管理员可以管理版本。</p>
+        <p id="updateEditing" class="update-editing" hidden></p>
+        <form id="updateForm">
+          <div class="update-file-grid"><label class="field">安装包 EXE<input id="updateInstaller" type="file" accept=".exe"></label><label class="field">安装包签名文件（.exe.update.json）<input id="updateSignature" type="file" accept=".json"></label></div>
+          <label class="field update-title-field">更新标题<input id="updateTitle" maxlength="100" required placeholder="例如：优化商品发布，修复登录问题"></label>
+          <label class="field">本次更新说明<textarea id="updateNotes" maxlength="10000" rows="7" placeholder="1. 新增……&#10;2. 修复……"></textarea></label>
+          <div id="updateProgressArea" hidden><progress id="updateUploadProgress" max="100" value="0" aria-label="安装包上传进度"></progress><span id="updateProgressText"></span></div>
+          <div class="update-form-actions"><button id="uploadUpdate">上传并保存草稿</button><button id="stopUpdateUpload" class="secondary" type="button" hidden>暂停上传</button><button id="saveUpdateNotes" type="button" hidden>保存说明</button><button id="cancelUpdateEdit" class="secondary" type="button" hidden>取消编辑</button></div>
+        </form>
+        <p id="updateMessage" role="status" aria-live="polite"></p>
+      </section>
+      <section class="update-card update-history">
+        <h2>版本记录 · <span id="updateVersionCount">0</span> 条</h2>
+        <button id="refreshUpdates" type="button" class="secondary">刷新</button>
+        <div id="updateVersions" class="table-wrap"></div>
+        <p id="updateHistoryMessage" role="status" aria-live="polite"></p>
+      </section>
+    </div>
+    <div id="announcementsPanel" role="tabpanel" aria-labelledby="announcementsTab" hidden><section><div class="row"><h2 style="flex:1;margin:0">公告管理</h2><button id="createNotice">新建公告</button></div><div id="announcements" class="table-wrap"></div><div id="noticePages" class="pagination"></div></section></div>
   </div>
   <dialog id="noticeDialog"><button class="close-dialog" aria-label="关闭">×</button><h2 id="noticeHeading">新建公告</h2><form id="noticeForm"><label class="field">标题<input id="noticeTitle" maxlength="160" required></label><label class="field">展示方式<select id="noticeKind"><option value="notice">公告列表</option><option value="popup">弹窗公告（同时进入公告列表）</option></select></label><label class="field">正文<textarea id="noticeContent" maxlength="20000" required></textarea></label><label class="field">发布状态<select id="noticeStatus"><option value="draft">草稿</option><option value="published">发布</option><option value="withdrawn">撤回</option></select></label><div class="dialog-actions"><button type="button" class="secondary" id="previewNotice">预览</button><button type="button" class="secondary" id="cancelNotice">取消</button><button id="saveNotice">保存公告</button></div><div id="noticeError" class="status-message" role="status"></div></form></dialog>
   <dialog id="credentialDialog"><button class="close-dialog" aria-label="关闭">×</button><h2>软件授权码</h2><p id="credentialAccount"></p><label class="field">授权码<input id="credentialValue" readonly autocomplete="off"></label><p>仅本次显示，请妥善保存。客户需要使用 1.4.6 或更新版本，首次登录填写后会加密保存。</p><p id="credentialEffect"></p><div class="dialog-actions"><button id="copyCredential" type="button">复制授权码</button></div><p id="credentialMessage" role="status"></p></dialog>

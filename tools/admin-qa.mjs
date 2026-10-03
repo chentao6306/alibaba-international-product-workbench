@@ -40,6 +40,17 @@ try {
   await page.locator('#adminUser').fill('test'); await page.locator('#adminPass').fill('local-test-password');
   await page.locator('#loginForm button').click();
   await page.locator('#licenses tbody tr').first().waitFor();
+  const softwareMenu = page.locator('.nav-group').filter({ has: page.locator('#updatesTab') });
+  await softwareMenu.locator('summary').click();
+  assert.equal(await page.locator('#updatesTab').isVisible(), false);
+  await softwareMenu.locator('summary').click();
+  assert.equal(await page.locator('#updatesTab').isVisible(), true);
+  await page.locator('#addAccountNav').click();
+  assert.equal(await page.locator('#account').evaluate((input) => document.activeElement === input), true);
+  await page.locator('#newNoticeNav').click();
+  await page.locator('#noticeDialog').waitFor({ state: 'visible' });
+  await page.locator('#cancelNotice').click();
+  await page.locator('#accountsTab').click();
   async function filtered(action) {
     await Promise.all([page.waitForResponse((response) => response.url().includes('/api/admin/licenses?') && response.status() === 200), action()]);
   }

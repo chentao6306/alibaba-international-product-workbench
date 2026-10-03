@@ -1,6 +1,6 @@
-# 授权服务器 · 1.4.52 客户端配套服务
+# 授权服务器 · 1.4.54 客户端配套服务
 
-这是独立运行的 Linux/Express/PostgreSQL 服务。完整源码在本目录，依赖使用根目录 `package.json` 和 `package-lock.json`。`index.js` 是生产入口；`dev.js` 只用于本机 JSON 数据预览，不用于正式部署。客户端当前版本 1.4.52，服务健康接口的协议版本保留 1.4.9。
+这是独立运行的 Linux/Express/PostgreSQL 服务。完整源码在本目录，依赖使用根目录 `package.json` 和 `package-lock.json`。`index.js` 是生产入口；`dev.js` 只用于本机 JSON 数据预览，不用于正式部署。客户端当前版本 1.4.54，服务健康接口的独立版本标识为 1.4.53。
 
 ## 配置与安全边界
 
@@ -84,6 +84,7 @@ curl --fail http://127.0.0.1:8790/health
 - `security-qa.sh`：在隔离 PostgreSQL 测试库运行安全测试，不使用生产库。
 - `enable-runtime.sh isolated-tests-passed`：仅在隔离测试通过后切换运行时。
 - `update-service.sh`：备份源码和数据库、增量迁移、更新代码、健康检查，失败回滚代码。
+- `update-admin.sh`：用于已装好在线更新服务的后台修补，备份并替换五个管理页面/更新模块文件，重启服务并检查健康，失败回滚；不迁移数据库。
 - `enable-compatible-https.sh`：更新本项目现有布局的 Nginx 兼容配置。
 - `harden-host.sh`、`enable-security-updates.sh`：主机与更新策略；先审阅，避免影响 SSH 运维访问。
 
@@ -115,10 +116,10 @@ sudo pg_restore --list /var/backups/kua-yipu/database.dump
 从仓库根目录构建，使用根目录锁文件：
 
 ```bash
-docker build -f auth-server/Dockerfile -t kua-yipu-auth:1.4.52 .
+docker build -f auth-server/Dockerfile -t kua-yipu-auth:1.4.54 .
 docker run -d --name kua-yipu-auth --restart unless-stopped \
   --env-file /private/auth.env -e BIND_HOST=0.0.0.0 \
-  -p 127.0.0.1:8790:8790 kua-yipu-auth:1.4.52
+  -p 127.0.0.1:8790:8790 kua-yipu-auth:1.4.54
 ```
 
 容器内 `BIND_HOST=0.0.0.0`；数据库地址使用容器可达地址，不是容器自身 `127.0.0.1`。发布到宿主机端口仅绑定回环，Nginx 再代理 HTTPS。先单独执行结构迁移和管理员初始化，镜像不会自动创建数据库。
@@ -159,8 +160,8 @@ node tools/admin-qa.mjs
 ```
 
 PostgreSQL 集成测试仅允许 `AUTH_TEST_DATABASE_URL` 指向名称以 `auth_qa_` 开头的独立测试数据库。不要把生产连接串传给测试。
-# 在线更新管理（1.4.53）
+## 在线更新管理（1.4.53 起）
 
-登录后台后进入“系统更新”，上传正式安装包及构建生成的 `.exe.update.json`，填写标题和说明，保存草稿再正式发布。支持分块续传、修改说明和撤回，只有管理员可写。
+登录后台后通过左侧“软件管理 → 系统更新”，上传正式安装包及构建生成的 `.exe.update.json`，填写标题和说明，保存草稿再正式发布。下方版本记录显示完整说明、状态、时间和大小，每条记录可编辑、发布、停止分发或下载。支持上传暂停和分块续传，只有管理员可写。侧栏分组可展开/收起，还可跳转新增授权、版本记录和新建公告；手机上菜单移到顶部。
 
-部署需配置 `KUA_YIPU_UPDATE_DIR` 和目录写权限，使用 `deploy/updates.conf`；Nginx 只需为 `/api/admin/updates/` 放行 5 MB 分块请求。完整说明见 [软件更新与部署](../docs/software-updates.md)。私钥只在构建电脑，不能上传到服务器。
+部署需配置 `KUA_YIPU_UPDATE_DIR` 和目录写权限，使用 `deploy/updates.conf`；Nginx 同时配置精确 `/api/admin/updates` 和前缀 `/api/admin/updates/` 路由，防止创建草稿的 POST 被 301 转为 GET。分块路由放行 5 MB 请求。完整说明和后台增量部署步骤见 [软件更新与部署](../docs/software-updates.md)。私钥只在构建电脑，不能上传到服务器。

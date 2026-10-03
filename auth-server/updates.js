@@ -62,13 +62,21 @@ export function registerUpdateRoutes(app, { requireAdmin, directory, publicKey =
     const previous = items.find((item) => item.artifact.version === artifact.version);
     if (previous) {
       if (previous.artifact.sha256 !== artifact.sha256) throw fail('该版本已存在其他安装包，请提升版本号重新打包');
-      response.json({ ...previous, uploaded: previous.complete ? artifact.size : offset(previous) });
+      if (previous.status !== 'draft') throw fail('该版本已有发布记录，请在下方版本记录中编辑说明或调整分发状态；新安装包请使用更高版本号', 409);
+      patch(previous.id, content);
+      response.json({ ...find(previous.id), uploaded: previous.complete ? artifact.size : offset(previous) });
       return;
     }
     if (items.length >= 200) throw fail('版本记录已达上限，请联系维护人员归档历史版本');
     const item = { id: crypto.randomUUID(), artifact, envelope: request.body.envelope, ...content, status: 'draft', complete: false, createdAt: new Date().toISOString(), author: request.admin.username };
     save([...items, item]);
     response.status(201).json({ ...item, uploaded: 0 });
+  });
+  app.get(`${prefix}/:id/file`, requireAdmin, (request, response) => {
+    const item = find(request.params.id);
+    if (!item.complete || !fs.existsSync(file(item))) throw fail('安装包尚未上传完成并通过校验', 409);
+    response.set('Cache-Control', 'no-store');
+    response.download(file(item), item.artifact.filename);
   });
   app.put(`${prefix}/:id/file`, requireAdmin, express.raw({ type: 'application/octet-stream', limit: CHUNK }), async (request, response) => {
     const item = find(request.params.id);
@@ -111,7 +119,7 @@ export function registerUpdateRoutes(app, { requireAdmin, directory, publicKey =
       if (status === 'published') {
         if (!item.complete || !fs.existsSync(file(item)) || await digest(file(item)) !== item.artifact.sha256) throw fail('请先完整上传并校验安装包');
         const newer = read().some((entry) => entry.publishedAt && compareVersions(entry.artifact.version, item.artifact.version) > 0);
-        if (newer) throw fail('已有更高版本发布过，请提升版本号，不能重新发布旧版');
+        if (newer && item.status !== 'published') throw fail('已有更高版本发布过，请提升版本号，不能重新发布旧版');
       }
       patch(item.id, { ...content, status, author: request.admin.username, ...(status === 'published' ? { publishedAt: item.publishedAt || new Date().toISOString() } : {}) });
       response.json(find(item.id));

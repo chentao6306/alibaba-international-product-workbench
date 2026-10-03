@@ -84,6 +84,38 @@ test('invalid uploaded bytes cannot become a published release and can be reuplo
   assert.equal((await api(`/${item.id}`, { title: 'x', notes: '', status: 'published' }, 'PATCH')).status, 400);
 });
 
+test('administrators can download verified drafts and withdrawn packages without exposing them publicly', async (t) => {
+  const { api, base } = await fixture(t);
+  const item = (await api('/', { envelope: envelope(), title: '草稿标题', notes: '初始说明' })).data;
+  const url = `${base}/api/admin/updates/${item.id}/file`;
+  assert.equal((await fetch(url)).status, 401);
+  assert.equal((await fetch(url, { headers: { authorization: 'Bearer test' } })).status, 409);
+  await api(`/${item.id}/file?offset=0`, payload, 'PUT', true);
+  await api(`/${item.id}/complete`, {});
+  const download = await fetch(url, { headers: { authorization: 'Bearer test', Range: 'bytes=10-99' } });
+  assert.equal(download.status, 206);
+  assert.match(download.headers.get('content-disposition'), /chaodekuai-1.4.53-setup.exe/);
+  assert.deepEqual(Buffer.from(await download.arrayBuffer()), payload.subarray(10, 100));
+  assert.equal((await fetch(`${base}/updates/chaodekuai/files/${item.id}.exe`)).status, 404);
+  const resumed = await api('/', { envelope: envelope(), title: '更新标题', notes: '续传时更新说明' });
+  assert.equal(resumed.data.notes, '续传时更新说明');
+  await api(`/${item.id}`, { title: '更新标题', notes: '说明', status: 'withdrawn' }, 'PATCH');
+  assert.equal((await fetch(url, { headers: { authorization: 'Bearer test' } })).status, 200);
+  assert.equal((await fetch(`${base}/updates/chaodekuai/files/${item.id}.exe`)).status, 404);
+});
+
+test('older published descriptions remain editable without republishing a withdrawn old release', async (t) => {
+  const { publish, api } = await fixture(t);
+  const older = await publish('1.4.53');
+  await publish('1.4.54');
+  const edited = await api(`/${older.id}`, { title: '修正旧版说明', notes: '保留新版分发', status: 'published' }, 'PATCH');
+  assert.equal(edited.status, 200);
+  assert.equal(edited.data.notes, '保留新版分发');
+  assert.equal((await api('/', { envelope: envelope('1.4.53'), title: '重复上传', notes: '' })).status, 409);
+  await api(`/${older.id}`, { title: '停止分发', notes: '', status: 'withdrawn' }, 'PATCH');
+  assert.equal((await api(`/${older.id}`, { title: '重新发布', notes: '', status: 'published' }, 'PATCH')).status, 400);
+});
+
 test('client preserves partial download across exit, resumes by Range, and verifies bytes again before install', async (t) => {
   const { updater, publish, directory } = await fixture(t); await publish();
   const first = updater(); await first.check();

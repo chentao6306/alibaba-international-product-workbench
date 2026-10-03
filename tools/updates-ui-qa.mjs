@@ -18,6 +18,13 @@ const errors = []; page.on('pageerror', (error) => errors.push(error.message));
 fs.mkdirSync('.data/update-qa', { recursive: true });
 const keys = crypto.generateKeyPairSync('ed25519');
 const admin = express(); admin.use(express.json());
+let redirectedCollectionRequests = 0;
+// Reproduce the production proxy's slash redirect. Upload must use the
+// canonical collection URL and remain POST, including when it resumes.
+admin.use((request, response, next) => {
+  if (request.path === '/api/admin/updates') { redirectedCollectionRequests++; return response.redirect(301, '/api/admin/updates/'); }
+  next();
+});
 registerUpdateRoutes(admin, { directory: path.join(directory, 'updates'), publicKey: keys.publicKey,
   requireAdmin: (request, response, next) => {
     if (request.headers.authorization !== 'Bearer fixture') return response.sendStatus(401);
@@ -68,22 +75,61 @@ try {
     filename: 'chaodekuai-1.4.53-setup.exe', size: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') }, keys.privateKey);
   await adminPage.locator('#updateInstaller').setInputFiles({ name: 'chaodekuai-1.4.53-setup.exe', mimeType: 'application/octet-stream', buffer: bytes });
   await adminPage.locator('#updateSignature').setInputFiles({ name: 'chaodekuai-1.4.53-setup.exe.update.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(envelope)) });
+  const malformed = async (route) => {
+    if (route.request().method() === 'POST') await route.fulfill({ json: [] });
+    else await route.continue();
+  };
+  await adminPage.route('**/api/admin/updates/', malformed);
   await adminPage.getByRole('button', { name: '上传并保存草稿' }).click();
-  await adminPage.getByText('安装包校验通过，已保存草稿。确认更新说明后点击“正式发布”').waitFor();
+  await adminPage.getByText('更新服务返回的版本信息不完整，请刷新管理页面后重试').waitFor();
+  assert.equal(await adminPage.locator('#updateMessage').textContent().then((text) => text.includes('Cannot read properties')), false);
+  await adminPage.unroute('**/api/admin/updates/', malformed);
+  let releaseChunk;
+  let chunkWaiting;
+  const heldChunk = new Promise((resolve) => { chunkWaiting = resolve; });
+  const hold = async (route) => {
+    chunkWaiting();
+    await new Promise((resolve) => { releaseChunk = resolve; });
+    await route.abort().catch(() => {});
+  };
+  await adminPage.route('**/api/admin/updates/*/file?offset=4194304', hold);
+  await adminPage.getByRole('button', { name: '上传并保存草稿' }).click();
+  await heldChunk;
+  await adminPage.getByRole('button', { name: '暂停上传', exact: true }).click();
+  releaseChunk();
+  await adminPage.getByText('上传已暂停，重新选择相同文件可继续上传').waitFor();
+  await adminPage.unroute('**/api/admin/updates/*/file?offset=4194304', hold);
+  await adminPage.getByRole('button', { name: '继续上传', exact: true }).waitFor();
+  assert.equal(await adminPage.getByRole('button', { name: '正式发布', exact: true }).count(), 0);
+  await adminPage.getByRole('button', { name: '上传并保存草稿' }).click();
+  await adminPage.getByText('安装包校验通过，已保存草稿。请在下方版本记录中点击“正式发布”').waitFor();
+  assert.equal(redirectedCollectionRequests, 0, 'A POST may not be redirected into a GET');
+  assert.equal(await adminPage.locator('#updateVersionCount').textContent(), '1');
+  const record = adminPage.locator('#updateVersions tbody tr').first();
+  const draftDownload = adminPage.waitForEvent('download');
+  await record.getByRole('button', { name: '下载安装包', exact: true }).click();
+  assert.equal((await draftDownload).suggestedFilename(), 'chaodekuai-1.4.53-setup.exe');
   const latest = () => fetch(`http://127.0.0.1:${adminListener.address().port}/updates/chaodekuai/latest.json`).then((r) => r.json());
   assert.equal((await latest()).release, null);
   adminPage.on('dialog', (dialog) => dialog.accept());
   await adminPage.getByRole('button', { name: '正式发布', exact: true }).click();
-  await adminPage.getByText('已保存软件更新', { exact: true }).waitFor();
+  await adminPage.getByText('版本已正式发布，客户现在可以检查更新', { exact: true }).waitFor();
   assert.match((await latest()).release.title, /在线更新/);
-  await adminPage.screenshot({ path: '.data/update-qa/admin.png' });
+  await adminPage.evaluate(() => window.scrollTo(0, 0));
+  await adminPage.screenshot({ path: '.data/update-qa/admin.png', fullPage: true });
+  await record.getByRole('button', { name: '编辑说明', exact: true }).click();
   await adminPage.getByLabel('本次更新说明').fill('更新说明已修改');
   await adminPage.getByRole('button', { name: '保存说明', exact: true }).click();
   await adminPage.waitForFunction(() => !document.getElementById('saveUpdateNotes').disabled);
   assert.equal((await latest()).release.notes, '更新说明已修改');
-  await adminPage.getByRole('button', { name: '撤回版本', exact: true }).click();
-  await adminPage.waitForFunction(() => !document.getElementById('withdrawUpdate').disabled);
+  await record.getByRole('button', { name: '停止分发', exact: true }).click();
+  await adminPage.getByText('版本已停止分发', { exact: true }).waitFor();
   assert.equal((await latest()).release, null);
+  await adminPage.setViewportSize({ width: 390, height: 844 });
+  await adminPage.locator('#cancelUpdateEdit').click();
+  await adminPage.evaluate(() => window.scrollTo(0, 0));
+  await adminPage.screenshot({ path: '.data/update-qa/admin-mobile.png', fullPage: true });
+  assert.equal(await adminPage.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   assert.deepEqual(errors, []);
   console.log('Client check/download/pause and real 5 MB chunk upload, draft, publish, edit, withdrawal UI passed without page errors.');
 } finally {
