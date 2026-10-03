@@ -80,6 +80,30 @@ test('publish progress timeout reports the stalled stage', async (t) => {
   assert.equal(timedOutStage, 'uploading main images');
 });
 
+test('a timed-out product receives cancellation and cannot restart progress after the next item begins', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let release;
+  let lateSubmission = false;
+  let operationSignal;
+  const stages = [];
+  const pending = runWithProgressTimeout(async (progress, signal) => {
+    operationSignal = signal;
+    await new Promise((resolve) => { release = resolve; });
+    progress('late stage');
+    if (signal.aborted) return;
+    lateSubmission = true;
+  }, { timeoutMs: 20, onProgress: (stage) => stages.push(stage) });
+  const rejected = assert.rejects(pending, { code: 'PUBLISH_STAGE_TIMEOUT' });
+  await Promise.resolve();
+  t.mock.timers.tick(20);
+  await rejected;
+  assert.equal(operationSignal.aborted, true);
+  release();
+  await Promise.resolve();
+  assert.equal(lateSubmission, false);
+  assert.deepEqual(stages, []);
+});
+
 test('does not classify ordinary product text containing captcha as a challenge', () => {
   assert.equal(isExplicitHumanVerificationSignal('Product description and captcha-compatible camera module'), false);
   assert.equal(isExplicitHumanVerificationSignal('Please drag the slider to verify'), true);
@@ -158,7 +182,7 @@ test('publish pause invokes the active page stop hook immediately', () => {
 
 test('browser automation errors are reduced to readable business messages', () => {
   const message = userFacingError(new Error("locator.click: Timeout 30000ms exceeded\n<div class=\"next-overlay-backdrop\"> intercepts pointer events\n--disable-sync\nPID 16152"));
-  assert.equal(message, '国际站有待处理的页面提示，已保留当前商品进度，请查看卖家页面后继续');
+  assert.equal(message, '国际站有待处理的页面提示，请查看卖家页面后重试该商品');
   assert.equal(userFacingError(new Error('locator.click: Timeout 5000ms exceeded waiting for button')), '国际站页面按钮未就绪或已发生变化，请重试该商品');
   const startup = userFacingError(new Error('--disable-sync\nPID 16152\ntaskkill failed'));
   assert.equal(startup, '浏览器操作失败，请重试');

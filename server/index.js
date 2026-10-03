@@ -964,10 +964,11 @@ async function runPublishJob(jobId) {
         // stage has made no progress for an extended period.
         const stageTimeoutMs = Math.max(60000, Number(process.env.KUA_YIPU_PUBLISH_STAGE_TIMEOUT_MS || 180000));
         const result = await runWithProgressTimeout(
-          (reportStage) => withVerificationContext({
+          (reportStage, signal) => withVerificationContext({
             onWaiting: reportStage,
-            shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status))
+            shouldStop: () => signal.aborted || ['pause_requested', 'paused', 'cancelled'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status))
           }, () => publisher.publishProduct(product, route.url, mode, route.category, jobId, reportStage, {
+            signal,
             sellerGroup: job.metadata?.sellerGroup || product.sellerGroup, listingMode: job.metadata?.listingMode,
             stockPolicy: job.metadata?.stockPolicy || 'preserve', defaultStock: job.metadata?.defaultStock,
             allowPolicyWarningPublish: settings.allowPolicyWarningPublish === true,
@@ -1013,10 +1014,11 @@ async function runPublishJob(jobId) {
         const environmentNotReady = publishEnvironmentBlockCode(error);
         const currentJobStatus = store.read((state) => state.jobs.find((item) => item.id === jobId)?.status);
         if (currentJobStatus === 'cancelled') return;
-        const pauseRequested = ['pause_requested', 'paused'].includes(currentJobStatus) || ['PUBLISH_PAUSED', 'COLLECT_PAUSED'].includes(error.code);
-        // Preserve the background session and its validation state. A paused
-        // operation must not open a browser window or lose completed work.
-        if (!pauseRequested && !requiresHuman && !environmentNotReady) store.update((draft) => {
+        // Only a task-control request may pause a running batch. Browser and
+        // verification helpers also use *_PAUSED when their page disappears;
+        // those errors must not strand every remaining product.
+        const pauseRequested = ['pause_requested', 'paused'].includes(currentJobStatus);
+        if (!pauseRequested) store.update((draft) => {
           const target = draft.products.find((item) => item.id === product.id);
           if (target) {
             const result = { status: 'failed', message, code: error.code || '',
@@ -1069,20 +1071,10 @@ async function runPublishJob(jobId) {
           store.patchJob(jobId, { status: 'paused', progress: index, total, message: `已立即暂停，当前商品未继续操作，已完成 ${index}/${total} 件` });
           return;
         }
-        if (requiresHuman || environmentNotReady) {
-          const pageSnapshotAvailable = await publisher.capturePublishPage(jobId, product.id);
-          store.patchJob(jobId, {
-            status: 'paused', progress: index, total,
-            pageSnapshotAvailable,
-            diagnostics: { ...(error.diagnostics || {}), stage: environmentNotReady || error.code },
-            message: `已暂停：${product.title} - ${message}。${pageSnapshotAvailable ? '可点击“查看暂停画面”核对。' : ''}处理后可继续`
-          });
-          return;
-        }
         // A product-level validation or upload error must not discard the
         // remaining batch. Keep the failed item visible and continue with the
         // next product; the final job status summarizes the failures.
-        store.update((draft) => recordPublishOutcome(draft, jobId, product.id, { status: 'failed', message }, index + 1));
+        store.update((draft) => recordPublishOutcome(draft, jobId, product.id, { status: 'failed', message, code: error.code || environmentNotReady || '' }, index + 1));
         store.patchJob(jobId, {
           status: 'running', progress: index + 1, total,
           message: `第 ${index + 1}/${total} 件失败，继续处理下一件：${product.title}`

@@ -99,3 +99,23 @@ test('connection failures are actionable browser errors and cannot enter the pro
   await assert.rejects(publisher.currentSellerPage(), (error) => error.code === 'PUBLISH_BROWSER_NOT_READY'
     && error.message.includes('Browser connection lost'));
 });
+
+test('a stage cancellation aborts the pending browser connection before the next product starts', async () => {
+  const previous = globalThis.__KUA_YIPU_SELLER_BRIDGE;
+  let finishSync;
+  globalThis.__KUA_YIPU_SELLER_BRIDGE = { sync: () => new Promise((resolve) => { finishSync = resolve; }) };
+  const publisher = new SellerPublisher('unused-fixture');
+  const controller = new AbortController();
+  try {
+    const pending = publisher.publishPreparedProduct({}, 'https://post.alibaba.com/product/publish.htm?catId=201346401',
+      'draft', '', 'timed-out-connection', () => {}, { signal: controller.signal });
+    const rejected = assert.rejects(pending, { code: 'PUBLISH_PAUSED' });
+    await new Promise((resolve) => setImmediate(resolve));
+    controller.abort();
+    await rejected;
+    finishSync();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(publisher.context, null);
+    assert.equal(publisher.page, null);
+  } finally { globalThis.__KUA_YIPU_SELLER_BRIDGE = previous; }
+});

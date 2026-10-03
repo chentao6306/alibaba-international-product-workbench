@@ -4,23 +4,25 @@ export function runWithProgressTimeout(run, options = {}) {
   let settled = false;
   let stage = String(options.initialStage || '准备处理');
   let rejectTimeout;
+  const controller = new AbortController();
 
   const arm = () => {
     clearTimeout(timer);
     timer = setTimeout(() => {
       if (settled) return;
-      options.onTimeout?.(stage);
       const duration = timeoutMs < 60000
         ? `${Math.ceil(timeoutMs / 1000)} 秒`
         : `${Math.ceil(timeoutMs / 60000)} 分钟`;
       const error = new Error(`${stage}连续 ${duration} 没有进展，已停止当前商品；可稍后单独重试`);
       error.code = 'PUBLISH_STAGE_TIMEOUT';
       error.stage = stage;
+      controller.abort(error);
+      try { options.onTimeout?.(stage); } catch {}
       rejectTimeout(error);
     }, timeoutMs);
   };
   const progress = (nextStage) => {
-    if (settled) return;
+    if (settled || controller.signal.aborted) return;
     stage = String(nextStage || stage);
     options.onProgress?.(stage);
     arm();
@@ -29,7 +31,7 @@ export function runWithProgressTimeout(run, options = {}) {
     rejectTimeout = reject;
     arm();
   });
-  const operation = Promise.resolve().then(() => run(progress));
+  const operation = Promise.resolve().then(() => run(progress, controller.signal));
   operation.catch(() => {});
   return Promise.race([operation, timeout]).finally(() => {
     settled = true;

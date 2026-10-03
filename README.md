@@ -1,6 +1,6 @@
 # 抄得快 · 阿里巴巴国际站商品工作台
 
-当前版本：**1.4.54**，更新日期：**2026-10-03**。最新完整源码以默认 **main** 分支为准。
+当前版本：**1.4.55**，更新日期：**2026-10-03**。最新完整源码以默认 **main** 分支为准。
 
 ## 常用命令速查
 
@@ -20,8 +20,8 @@ npm run prepare:chromium
 | 启动浏览器版 | `npm start` | 先构建前端，打开 `http://127.0.0.1:8787` |
 | 运行全部测试 | `npm test` | 部分用例会启动内置 Chromium |
 | 减少测试并发 | `npm test -- --test-concurrency=2` | 减少浏览器同时运行数量 |
-| 生成安装版 EXE | `npm run dist:win:installer` | `release-installer/chaodekuai-1.4.54-setup.exe` |
-| 生成便携版 EXE | `npm run dist:win:portable` | `release/chaodekuai-1.4.54-win-x64.exe` |
+| 生成安装版 EXE | `npm run dist:win:installer` | `release-installer/chaodekuai-1.4.55-setup.exe` |
+| 生成便携版 EXE | `npm run dist:win:portable` | `release/chaodekuai-1.4.55-win-x64.exe` |
 
 最常用：改代码用 `npm run dev`；测试桌面端先 `npm run build` 再 `npm run desktop`；给客户打包用 `npm run dist:win:installer`。
 
@@ -47,9 +47,11 @@ npm run prepare:chromium
 - 修复必填/选填缺失属性首次输入后失焦问题，支持已知下拉、多选项。已验证编辑保存后发布填写新值，并取消旧多选值、清除旧选项 ID。
 - 包含此前授权码重置、多端登录、临时断线保持、后台任务线程、产品链接与浏览器窗口处理修复。
 
-已有商品无需删除或重新采集，修改保存后再重试发布。本次登录修复见 [1.4.54 验证记录](docs/verification-1.4.54.md)，在线更新验证见 [1.4.53 验证记录](docs/verification-1.4.53.md)；历史功能见 [1.4.52 验证记录](docs/verification-1.4.52.md)。
+1.4.55 修复主图仅部分接收后直接停止的问题：最多尝试三次，保留已接收图片，只补传缺失部分并复核顺序。运行中的批量上架遇到单件图片、控件、类目、表单或登录错误，记录该件失败后继续下一件，不再自动暂停整批。提交结果不明确时标记“待核对”，本轮不重复提交；用户手动暂停继续保留位置。验证码仍由用户完成，软件授权失效及程序退出/重启的保护机制保留。详见 [1.4.55 验证记录](docs/verification-1.4.55.md)。
 
-采集列表中途暂停后，点击“采集已发现的 N 件商品”即可停止继续翻页、转为读取这些商品的详情；点击原来的继续按钮则接着翻页。详情采集仍支持断点继续。上架时遇到登录失效或发布表单反复加载不完整，任务暂停并保留当前商品；重新登录或处理页面问题后点击继续。国际站明确提示类目不存在或失效时，暂停并保留进度，需选择有效类目后继续。上架只使用已保存资料，不再自动访问来源商品页；需要更新来源资料时，在商品工作台主动重新采集。
+已有商品无需删除或重新采集，修改保存后再重试发布。登录修复见 [1.4.54 验证记录](docs/verification-1.4.54.md)，在线更新验证见 [1.4.53 验证记录](docs/verification-1.4.53.md)；历史功能见 [1.4.52 验证记录](docs/verification-1.4.52.md)。
+
+采集列表中途暂停后，点击“采集已发现的 N 件商品”即可停止继续翻页、转为读取这些商品的详情；点击原来的继续按钮则接着翻页。详情采集仍支持断点继续。上架时类目失效、控件重试失败等错误会显示在对应商品上，剩余商品继续处理；结束后可修正失败商品再重试。上架只使用已保存资料，不再自动访问来源商品页；需要更新来源资料时，在商品工作台主动重新采集。
 
 Windows 桌面客户端，提供国际站、1688、速卖通商品采集、资料编辑、引用成功商品、批量保存草稿与提交上架。授权管理后台部署在 Linux 服务器。下载、开发和构建均使用 `main` 分支。
 
@@ -57,7 +59,7 @@ Windows 桌面客户端，提供国际站、1688、速卖通商品采集、资�
 
 ## 源码与备份范围
 
-- [当前 1.4.54 完整源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/main)
+- [当前 1.4.55 完整源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/main)
 - [1.4.52 修复和验证记录](docs/verification-1.4.52.md)
 - [备份范围、解密和恢复说明](docs/stable-backup.md)
 
@@ -138,17 +140,17 @@ npm run desktop
 
 ## 生成 Windows EXE
 
-首次先完成 `npm ci` 和 Chromium 下载。确认 `package.json` 与锁文件版本均为 `1.4.54`，然后执行：
+首次先完成 `npm ci` 和 Chromium 下载。确认 `package.json` 与锁文件版本均为 `1.4.55`，然后执行：
 
 ```powershell
 npm test -- --test-concurrency=2
 npm run dist:win:installer
 ```
 
-输出：`release-installer/chaodekuai-1.4.54-setup.exe`。脚本依次构建前端、准备 Chromium，再执行 Electron Builder NSIS x64 打包。安装包支持选择安装目录、桌面和开始菜单快捷方式。
+输出：`release-installer/chaodekuai-1.4.55-setup.exe`。脚本依次构建前端、准备 Chromium，再执行 Electron Builder NSIS x64 打包。安装包支持选择安装目录、桌面和开始菜单快捷方式。
 
 ```powershell
-npm run dist:win:portable   # release/chaodekuai-1.4.54-win-x64.exe
+npm run dist:win:portable   # release/chaodekuai-1.4.55-win-x64.exe
 npm run dist:win            # 按 package.json 构建 Windows 目标
 ```
 
@@ -164,7 +166,7 @@ npx --no-install electron-builder --win nsis --x64 `
   --publish never
 ```
 
-便携版仍会在 Windows 用户目录保存商品、任务和登录资料。下次版本升级可用 `npm version 1.4.55 --no-git-tag-version` 同步清单与锁文件，再测试打包；此命令只是升级示例，不是运行当前版本的必要步骤。
+便携版仍会在 Windows 用户目录保存商品、任务和登录资料。下次版本升级可用 `npm version 1.4.56 --no-git-tag-version` 同步清单与锁文件，再测试打包；此命令只是升级示例，不是运行当前版本的必要步骤。
 
 `beforePack` 运行 `tools/prepare-package.mjs`，从 `server/` 和 `electron/` 生成 `.packaged/`。不要手工修改生成目录或用旧输出代替缺失源码。程序必须包含 `resources/chromium/chrome.exe`。
 
@@ -173,8 +175,8 @@ npx --no-install electron-builder --win nsis --x64 `
 ```powershell
 node tools/desktop-package-qa.mjs release-installer
 npx --no-install electron tools/verification-window-qa.mjs .packaged/electron/human-verification.js
-Get-Item .\release-installer\chaodekuai-1.4.54-setup.exe
-Get-FileHash .\release-installer\chaodekuai-1.4.54-setup.exe -Algorithm SHA256
+Get-Item .\release-installer\chaodekuai-1.4.55-setup.exe
+Get-FileHash .\release-installer\chaodekuai-1.4.55-setup.exe -Algorithm SHA256
 ```
 
 包检查核对版本、打包源码、浏览器、安全开关、登录窗口和未登录 API 鉴权，使用隔离用户目录。当前 EXE 未配置 Authenticode 签名；有证书后按 Electron Builder 签名配置构建。软件在线更新使用本项目的签名与授权后台分发服务；不要把 Electron Builder 的 `publish` 占位地址当作线上更新源。正式打包请运行 `npm run dist:win:installer`，以生成完整的外层安装包和配套更新签名。
@@ -196,7 +198,7 @@ sudo systemctl restart kua-yipu-auth
 
 正式客户端授权入口由 `server/auth-endpoint.js` 固定。源码桌面可用 `KUA_YIPU_AUTH_URL` 指向本机开发后台；**正式打包客户端忽略此环境变量**。迁移生产地址需要修改该模块默认地址、配置对应有效证书并重新打包。仅设置打包终端环境变量不能改变正式入口。
 
-授权服务 `/health` 中的版本为 `1.4.53`，是独立服务标识；当前桌面版本为 `1.4.54`。后台可配置 1/3/15 天等断线保持时间，不延长付费授权到期日，在线停用仍立即生效。2026-10-03 的后台菜单、版本记录和上传修复已部署，客户端版本号保持不变。
+授权服务 `/health` 中的版本为 `1.4.53`，是独立服务标识；当前桌面版本为 `1.4.55`。后台可配置 1/3/15 天等断线保持时间，不延长付费授权到期日，在线停用仍立即生效。2026-10-03 的后台菜单、版本记录和上传修复已部署，1.4.55 的上架修复需要更新客户端，不需要再次部署授权服务。
 
 ## 项目原理
 

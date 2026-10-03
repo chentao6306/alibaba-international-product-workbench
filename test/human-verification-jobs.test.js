@@ -70,6 +70,7 @@ test('verification waits retain collection checkpoints and pausing a publish cha
     for (const id of [publish.id, collect.id]) assert.equal(waiting.jobs.find((job) => job.id === id).status, 'running');
     assert.equal(waiting.jobs.find((job) => job.id === collect.id).progress, 1);
     assert.ok(waiting.products.some((product) => product.sourceId === 'collected'));
+    await api(`/api/jobs/${publish.id}/pause`, {});
     cancelWindow = true;
     const paused = await until((state) => state.jobs.find((job) => job.id === publish.id).status === 'paused');
     assert.equal(paused.products.find((p) => p.id === '1').status, 'drafted');

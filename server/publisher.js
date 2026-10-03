@@ -5055,11 +5055,11 @@ export class SellerPublisher {
         return result;
       }
       catch (error) {
-        if (['IMAGE_UPLOAD_TIMEOUT', 'MAIN_IMAGE_CONTROL_NOT_READY'].includes(error.code) || isBrowserInteractionError(error)) {
+        if (['IMAGE_UPLOAD_TIMEOUT', 'MAIN_IMAGE_CONTROL_NOT_READY', 'MAIN_IMAGE_UPLOAD_PENDING'].includes(error.code) || isBrowserInteractionError(error)) {
           // A form rerender can hide/remove the portal after its input was
           // located. Resolve the current slot again; the next batch retains
           // accepted server records and waits for in-flight uploads.
-          if (attempt === 2 || page.isClosed()) throw mainImageControlPending(error);
+          if (attempt === 2 || page.isClosed()) throw error.code === 'MAIN_IMAGE_UPLOAD_PENDING' ? error : mainImageControlPending(error);
           await requireClearPostingOverlays(page);
           await page.waitForTimeout(300 * (attempt + 1));
           continue;
@@ -5359,8 +5359,8 @@ export class SellerPublisher {
     throw new Error('国际站主图视频上传超过 120 秒仍未完成');
   }
 
-  async waitForMainImageUploads(page, expectedCount, initialSlotCount = 6) {
-    const uploadDeadline = Date.now() + 60000;
+  async waitForMainImageUploads(page, expectedCount, initialSlotCount = 6, { timeoutMs = 60000 } = {}) {
+    const uploadDeadline = Date.now() + timeoutMs;
     while (Date.now() < uploadDeadline) {
       // Count one canonical marker per empty slot. The icon and photobank
       // trigger are children of that same slot; counting all three inflated a
@@ -6176,6 +6176,7 @@ export class SellerPublisher {
     this.publishPageSnapshot = null;
     let lastStage = '';
     const reportStage = (stage) => {
+      if (options.signal?.aborted) throw options.signal.reason;
       if (stage !== '正在恢复当前页面操作') lastStage = stage;
       try { onStage(stage); } catch {}
     };
@@ -6207,7 +6208,7 @@ export class SellerPublisher {
         } catch (error) {
           // These typed errors only originate while preparing the form, before
           // any save/submit. Never replay a submission with an unknown receipt.
-          if (attempt || error.code !== 'PUBLISH_FORM_NOT_READY') throw error;
+          if (options.signal?.aborted || attempt || error.code !== 'PUBLISH_FORM_NOT_READY') throw error;
           reportStage('发布页加载不完整，重新加载后重试一次');
         }
       }
@@ -6225,10 +6226,13 @@ export class SellerPublisher {
     const connection = new AbortController();
     const stopKey = String(jobId || '');
     let page;
-    if (stopKey) this.publishStops.set(stopKey, () => {
+    const stop = () => {
       connection.abort();
       page?.close().catch(() => {});
-    });
+    };
+    if (stopKey) this.publishStops.set(stopKey, stop);
+    options.signal?.addEventListener('abort', stop, { once: true });
+    if (options.signal?.aborted) stop();
     reportStage(resources.constrained ? '连接国际站发布浏览器（已自动降低图片处理并发，延长页面等待）' : '连接国际站发布浏览器');
     page = await this.currentSellerPage(publishPageUrl, { skipNavigation: true, backgroundPublishing: true, signal: connection.signal, onProgress: reportStage });
     this.publishingPage = { page, jobId: String(jobId || ''), productId: String(product.id || '') };
