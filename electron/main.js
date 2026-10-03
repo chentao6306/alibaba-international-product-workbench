@@ -5,7 +5,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { AuthorizationLease, isRetryableAuthorizationError } from './auth-lease.js';
-import { matchesAlibabaSession } from './alibaba-identity.js';
+import { matchesAlibabaSession, checkAlibabaLoginAccount } from './alibaba-identity.js';
+import { loginWithAlibaba, rememberedLoginCredentials } from './alibaba-login.js';
 import { readPrivateSession, writePrivateSession } from '../server/private-session-storage.js';
 import { authorizationEndpoint } from '../server/auth-endpoint.js';
 import { showHumanVerification } from './human-verification.js';
@@ -57,6 +58,7 @@ let hasSingleInstanceLock = false;
 let updater;
 let updaterError = '';
 let installingUpdate = false;
+let loginAttemptInProgress = false;
 
 function alibabaCookiesFile() {
   return path.join(app.getPath('userData'), 'alibaba-cookies.json');
@@ -490,6 +492,13 @@ async function inspectAndHideAlibabaSellerWindow() {
 
 async function enterSystem() {
   if (!currentSession?.verified || !authorizationLease.valid()) throw new Error('请连接网络并重新验证授权');
+  const account = currentSession.username;
+  const cookies = await session.fromPartition(`persist:kua-yipu-${account}`).cookies.get({ domain: 'alibaba.com' });
+  if (!currentSession?.verified || currentSession.username !== account
+    || !matchesAlibabaSession(cookies, account, 'https://www.alibaba.com/')) {
+    revokeLocalSession();
+    throw new Error('Alibaba 实际登录账号与软件授权不一致或已退出，请重新登录');
+  }
   // Switch windows immediately. Server startup, cookie export, and renderer
   // loading are supervised in the background so the Alibaba page can never be
   // held in an endless "正在进入" state.
@@ -619,32 +628,36 @@ handleLocalIpc('update:install', async (event) => {
 handleLocalIpc('credentials:clear', () => { clearCredentials(); return true; });
 handleLocalIpc('activation:status', (_event, username) => Boolean(activationCredentials(String(username || '').trim())));
 handleLocalIpc('auth:login', async (_event, payload) => {
-  const username = String(payload?.username || '').trim();
-  const password = String(payload?.password || '');
-  if (!username || !password) throw new Error('请输入 Alibaba 国际站账号和密码');
-  const suppliedCode = String(payload?.activationCode || '').trim();
-  if (suppliedCode && !/^CDK-[A-Za-z0-9_-]{43}$/.test(suppliedCode)) throw new Error('软件授权码格式不正确，请填写管理员提供的完整授权码');
-  const activationCode = suppliedCode || activationCredentials(username);
-  const deviceFile = path.join(app.getPath('userData'), 'device-id');
-  let installationId = fs.existsSync(deviceFile) ? fs.readFileSync(deviceFile, 'utf8').trim() : '';
-  if (!/^[a-f0-9-]{36}$/i.test(installationId)) { installationId = crypto.randomUUID(); fs.writeFileSync(deviceFile, installationId); }
-  const deviceId = crypto.createHash('sha256').update(`${installationId}|${os.hostname()}|${username}`).digest('hex');
-  const authorization = await authRequest('/api/client/login', { username, deviceId, activationCode, connectionPolicyVersion: 2, appVersion: app.getVersion(), deviceName: `${os.hostname()} (${process.platform}-${process.arch})` });
-  if (!authorization.authorized || !authorization.token) throw new Error('登录失败');
-  if (suppliedCode) activationCredentials(username, suppliedCode);
-  currentSession = { ...authorization, username, deviceId, checkedAt: Date.now() };
-  authorizationConnection = { state: 'connected', message: '' };
-  authorizationWorkPaused = false;
+  if (loginAttemptInProgress) throw new Error('正在验证登录，请完成当前登录或关闭阿里登录窗口后重试');
+  loginAttemptInProgress = true;
   try {
-    await startAlibabaLogin(username, password);
-    process.env.KUA_YIPU_ACCOUNT = username;
-    if (payload.remember) saveCredentials({ username, password }); else clearCredentials();
-    return { username, expiresAt: currentSession?.expiresAt };
-  } catch (error) {
-    currentSession = null;
-    authorizationLease.clear();
-    throw error;
-  }
+    const username = String(payload?.username || '').trim();
+    const password = String(payload?.password || '');
+    if (!username || !password) throw new Error('请输入 Alibaba 国际站账号和密码');
+    const suppliedCode = String(payload?.activationCode || '').trim();
+    if (suppliedCode && !/^CDK-[A-Za-z0-9_-]{43}$/.test(suppliedCode)) throw new Error('软件授权码格式不正确，请填写管理员提供的完整授权码');
+    const activationCode = suppliedCode || activationCredentials(username);
+    const deviceFile = path.join(app.getPath('userData'), 'device-id');
+    let installationId = fs.existsSync(deviceFile) ? fs.readFileSync(deviceFile, 'utf8').trim() : '';
+    if (!/^[a-f0-9-]{36}$/i.test(installationId)) { installationId = crypto.randomUUID(); fs.writeFileSync(deviceFile, installationId); }
+    const deviceId = crypto.createHash('sha256').update(`${installationId}|${os.hostname()}|${username}`).digest('hex');
+    const authorization = await authRequest('/api/client/login', { username, deviceId, activationCode, connectionPolicyVersion: 2, appVersion: app.getVersion(), deviceName: `${os.hostname()} (${process.platform}-${process.arch})` });
+    if (!authorization.authorized || !authorization.token) throw new Error('登录失败');
+    if (suppliedCode) activationCredentials(username, suppliedCode);
+    currentSession = { ...authorization, username, deviceId, checkedAt: Date.now() };
+    authorizationConnection = { state: 'connected', message: '' };
+    authorizationWorkPaused = false;
+    try {
+      const result = await startAlibabaLogin(username, password);
+      process.env.KUA_YIPU_ACCOUNT = username;
+      if (payload.remember) saveCredentials(rememberedLoginCredentials(username, password, result)); else clearCredentials();
+      return { username, expiresAt: currentSession?.expiresAt };
+    } catch (error) {
+      currentSession = null;
+      authorizationLease.clear();
+      throw error;
+    }
+  } finally { loginAttemptInProgress = false; }
 });
 handleLocalIpc('auth:session', () => currentSession?.verified && authorizationLease.valid() ? { username: currentSession.username, expiresAt: currentSession.expiresAt } : null);
 
@@ -713,214 +726,29 @@ async function startAlibabaLogin(username, password) {
   const login = new BrowserWindow({ width: 1280, height: 900, title: 'Alibaba.com 登录', webPreferences: { contextIsolation: true, nodeIntegration: false, partition: `persist:kua-yipu-${username}` } });
   registerAlibabaWindow(login);
   alibabaWindow = login;
-  let settled = false;
-  let loginSucceeded = false;
-  let submitAttempted = false;
-  let timer;
-  let timeout;
-  const hasMatchingSession = async () => matchesAlibabaSession(await login.webContents.session.cookies.get({ domain: 'alibaba.com' }), username, login.webContents.getURL());
-  const setLoginField = (selectors, value) => login.webContents.executeJavaScript(`(() => {
-    const selectors = ${JSON.stringify(selectors)};
-    const node = selectors.map((selector) => document.querySelector(selector)).find(Boolean);
-    if (!node) return false;
-    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-    setter?.call(node, ${JSON.stringify(value)});
-    node.dispatchEvent(new Event('input', { bubbles: true }));
-    node.dispatchEvent(new Event('change', { bubbles: true }));
-    return true;
-  })()`, true).catch(() => false);
-
-  const fillLogin = async () => {
-    if (!isWindowAlive(login)) return Promise.resolve(false);
-    // Fill one field at a time. Alibaba's risk control treats an immediate
-    // bulk injection on first paint as automated login activity.
-    const account = await setLoginField(['input[name="account"]','input[name="loginId"]','input[type="text"]','input[type="email"]'], username);
-    await new Promise((resolve) => setTimeout(resolve, 900));
-    const secret = await setLoginField(['input[name="password"]','input[type="password"]'], password);
-    await new Promise((resolve) => setTimeout(resolve, 1200));
-    return account && secret;
-  };
-
-  const pageLooksRendered = async () => login.webContents.executeJavaScript(`(() => {
-    const body = document.body;
-    const text = String(body?.innerText || '').replace(/\\s+/g, ' ').trim();
-    const childCount = body?.children?.length || 0;
-    // Alibaba occasionally responds with a JavaScript bundle as a text page
-    // during a redirect. It has the right title/URL but is not a usable page.
-    const rawScript = /(?:function\\s*\\(|var\\s+[A-Za-z_$]|\\.grecaptcha-badge\\s*\\{)/.test(text.slice(0, 1200))
-      && childCount < 3;
-    return Boolean(body && !rawScript && childCount >= 3 && text.length > 20);
-  })()`, true).catch(() => false);
-
-  return new Promise(async (resolve, reject) => {
-    const cleanup = () => {
-      if (timer) clearInterval(timer);
-      if (timeout) clearTimeout(timeout);
-      if (isWindowAlive(login)) login.webContents.removeListener('did-finish-load', onFinishLoad);
-      login.removeListener('closed', onClosed);
-    };
-    const closeQuietly = () => { if (isWindowAlive(login)) login.close(); };
-    const settle = (error, value) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (error) { closeQuietly(); reject(error); } else resolve(value);
-    };
-    const isEnterUrl = (value) => {
-      try {
-        const parsed = new URL(String(value || ''));
-        return parsed.protocol.toLowerCase() === 'kua-yipu:' && parsed.hostname.toLowerCase() === 'enter';
-      } catch {
-        return /^kua-yipu:\/\/enter(?:[/?#]|$)/i.test(String(value || ''));
-      }
-    };
-    const showEntryError = (error) => {
-      const message = String(error?.message || '进入工作台失败，请重试');
-      login.webContents.executeJavaScript(`(() => {
-        const bar = document.getElementById('__kua_yipu_entry_bar');
-        if (!bar) return false;
-        const status = bar.querySelector('[data-kua-yipu-status]');
-        const button = bar.querySelector('#__kua_yipu_enter');
-        if (status) { status.textContent = ${JSON.stringify(message)}; status.style.color = '#b13a31'; }
-        if (button) { button.disabled = false; button.textContent = '已登录，点击进入软件'; button.style.background = '#1677ff'; }
-        return true;
-      })()`, true).catch(() => {});
-    };
-    const requestEnter = async () => {
-      if (!loginSucceeded) {
-        const currentUrl = login.webContents.getURL();
-        if (!await hasMatchingSession()) { showEntryError(new Error('请先登录与软件授权一致的 Alibaba 账号')); return; }
-        try {
-          await checkAuthorization();
-          if (!currentSession) throw new Error('授权校验失败');
-          currentSession.verified = true;
-        } catch (error) { showEntryError(error); return; }
-        loginSucceeded = true;
-        await saveAlibabaSession(login);
-        settle(null, { url: currentUrl });
-      }
-      if (currentSession) {
-        try {
-          await enterSystemOnce();
-        } catch (error) {
-          showEntryError(error);
-        }
-      } else {
-        showEntryError(new Error('桌面登录会话尚未建立，请刷新页面后重试'));
-      }
-    };
-    const injectEntryBar = async () => {
-      if (!isWindowAlive(login)) return;
-      await login.webContents.executeJavaScript(`(() => {
-        if (document.getElementById('__kua_yipu_entry_bar')) return true;
-        const bar = document.createElement('div');
-        bar.id = '__kua_yipu_entry_bar';
-        bar.innerHTML = '<span data-kua-yipu-status>Alibaba 登录成功</span><button id="__kua_yipu_enter">已登录，点击进入软件</button><button id="__kua_yipu_refresh">刷新页面</button>';
-        Object.assign(bar.style, { position: 'fixed', left: '0', right: '0', bottom: '0', height: '64px', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '12px', padding: '0 24px', boxSizing: 'border-box', background: '#fff', borderTop: '1px solid #d9e0e5', boxShadow: '0 -2px 10px rgba(0,0,0,.12)', zIndex: '2147483647', fontFamily: 'Microsoft YaHei, sans-serif', fontSize: '15px', color: '#303840' });
-        const enter = bar.querySelector('#__kua_yipu_enter');
-        Object.assign(enter.style, { height: '40px', padding: '0 22px', border: '0', borderRadius: '4px', background: '#1677ff', color: '#fff', cursor: 'pointer', fontSize: '15px' });
-        const refresh = bar.querySelector('#__kua_yipu_refresh');
-        Object.assign(refresh.style, { height: '40px', padding: '0 22px', border: '1px solid #b9c2cc', borderRadius: '4px', background: '#fff', color: '#303840', cursor: 'pointer', fontSize: '15px' });
-        enter.addEventListener('click', (event) => {
-          event.preventDefault();
-          enter.disabled = true;
-          enter.textContent = '正在进入…';
-          enter.style.background = '#7aaef7';
-          try { window.open('kua-yipu://enter', '_blank'); } catch {}
-          // Some Chromium builds do not dispatch window.open for custom schemes.
-          // The navigation fallback reaches Electron's will-navigate handler.
-          setTimeout(() => { try { window.location.href = 'kua-yipu://enter/'; } catch {} }, 120);
-        });
-        refresh.addEventListener('click', () => location.reload());
-        document.body.appendChild(bar);
-        document.body.style.paddingBottom = '72px';
-        return true;
-      })()`, true).catch(() => false);
-    };
-    const onClosed = () => {
-      if (alibabaWindow === login) alibabaWindow = null;
-      if (!loginSucceeded) settle(new Error('登录失败'));
-    };
-    const onFinishLoad = async () => {
-      if (settled || !isWindowAlive(login)) return;
-      const currentUrl = login.webContents.getURL();
-      const isLoginPage = /login|passport/i.test(currentUrl);
-      if (!isLoginPage && !await pageLooksRendered()) {
-        // Alibaba often paints the shell in several asynchronous steps. Do
-        // not reload the page while it is settling: repeated reloads trigger
-        // risk control and were the reason users saw three refreshes before
-        // the entry bar appeared. The 500 ms inspector below will continue
-        // checking until the existing document becomes usable.
-        return;
-      }
-      // Do not show the success bar on the login form itself. It is only
-      // meaningful after Alibaba has left the login route.
-      if (isLoginPage) {
-        if (submitAttempted) return;
-        submitAttempted = true;
-        await fillLogin();
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        if (!settled && isWindowAlive(login)) {
-          await login.webContents.executeJavaScript(`document.querySelector('button[type="submit"],button[class*="submit"],input[type="submit"]')?.click()`).catch(() => {});
-        }
-        return;
-      }
-      await injectEntryBar();
-    };
-    login.once('closed', onClosed);
-    login.webContents.setWindowOpenHandler(({ url }) => {
-      if (isEnterUrl(url)) {
-        requestEnter().catch(showEntryError);
-        return { action: 'deny' };
-      }
-      try {
-        return { action: /^https?:$/i.test(new URL(url).protocol) ? 'allow' : 'deny' };
-      } catch {
-        return { action: 'deny' };
-      }
-    });
-    login.webContents.on('will-navigate', (event, url) => {
-      if (isEnterUrl(url)) {
-        event.preventDefault();
-        requestEnter().catch(showEntryError);
-      }
-    });
-    login.webContents.on('did-finish-load', onFinishLoad);
-    try {
-      await login.loadURL('https://login.alibaba.com/');
-    } catch (error) {
-      settle(new Error('登录失败'));
-      return;
-    }
-    const inspect = async () => {
-      if (settled || !isWindowAlive(login)) return;
-      const url = login.webContents.getURL();
-      const bodyText = await login.webContents.executeJavaScript('document.body?.innerText || ""').catch(() => '');
-      if (/captcha|滑块|请完成验证|人机验证|安全验证|向右滑动验证|verify you are human/i.test(bodyText)) {
-        if (isWindowAlive(login)) {
-          login.show();
-          login.maximize();
-          login.focus();
-        }
-        return;
-      }
-      if (/account name or password is incorrect|incorrect password|账号或密码错误|密码错误/i.test(bodyText)) {
-        settle(new Error('登录失败'));
-        return;
-      }
-      const hasLoginForm = await login.webContents.executeJavaScript(`Boolean(document.querySelector('input[type="password"], input[name="password"], input[name="loginId"], input[name="account"]'))`).catch(() => true);
-      if (!hasLoginForm && await hasMatchingSession() && await pageLooksRendered()) {
-        await checkAuthorization();
-        if (!currentSession) throw new Error('授权校验失败');
-        currentSession.verified = true;
-        loginSucceeded = true;
-        await injectEntryBar();
-        await saveAlibabaSession(login);
-        settle(null, { url });
-      }
-    };
-    timer = setInterval(() => { inspect().catch(() => settle(new Error('登录失败'))); }, 500);
-    timeout = setTimeout(() => settle(new Error('登录失败')), 600000);
+  const authorizedSession = currentSession;
+  login.once('closed', () => { if (alibabaWindow === login) alibabaWindow = null; });
+  return loginWithAlibaba(login, {
+    username, password,
+    matchesSession: async () => checkAlibabaLoginAccount(await login.webContents.session.cookies.get({ domain: 'alibaba.com' }), username, login.webContents.getURL()),
+    checkAuthorization: async () => {
+      await checkAuthorization();
+      if (!currentSession || currentSession.username !== authorizedSession.username) throw new Error('软件授权校验失败，请重新登录');
+    },
+    onVerified: () => {
+      if (!currentSession || currentSession.username !== username) throw new Error('软件授权已失效，请重新登录');
+      currentSession.verified = true;
+    },
+    saveSession: () => saveAlibabaSession(login),
+    enterSystem: async () => {
+      if (!currentSession?.verified || currentSession.username !== username) throw new Error('请使用与软件授权一致的账号重新登录');
+      await enterSystemOnce();
+    },
+    onStatus: (message) => { if (isWindowAlive(loginWindow)) loginWindow.webContents.send('auth:login-status', message); },
+    onCredentialsRejected: () => {
+      const saved = loadCredentials();
+      if (saved?.username === username) clearCredentials();
+    },
   });
 }
 
