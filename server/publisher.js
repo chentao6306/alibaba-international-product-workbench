@@ -2682,11 +2682,61 @@ export async function fillVariantSpecs(page, product) {
       await ensureSaleAttributeSelected(page, preferredImageId);
     }
   }
+  const normalizeSaleAttributeName = (value) => String(value || '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[＊*]/g, '')
+    .replace(/[()（）[\]{}<>:：]/g, ' ')
+    .replace(/[_/-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const saleAttributeAliasesFor = (name) => {
+    const normalized = normalizeSaleAttributeName(name);
+    if (/^(?:spec(?:ification)?s?|product specification|商品规格|规格|款式|style)$/.test(normalized)) {
+      return ['specification', 'specifications', 'product specification', '商品规格', '规格', '款式', 'style'];
+    }
+    if (/^(?:model(?: number)?|型号)$/.test(normalized)) {
+      // Some international-site categories expose the model dimension as
+      // the generic "规格" sale attribute. Prefer an exact model control,
+      // then use that controlled fallback when the category has no model row.
+      return ['model', 'model number', '型号', 'specification', '商品规格', '规格', '款式', 'style'];
+    }
+    if (/^(?:position|location|位置)$/.test(normalized)) return ['position', 'location', '位置'];
+    if (/^(?:颜色|colou?r|colour)$/.test(normalized)) return ['颜色', 'color', 'colour'];
+    return [String(name || '').trim()].filter(Boolean);
+  };
+  const availableSaleAttributes = await page.evaluate(() => {
+    const root = document.querySelector('#saleAttributesItems');
+    if (!root) return [];
+    const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
+    const controls = [...root.querySelectorAll('input[type="checkbox"], input[type="radio"], [role="checkbox"]')];
+    return controls.map((control) => {
+      const id = control.value || control.getAttribute('data-value') || control.getAttribute('data-id') || '';
+      const owner = control.closest('label')
+        || control.closest('.items, .option-wrap, [data-attribute-id], [data-property-id]')
+        || control.parentElement;
+      return {
+        id: String(id),
+        label: String(owner?.innerText || owner?.textContent || '').replace(/\s+/g, ' ').trim(),
+        visible: visible(control) && visible(owner)
+      };
+    }).filter((item) => item.id && item.visible);
+  }).catch(() => []);
   const candidateIdsFor = (group) => {
-    const normalized = String(group?.name || '').toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const normalized = normalizeSaleAttributeName(group?.name);
     const ids = [group?.id].filter(Boolean).map(String);
     if (/颜色|colou?r/i.test(normalized)) ids.push('191288010');
     if (/^(?:socket standard|socket type|plug type|connector type|connector)$/i.test(normalized)) ids.push('400050816');
+    const aliases = saleAttributeAliasesFor(group?.name).map(normalizeSaleAttributeName);
+    const labelMatches = availableSaleAttributes
+      .map((item) => ({ ...item, normalized: normalizeSaleAttributeName(item.label) }))
+      .filter((item) => aliases.some((alias) => item.normalized === alias || item.normalized.includes(alias)))
+      .sort((left, right) => {
+        const leftExact = aliases.includes(left.normalized) ? 0 : 1;
+        const rightExact = aliases.includes(right.normalized) ? 0 : 1;
+        return leftExact - rightExact;
+      });
+    ids.push(...labelMatches.map((item) => item.id));
     return [...new Set(ids)];
   };
   const targetIds = new Map();

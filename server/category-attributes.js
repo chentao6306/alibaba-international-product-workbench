@@ -298,7 +298,13 @@ export function sourceAttributeForField(product, field) {
     }
     const compatible = candidates.filter((item) => !field.id || !attributeId(item) || attributeId(item) === field.id);
     const exact = compatible.filter((item) => exactNames.has(attributeNameKey(item.name)));
-    const matched = exact.length ? exact : compatible.filter((item) => names.has(requiredAttributeKey(item.name)));
+    // The OE field is sometimes regenerated when the same category is shown
+    // in another language or on another seller account. Its canonical alias
+    // is stronger than that stale ID, so allow only OE to bridge the mismatch
+    // after the exact-ID pass has failed.
+    const allowsCrossIdAlias = names.has('OE代码');
+    const matched = exact.length ? exact : candidates.filter((item) => names.has(requiredAttributeKey(item.name))
+      && (allowsCrossIdAlias || !field.id || !attributeId(item) || attributeId(item) === field.id));
     if (matched.length) return consistentAttribute(matched, false, field);
   }
   return null;

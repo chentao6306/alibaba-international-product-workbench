@@ -287,6 +287,35 @@ test('preserves complete custom specification values when the input is replaced 
   }
 });
 
+test('maps a source specification to a differently identified target 规格 sale attribute', { skip: !findChromium() }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    page.setDefaultTimeout(1000);
+    await page.setContent(`
+      <div id="saleAttributesItems"><label>规格<input type="checkbox" value="987654" /></label></div>
+      <div id="struct-specification"><div id="p-987654" style="display:none"><label>规格</label><input role="colorCombobox" placeholder="请输入"><button role="btn-add">添加</button></div></div>
+      <script>
+        document.querySelector('#saleAttributesItems input').onclick = function () {
+          this.checked = true;
+          document.querySelector('#p-987654').style.display = 'block';
+        };
+        document.querySelector('#p-987654 button').onclick = () => {
+          const input = document.createElement('input');
+          input.setAttribute('role', 'colorCombobox');
+          input.placeholder = '请输入';
+          document.querySelector('#p-987654 button').before(input);
+        };
+      </script>
+    `);
+    const product = { variantGroups: [{ id: 'source-spec', name: 'Specification', options: ['Left', 'Right'] }] };
+    const result = await fillVariantSpecs(page, product);
+    assert.deepEqual(result.unmapped, []);
+    assert.equal(await page.locator('#saleAttributesItems input').isChecked(), true);
+    assert.deepEqual(await page.locator('#p-987654 input').evaluateAll((nodes) => nodes.map((node) => node.value).filter(Boolean)), ['Left', 'Right']);
+  } finally { await browser.close(); }
+});
+
 test('clears incomplete logistics without erasing unrelated fields whose labels mention shipping', { skip: !findChromium() }, async () => {
   const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
   try {

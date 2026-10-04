@@ -44,6 +44,7 @@ export const REQUIRED_ATTRIBUTE_ALIASES = [
   ['品牌名称', '品牌', 'brand name', 'brand'],
   ['适用品牌', 'compatible brand'],
   ['颜色', 'color', 'colour'],
+  ['OE代码', 'OE code', 'OE number', 'OE no', 'OE No.', 'OEM number', 'OEM no', 'OEM No.', 'original equipment number', 'OE/OEM number'],
   ['型号', 'model number', 'model'],
   ['省份', 'province'],
   ['私模', 'private mold'],

@@ -25,3 +25,17 @@ test('writes each OE code into its own limited text entry and replaces previousl
     await assert.rejects(requireCategoryAttributes(page, product), (error) => error.unmatchedSourceFields.includes('OE代码'));
   } finally { await browser.close(); }
 });
+
+test('maps an OE code source value when the target field uses a different attribute id', { timeout: 30000 }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    page.setDefaultTimeout(2000);
+    await page.setContent(`<div class="sell-catProp-item" id="p-456"><label class="label required">OE代码</label>
+      <div class="posting-field-multi-text"><input maxlength="12"></div></div>`);
+    const product = { attributes: [{ id: 'source-oe', name: 'OE Number', value: ['A4638200164'] }] };
+    await fillCategoryAttributes(page, product);
+    await requireCategoryAttributes(page, product);
+    assert.equal(await page.locator('#p-456 input').inputValue(), 'A4638200164');
+  } finally { await browser.close(); }
+});
