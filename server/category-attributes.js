@@ -244,14 +244,15 @@ export function readPostingAttributeSchema() {
     }
     const enabled = controls.filter((node) => !node.disabled && node.getClientRects().length);
     const committedControls = enabled.filter((node) => node.type !== 'search');
+    const customComboCommitted = row.getAttribute('data-kua-yipu-custom-committed') === 'true';
     const hasValue = committedControls.some((node) => ['checkbox', 'radio'].includes(node.type) ? node.checked
       : node.tagName === 'SELECT' ? [...node.selectedOptions].some((option) => option.value)
-        : (node.getAttribute('role') !== 'combobox' || node.readOnly) && Boolean(clean(node.value)))
+        : (node.getAttribute('role') !== 'combobox' || node.readOnly || customComboCommitted) && Boolean(clean(node.value)))
       || [...row.querySelectorAll('.next-select-values em, .next-tag-body, [class*="selected-value"]')].some((node) => clean(node.textContent));
     const values = committedControls.flatMap((node) => ['checkbox', 'radio'].includes(node.type)
       ? (node.checked ? [clean(node.closest('label')?.textContent || node.value)] : [])
       : node.tagName === 'SELECT' ? [...node.selectedOptions].filter((option) => option.value).map((option) => clean(option.textContent))
-        : (node.getAttribute('role') !== 'combobox' || node.readOnly) && clean(node.value) ? [clean(node.value)] : []);
+        : (node.getAttribute('role') !== 'combobox' || node.readOnly || customComboCommitted) && clean(node.value) ? [clean(node.value)] : []);
     values.push(...[...row.querySelectorAll('.next-select-values em, .next-tag-body, [class*="selected-value"]')].map((node) => clean(node.textContent)).filter(Boolean));
     const customValues = committedControls.filter((node) => ['INPUT', 'TEXTAREA'].includes(node.tagName) && !['checkbox', 'radio'].includes(node.type)
       && !node.readOnly && node.getAttribute('role') !== 'combobox').map((node) => clean(node.value)).filter(Boolean);

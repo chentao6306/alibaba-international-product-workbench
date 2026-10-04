@@ -2081,7 +2081,56 @@ async function fillOtherAttributeText(locator, value) {
   return (await input.inputValue().catch(() => '')).trim() === String(value).trim();
 }
 
-export async function fillChoice(page, locator, value, { valueIds = {}, minimumScore = 70, labels = {}, multiple, onValueCommitted = () => {} } = {}) {
+// OE codes are free-form values on some Alibaba category forms. Those forms
+// still expose an ARIA combobox, but do not provide a selectable option or a
+// maxcustomitems flag. Treat the editable control as a committed custom value
+// after firing the same input/change events a user action would fire.
+async function fillCustomComboboxValue(page, locator, value) {
+  const metadata = await locator.evaluate((node) => ({
+    tag: node.tagName,
+    readOnly: node.readOnly,
+    disabled: node.disabled,
+    role: node.getAttribute('role'),
+  })).catch(() => null);
+  if (!metadata || metadata.disabled || metadata.readOnly || !['INPUT', 'TEXTAREA'].includes(metadata.tag)
+    || (metadata.role !== 'combobox' && metadata.role !== null)) return null;
+  const values = attributeValueList(value, { multiple: true });
+  if (!values.length) return false;
+  const row = locator.locator('xpath=ancestor::*[@data-posting-attribute-row or starts-with(@id,"p-") or starts-with(@id,"struct-p-") or contains(concat(" ", normalize-space(@class), " "), " sell-catProp-item ")][1]');
+  const committedValues = () => row.evaluate((node) => {
+    const values = [...node.querySelectorAll('input, textarea, .next-tag-body, .next-select-values em, [class*="selected-value"]')]
+      .filter((item) => item.getClientRects().length)
+      .map((item) => String(item.value ?? item.textContent ?? '').replace(/\s+/g, ' ').trim())
+      .filter(Boolean);
+    return values;
+  }).catch(() => []);
+  for (const candidate of values) {
+    const current = await committedValues();
+    if (current.some((item) => attributeOptionMatchScore(candidate, item) >= 100)) continue;
+    await clickPostingControl(page, locator).catch(postingInteractionFailure);
+    await locator.fill(String(candidate), { timeout: 3000 });
+    await locator.press('Enter').catch(() => {});
+    await locator.press('Tab').catch(() => {});
+    await locator.evaluate((node) => {
+      node.dispatchEvent(new Event('input', { bubbles: true }));
+      node.dispatchEvent(new Event('change', { bubbles: true }));
+      node.blur();
+    }).catch(() => {});
+    const deadline = Date.now() + 2500;
+    let committed = false;
+    while (Date.now() < deadline) {
+      const actual = await committedValues();
+      committed = actual.some((item) => attributeOptionMatchScore(candidate, item) >= 100);
+      if (committed) break;
+      await page.waitForTimeout(100);
+    }
+    if (!committed) return false;
+  }
+  await row.evaluate((node) => node.setAttribute('data-kua-yipu-custom-committed', 'true')).catch(() => {});
+  return true;
+}
+
+export async function fillChoice(page, locator, value, { valueIds = {}, minimumScore = 70, labels = {}, multiple, allowCustomCombo = false, onValueCommitted = () => {} } = {}) {
   if (!locator || value == null || value === '') return false;
   if (!await locator.count().catch(() => 0)) return false;
   const expected = attributeTextValue(value);
@@ -2219,6 +2268,10 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
   const isCombo = await locator.getAttribute('role').catch(() => '') === 'combobox'
     || await locator.getAttribute('readonly').catch(() => null) !== null;
   if (isCombo) {
+    if (allowCustomCombo) {
+      const customResult = await fillCustomComboboxValue(page, locator, value);
+      if (customResult !== null) return customResult;
+    }
     const declaredMultiple = multiple ?? await locator.evaluate((node) => {
       const root = node.closest('.next-select') || node;
       const flag = node.getAttribute('aria-multiselectable') ?? root.getAttribute('aria-multiselectable');
@@ -3519,6 +3572,7 @@ export async function fillCategoryAttributes(page, product, onProgress = () => {
           : field.controlType === 'multiText' ? await fillRepeatableCategoryText(page, field, value)
           : await fillChoice(page, categoryFieldLocator(page, field), value, {
           ...choiceOptions,
+          allowCustomCombo: requiredAttributeKey(field.label) === 'OE代码',
           onValueCommitted: (id, label) => { choiceOptions.labels[id] = label; },
           minimumScore: ['Age', 'Age Range'].some((name) => requiredAttributeKey(field.label) === requiredAttributeKey(name)) ? 90 : 70,
         }).catch(postingInteractionFailure);

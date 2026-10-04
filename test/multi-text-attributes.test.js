@@ -39,3 +39,18 @@ test('maps an OE code source value when the target field uses a different attrib
     assert.equal(await page.locator('#p-456 input').inputValue(), 'A4638200164');
   } finally { await browser.close(); }
 });
+
+test('commits an OE code in an editable Alibaba combobox without a selectable option', { timeout: 30000 }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    page.setDefaultTimeout(2000);
+    await page.setContent(`<div class="sell-catProp-item" id="p-210194423"><label class="label required">OE代码</label>
+      <input role="combobox" placeholder="请输入OE代码">
+      </div>`);
+    const product = { attributes: [{ id: 'source-oe', name: 'OE No.', value: '1234567890' }] };
+    await fillCategoryAttributes(page, product);
+    await requireCategoryAttributes(page, product);
+    assert.equal(await page.locator('#p-210194423 input').inputValue(), '1234567890');
+  } finally { await browser.close(); }
+});

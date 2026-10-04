@@ -30,6 +30,7 @@ export const REQUIRED_ATTRIBUTE_ALIASES = [
   ['材质', 'material', '材料'],
   ['Logo印刷', 'logo printing', 'logo printing method'],
   ['适用型号', 'compatible model', 'model compatibility'],
+  ['适用车型', 'car model', 'vehicle model', 'compatible car model', 'fitment', 'fitment model', 'vehicle fitment'],
   ['类型', '种类', 'type', 'product type', '产品类型'],
   ['比例', 'scale'],
   ['保质期', 'shelf life'],
@@ -68,7 +69,11 @@ export const REQUIRED_ATTRIBUTE_ALIASES = [
   ['套装包含', '套装包括', 'package includes', 'package included', 'set includes'],
   ['组合产品数量', 'number of pieces', 'number of items in set', 'quantity of items in set'],
   ['场景', '适用场景', 'scene', 'scenes', 'applicable scene', 'occasion'],
-  ['用途', 'use', 'usage', 'application']
+  ['用途', 'use', 'usage', 'application', 'purpose'],
+  ['电压', 'voltage'],
+  ['新旧', 'condition', 'new or used', 'product condition'],
+  ['光通量', 'lumens', 'luminous flux'],
+  ['色温', 'color temperature', 'colour temperature']
 ];
 
 const normalize = (value) => String(value || '').normalize('NFKC').toLowerCase().replace(/^[*＊]\s*|\s*[:：]$/g, '').replace(/[\s_\-/]+/g, ' ').trim();
