@@ -19,14 +19,11 @@ import { parseCollectionUrl, sourcePlatform } from '../server/source-platform.js
 import { Updater } from './updater.js';
 import { launchInstaller } from './update-install.js';
 import { UPDATE_CONFIG } from './update-config.js';
+import { appWindowIcon, createAppWindow, initializeWindowBranding } from './window-branding.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
-const appIcon = path.join(rootDir, app.isPackaged ? 'dist' : 'public', 'brand.png');
-app.on('browser-window-created', (_event, window) => {
-  window.setIcon(appIcon);
-  window.setMenuBarVisibility(false);
-});
+initializeWindowBranding();
 app.on('web-contents-created', (_event, contents) => {
   if (app.isPackaged) contents.on('devtools-opened', () => contents.closeDevTools());
   contents.on('will-attach-webview', (event) => event.preventDefault());
@@ -224,7 +221,7 @@ function registerAlibabaWindow(window) {
 }
 
 function createLoginWindow() {
-  loginWindow = new BrowserWindow({ width: 520, height: 720, resizable: false, show: false, title: '抄得快登录', autoHideMenuBar: true, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false } });
+  loginWindow = createAppWindow({ width: 520, height: 720, resizable: false, show: false, title: '抄得快登录', autoHideMenuBar: true, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false } });
   loginWindow.once('ready-to-show', () => loginWindow?.show());
   const loginFile = path.join(__dirname, 'login.html');
   const loginUrl = pathToFileURL(loginFile).href;
@@ -329,7 +326,7 @@ function workbenchLoadingUrl() {
 }
 
 async function createMainWindow() {
-  mainWindow = new BrowserWindow({ width: 1440, height: 960, minWidth: 1100, minHeight: 720, title: '抄得快', autoHideMenuBar: true, show: false, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false } });
+  mainWindow = createAppWindow({ width: 1440, height: 960, minWidth: 1100, minHeight: 720, title: '抄得快', autoHideMenuBar: true, show: false, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false } });
   const window = mainWindow;
   window.webContents.session.webRequest.onBeforeSendHeaders({ urls: [`http://127.0.0.1:${localPort}/api/*`] }, (details, callback) => {
     if (details.webContentsId === window.webContents.id) details.requestHeaders['X-Kua-Yipu-Gate'] = localGate;
@@ -348,6 +345,7 @@ async function createMainWindow() {
     if (quitPromptOpen) return;
     quitPromptOpen = true;
     dialog.showMessageBox(window, {
+      icon: appWindowIcon(),
       type: 'question',
       title: '确认退出',
       message: '确认退出抄得快吗？',
@@ -382,7 +380,7 @@ async function ensureAlibabaSellerWindow({ navigate = true } = {}) {
   if (isWindowAlive(existing)) return existing;
   const username = currentSession?.username;
   if (!username) throw new Error('登录失败');
-  const seller = new BrowserWindow({
+  const seller = createAppWindow({
     width: 1440,
     height: 960,
     show: false,
@@ -442,7 +440,7 @@ async function handleAlibabaHumanVerification(url, options = {}) {
   const username = currentSession?.username;
   if (!username || !String(url || '')) return false;
   return showHumanVerification({
-    url, partition: `persist:kua-yipu-${username}`, icon: appIcon,
+    url, partition: `persist:kua-yipu-${username}`,
     shouldStop: () => shutdownStarted || !currentSession?.verified || options.shouldStop?.(),
     onWaiting: options.onWaiting,
     userAgent: options.userAgent,
@@ -606,6 +604,7 @@ handleLocalIpc('update:install', async (event) => {
   try {
     await updater.prepare();
     const answer = await dialog.showMessageBox(BrowserWindow.fromWebContents(event.sender), {
+      icon: appWindowIcon(),
       type: 'question', title: '安装抄得快更新', buttons: ['退出并安装', '暂不安装'], defaultId: 1, cancelId: 1,
       message: `安装 ${updater.state().release.version}？`,
       detail: '软件将退出，安装完成后自动打开。商品、图片、模板、授权和任务记录保留；未完成的任务需要您确认后继续。',
@@ -724,7 +723,7 @@ async function refreshAuthorization() {
 handleLocalIpc('auth:heartbeat', () => checkAuthorization());
 
 async function startAlibabaLogin(username, password) {
-  const login = new BrowserWindow({ width: 1280, height: 900, title: 'Alibaba.com 登录', webPreferences: { contextIsolation: true, nodeIntegration: false, partition: `persist:kua-yipu-${username}` } });
+  const login = createAppWindow({ width: 1280, height: 900, title: 'Alibaba.com 登录', webPreferences: { contextIsolation: true, nodeIntegration: false, partition: `persist:kua-yipu-${username}` } });
   registerAlibabaWindow(login);
   alibabaWindow = login;
   const authorizedSession = currentSession;

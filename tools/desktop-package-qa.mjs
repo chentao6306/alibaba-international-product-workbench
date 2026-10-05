@@ -8,6 +8,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { chromium } from 'playwright-core';
 import { extractFile, listPackage } from '@electron/asar';
 import { getCurrentFuseWire, FuseV1Options } from '@electron/fuses';
+import { assertBrandIcon, readExecutableIcon, readWindowIcons } from './window-icon-qa.mjs';
 
 const release = path.resolve(process.argv[2]);
 const applicationDirectory = process.argv[3] ? path.resolve(process.argv[3]) : path.join(release, 'win-unpacked');
@@ -61,6 +62,13 @@ try {
   assert.ok(window, 'Login window did not load');
   await window.locator('#login').waitFor();
   assert.equal(await window.locator('#login').isEnabled(), true);
+  if (process.platform === 'win32') {
+    // This harness starts the EXE with windowsHide; still inspect its real
+    // native window icons without requiring it to steal the user's focus.
+    const windows = await readWindowIcons(child.pid);
+    assert.ok(windows.length > 0, 'Packaged login native window must exist');
+    for (const native of windows) { await assertBrandIcon(native.small); await assertBrandIcon(native.big); }
+  }
   await window.evaluate(() => window.kuaYipu.loadCredentials());
   assert.equal(await window.locator('#error').textContent(), '');
   // The login window is now responsive before the background service finishes
@@ -80,4 +88,10 @@ try {
   if (child.exitCode === null) { try { execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }); } catch {} }
 }
 const installer = path.join(release, `chaodekuai-${metadata.version}-setup.exe`);
+if (process.platform === 'win32') {
+  for (const file of [executablePath, installer, path.join(release, `chaodekuai-${metadata.version}-inner.exe`)]) {
+    await assertBrandIcon(await readExecutableIcon(file));
+  }
+  assert.ok(fs.readFileSync(path.join(applicationDirectory, 'resources', 'brand.ico')).equals(fs.readFileSync('assets/brand.ico')));
+}
 console.log(JSON.stringify({ version: metadata.version, installer, applicationDirectory, bytes: fs.statSync(installer).size, sha256: createHash('sha256').update(fs.readFileSync(installer)).digest('hex'), screenshot: path.join(root, 'packaged-login.png') }));

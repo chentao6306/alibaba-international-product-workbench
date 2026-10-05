@@ -1,4 +1,4 @@
-import { app, session } from 'electron';
+import { app, BrowserWindow, session } from 'electron';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -6,6 +6,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import sharp from 'sharp';
 import { createRequire } from 'node:module';
+import { assertBrandIcon, readWindowIcons } from './window-icon-qa.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'verification-window-qa-'));
 app.setPath('userData', path.join(root, 'profile'));
@@ -54,6 +55,13 @@ async function main() {
       onCreated: (value) => { stalled = value; } });
     const stoppedStalled = assert.rejects(stalledOperation, (error) => error.code === 'COLLECT_PAUSED');
     await until(() => stalled?.window.isVisible());
+    if (process.platform === 'win32') {
+      const windows = await readWindowIcons(process.pid);
+      assert.ok(windows.length > 0);
+      fs.writeFileSync(path.join(root, 'native-icons.json'), JSON.stringify(windows));
+      console.log(`Native icon evidence: ${root}`);
+      for (const window of windows) { await assertBrandIcon(window.small); await assertBrandIcon(window.big); }
+    }
     assert.equal(stalled.contents.isLoadingMainFrame(), true, 'CAPTCHA must appear even while a secondary resource is still loading');
     await stalled.window.webContents.executeJavaScript('document.querySelector("#pause").click()');
     await stoppedStalled;
@@ -89,6 +97,9 @@ async function main() {
     await until(() => active.contents.executeJavaScript('Boolean(document.querySelector(".nc-container"))').catch(() => false));
     await until(() => active.window.isVisible());
     assert.equal(active.window.isVisible(), true);
+    if (process.platform === 'win32') {
+      for (const window of await readWindowIcons(process.pid)) { await assertBrandIcon(window.small); await assertBrandIcon(window.big); }
+    }
     assert.equal(await active.contents.executeJavaScript('typeof window.verification'), 'undefined');
     assert.equal(await active.contents.executeJavaScript('typeof require'), 'undefined');
     active.window.close();
@@ -128,6 +139,22 @@ async function main() {
     await active.window.webContents.executeJavaScript('document.querySelector("#pause").click()');
     await rejection;
     assert.equal(saved, 1);
+    // Seller/login pages may create their own windows via window.open().
+    // These bypass createAppWindow and must receive the same native icon.
+    const popupParent = new BrowserWindow({ show: false, webPreferences: { partition } });
+    let popup;
+    try {
+      popupParent.webContents.setWindowOpenHandler(() => ({ action: 'allow', overrideBrowserWindowOptions: { show: false } }));
+      const opened = new Promise(resolve => popupParent.webContents.once('did-create-window', child => { popup = child; resolve(); }));
+      await popupParent.loadURL('https://www.alibaba.com/window-branding-qa');
+      await popupParent.webContents.executeJavaScript('window.open("https://www.alibaba.com/window-branding-popup"); void 0');
+      await opened;
+      if (process.platform === 'win32') {
+        const windows = await readWindowIcons(process.pid);
+        assert.ok(windows.length >= 2);
+        for (const window of windows) { await assertBrandIcon(window.small); await assertBrandIcon(window.big); }
+      }
+    } finally { popup?.destroy(); popupParent.destroy(); }
     console.log(JSON.stringify({ passed: true, loads, screenshot: path.join(root, 'verification-window.png') }));
   } catch (error) { console.error(error); process.exitCode = 1; }
   finally { clearTimeout(watchdog); app.exit(process.exitCode || 0); }

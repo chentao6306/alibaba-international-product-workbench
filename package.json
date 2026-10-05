@@ -1,6 +1,6 @@
 {
   "name": "alibaba-international-product-workbench",
-  "version": "1.4.60",
+  "version": "1.4.61",
   "main": "electron/main.js",
   "description": "抄得快 Alibaba.com 国际站商品采集与发布工作台",
   "author": "抄得快",
@@ -94,6 +94,10 @@
     },
     "extraResources": [
       {
+        "from": "assets/brand.ico",
+        "to": "brand.ico"
+      },
+      {
         "from": "vendor/chromium",
         "to": "chromium",
         "filter": [
@@ -122,6 +126,9 @@
       "verifyUpdateCodeSignature": true
     },
     "nsis": {
+      "installerIcon": "assets/brand.ico",
+      "uninstallerIcon": "assets/brand.ico",
+      "installerHeaderIcon": "assets/brand.ico",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,

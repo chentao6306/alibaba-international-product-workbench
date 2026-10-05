@@ -1,6 +1,8 @@
 # 抄得快 · 阿里巴巴国际站商品工作台
 
-当前版本：**1.4.60**，更新日期：**2026-10-06**。最新完整源码以默认 **main** 分支为准。
+当前版本：**1.4.61**，更新日期：**2026-10-06**。最新完整源码以默认 **main** 分支为准。
+
+1.4.61 统一登录、主界面、卖家页面、验证码及软件弹窗的窗口图标和任务栏身份，安装、卸载图标使用当前抄得快标志；保留 1.4.60 中国制造网采集与类目匹配功能。见 [图标与安装包验证记录](docs/verification-1.4.61.md)。
 
 ## 常用命令速查
 
@@ -20,8 +22,8 @@ npm run prepare:chromium
 | 启动浏览器版 | `npm start` | 先构建前端，打开 `http://127.0.0.1:8787` |
 | 运行全部测试 | `npm test` | 部分用例会启动内置 Chromium |
 | 减少测试并发 | `npm test -- --test-concurrency=2` | 减少浏览器同时运行数量 |
-| 生成安装版 EXE | `npm run dist:win:installer` | `release-installer/chaodekuai-1.4.60-setup.exe` |
-| 生成便携版 EXE | `npm run dist:win:portable` | `release/chaodekuai-1.4.60-win-x64.exe` |
+| 生成安装版 EXE | `npm run dist:win:installer` | `release-installer/chaodekuai-1.4.61-setup.exe` |
+| 生成便携版 EXE | `npm run dist:win:portable` | `release/chaodekuai-1.4.61-win-x64.exe` |
 | 启动官网开发预览 | `npm run website:dev` | `http://127.0.0.1:5175/website/` |
 | 构建官网 | `npm run website:build` | 独立输出 `dist-website/` |
 | 预览官网成品 | `npm run website:preview` | `http://127.0.0.1:4175/website/` |
@@ -71,13 +73,13 @@ Windows 桌面客户端，提供国际站、1688、速卖通、中国制造网�
 
 中国制造网使用侧栏“中国制造网采集”，选择采集分组和采集方式。单件/多链接模式填写英文商品详情页；店铺模式填写供应商的 `https://供应商.en.made-in-china.com/` 首页、`product-list-N.html` 商品列表或 `product-group/...` 分类链接。询价商品没有公开价格时会保留为空，需在工作台填写美元售价；公司产能不会当作库存，普通型号/尺码描述不会被编造成可售 SKU。采集后核对目标类目及必填属性，可通过“引用成功商品资料”补充同类商品模板，再保存草稿或提交上架。引用后需核对规格是否适用于本商品。
 
-定向测试：`node --test test/made-in-china.test.js test/reference-workflow.test.js`。构建界面后可运行 `node tools/made-in-china-qa.mjs --live`，在独立临时工作区读取公开服装、车灯页面与店铺列表，检查图片、类目、引用、保存及发布计划；该工具不会向国际站提交商品。验证范围和命令见 [1.4.60 验证记录](docs/verification-1.4.60.md)。
+定向测试：`node --test test/made-in-china.test.js test/reference-workflow.test.js`。构建界面后可运行 `node tools/made-in-china-qa.mjs --live`，在独立临时工作区读取公开服装、车灯页面与店铺列表，检查图片、类目、引用、保存及发布计划；该工具不会向国际站提交商品。验证范围和命令见 [1.4.60 采集验证记录](docs/verification-1.4.60.md)。
 
 客户端通过 Playwright 操作真实浏览器页面，不是 Alibaba 官方发布 API。验证码需要用户完成；平台审核、账号权限和类目必填规则仍由 Alibaba 决定。
 
 ## 源码与备份范围
 
-- [当前 1.4.60 完整源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/main)
+- [当前 1.4.61 完整源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/main)
 - [1.4.52 修复和验证记录](docs/verification-1.4.52.md)
 - [备份范围、解密和恢复说明](docs/stable-backup.md)
 
@@ -158,17 +160,17 @@ npm run desktop
 
 ## 生成 Windows EXE
 
-首次先完成 `npm ci` 和 Chromium 下载。确认 `package.json` 与锁文件版本均为 `1.4.60`，然后执行：
+首次先完成 `npm ci` 和 Chromium 下载。确认 `package.json` 与锁文件版本均为 `1.4.61`，然后执行：
 
 ```powershell
 npm test -- --test-concurrency=2
 npm run dist:win:installer
 ```
 
-输出：`release-installer/chaodekuai-1.4.60-setup.exe`。脚本依次构建前端、准备 Chromium，再执行 Electron Builder NSIS x64 打包。安装包支持选择安装目录、桌面和开始菜单快捷方式。
+输出：`release-installer/chaodekuai-1.4.61-setup.exe`。脚本依次构建前端、准备 Chromium，再执行 Electron Builder NSIS x64 打包。安装包支持选择安装目录、桌面和开始菜单快捷方式。
 
 ```powershell
-npm run dist:win:portable   # release/chaodekuai-1.4.60-win-x64.exe
+npm run dist:win:portable   # release/chaodekuai-1.4.61-win-x64.exe
 npm run dist:win            # 按 package.json 构建 Windows 目标
 ```
 
@@ -195,8 +197,8 @@ node tools/verify-update-package.mjs release-installer
 ```powershell
 node tools/desktop-package-qa.mjs release-installer
 npx --no-install electron tools/verification-window-qa.mjs .packaged/electron/human-verification.js
-Get-Item .\release-installer\chaodekuai-1.4.60-setup.exe
-Get-FileHash .\release-installer\chaodekuai-1.4.60-setup.exe -Algorithm SHA256
+Get-Item .\release-installer\chaodekuai-1.4.61-setup.exe
+Get-FileHash .\release-installer\chaodekuai-1.4.61-setup.exe -Algorithm SHA256
 ```
 
 包检查核对版本、打包源码、浏览器、安全开关、登录窗口和未登录 API 鉴权，使用隔离用户目录。当前 EXE 未配置 Authenticode 签名；有证书后按 Electron Builder 签名配置构建。软件在线更新使用本项目的签名与授权后台分发服务；不要把 Electron Builder 的 `publish` 占位地址当作线上更新源。正式打包请运行 `npm run dist:win:installer`，以生成完整的外层安装包和配套更新签名。
@@ -218,7 +220,7 @@ sudo systemctl restart kua-yipu-auth
 
 正式客户端授权入口由 `server/auth-endpoint.js` 固定。源码桌面可用 `KUA_YIPU_AUTH_URL` 指向本机开发后台；**正式打包客户端忽略此环境变量**。迁移生产地址需要修改该模块默认地址、配置对应有效证书并重新打包。仅设置打包终端环境变量不能改变正式入口。
 
-授权服务 `/health` 中的版本为 `1.4.53`，是独立服务标识；当前桌面版本为 `1.4.60`。后台可配置 1/3/15 天等断线保持时间，不延长付费授权到期日，在线停用仍立即生效。2026-10-03 的后台菜单、版本记录和上传修复已部署，本次中国制造网采集需要更新客户端，不需要再次部署授权服务。
+授权服务 `/health` 中的版本为 `1.4.53`，是独立服务标识；当前桌面版本为 `1.4.61`。后台可配置 1/3/15 天等断线保持时间，不延长付费授权到期日，在线停用仍立即生效。2026-10-03 的后台菜单、版本记录和上传修复已部署，本次中国制造网采集需要更新客户端，不需要再次部署授权服务。
 
 ## 项目原理
 

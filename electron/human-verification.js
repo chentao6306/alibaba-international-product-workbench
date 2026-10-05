@@ -1,7 +1,8 @@
-import { BrowserWindow, WebContentsView, ipcMain } from 'electron';
+import { WebContentsView, ipcMain } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inspectVerificationDocument, waitForVerification, verificationPaused, verificationUrlAllowed as allowedUrl } from '../server/human-verification.js';
+import { createAppWindow } from './window-branding.js';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const sessions = new Map();
@@ -17,11 +18,11 @@ ipcMain.handle('verification:pause', (event) => {
   current.pause();
 });
 
-export async function showHumanVerification({ url, partition, icon, shouldStop = () => false,
+export async function showHumanVerification({ url, partition, shouldStop = () => false,
   onWaiting = () => {}, saveSession = async () => {}, onCreated = () => {}, userAgent = '', requestCookies = [] }) {
   if (!allowedUrl(url)) throw new Error('验证页面地址不受支持');
-  const window = new BrowserWindow({ width: 1280, height: 920, minWidth: 640, minHeight: 480,
-    show: false, skipTaskbar: true, title: '抄得快 - 人工验证', icon, autoHideMenuBar: true,
+  const window = createAppWindow({ width: 1280, height: 920, minWidth: 640, minHeight: 480,
+    show: false, skipTaskbar: true, title: '抄得快 - 人工验证', autoHideMenuBar: true,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true,
       preload: path.join(directory, 'verification-preload.cjs') } });
   const view = new WebContentsView({ webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false } });
