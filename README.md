@@ -1,6 +1,6 @@
 # 抄得快 · 阿里巴巴国际站商品工作台
 
-当前版本：**1.4.58**，更新日期：**2026-10-05**。最新完整源码以默认 **main** 分支为准。
+当前版本：**1.4.59**，更新日期：**2026-10-05**。最新完整源码以默认 **main** 分支为准。
 
 ## 常用命令速查
 
@@ -20,8 +20,8 @@ npm run prepare:chromium
 | 启动浏览器版 | `npm start` | 先构建前端，打开 `http://127.0.0.1:8787` |
 | 运行全部测试 | `npm test` | 部分用例会启动内置 Chromium |
 | 减少测试并发 | `npm test -- --test-concurrency=2` | 减少浏览器同时运行数量 |
-| 生成安装版 EXE | `npm run dist:win:installer` | `release-installer/chaodekuai-1.4.58-setup.exe` |
-| 生成便携版 EXE | `npm run dist:win:portable` | `release/chaodekuai-1.4.58-win-x64.exe` |
+| 生成安装版 EXE | `npm run dist:win:installer` | `release-installer/chaodekuai-1.4.59-setup.exe` |
+| 生成便携版 EXE | `npm run dist:win:portable` | `release/chaodekuai-1.4.59-win-x64.exe` |
 | 启动官网开发预览 | `npm run website:dev` | `http://127.0.0.1:5175/website/` |
 | 构建官网 | `npm run website:build` | 独立输出 `dist-website/` |
 | 预览官网成品 | `npm run website:preview` | `http://127.0.0.1:4175/website/` |
@@ -70,7 +70,7 @@ Windows 桌面客户端，提供国际站、1688、速卖通商品采集、资�
 
 ## 源码与备份范围
 
-- [当前 1.4.58 完整源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/main)
+- [当前 1.4.59 完整源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/main)
 - [1.4.52 修复和验证记录](docs/verification-1.4.52.md)
 - [备份范围、解密和恢复说明](docs/stable-backup.md)
 
@@ -125,7 +125,7 @@ npm run desktop
 | 前后端开发 | `npm run dev` | Vite `5173`，API `8787` |
 | 重新构建前端 | `npm run build` | `dist/` |
 | 全部测试 | `npm test -- --test-concurrency=2` | 降低同时运行浏览器测试的内存竞争 |
-| 本地授权后台预览 | `node auth-server/dev.js` | `http://127.0.0.1:8790`，仅开发 |
+| 本地授权后台预览 | `node auth-server/dev.js` | `http://127.0.0.1:8790/admin/`，仅开发 |
 
 桌面界面更改后需 `npm run build` 并重新打开桌面端。`start.bat` 会按需安装依赖、构建并启动浏览器版；`dev.bat` 启动开发服务。关闭命令窗口或按 `Ctrl+C` 停止对应服务。
 
@@ -151,17 +151,17 @@ npm run desktop
 
 ## 生成 Windows EXE
 
-首次先完成 `npm ci` 和 Chromium 下载。确认 `package.json` 与锁文件版本均为 `1.4.58`，然后执行：
+首次先完成 `npm ci` 和 Chromium 下载。确认 `package.json` 与锁文件版本均为 `1.4.59`，然后执行：
 
 ```powershell
 npm test -- --test-concurrency=2
 npm run dist:win:installer
 ```
 
-输出：`release-installer/chaodekuai-1.4.58-setup.exe`。脚本依次构建前端、准备 Chromium，再执行 Electron Builder NSIS x64 打包。安装包支持选择安装目录、桌面和开始菜单快捷方式。
+输出：`release-installer/chaodekuai-1.4.59-setup.exe`。脚本依次构建前端、准备 Chromium，再执行 Electron Builder NSIS x64 打包。安装包支持选择安装目录、桌面和开始菜单快捷方式。
 
 ```powershell
-npm run dist:win:portable   # release/chaodekuai-1.4.58-win-x64.exe
+npm run dist:win:portable   # release/chaodekuai-1.4.59-win-x64.exe
 npm run dist:win            # 按 package.json 构建 Windows 目标
 ```
 
@@ -179,17 +179,17 @@ node tools/build-setup.mjs
 node tools/verify-update-package.mjs release-installer
 ```
 
-便携版仍会在 Windows 用户目录保存商品、任务和登录资料。下次版本升级可用 `npm version 1.4.59 --no-git-tag-version` 同步清单与锁文件，再测试打包；此命令只是升级示例，不是运行当前版本的必要步骤。
+便携版仍会在 Windows 用户目录保存商品、任务和登录资料。下次版本升级可用 `npm version 1.4.60 --no-git-tag-version` 同步清单与锁文件，再测试打包；此命令只是升级示例，不是运行当前版本的必要步骤。
 
-`beforePack` 运行 `tools/prepare-package.mjs`，从 `server/` 和 `electron/` 生成 `.packaged/`。不要手工修改生成目录或用旧输出代替缺失源码。程序必须包含 `resources/chromium/chrome.exe`。
+`beforePack` 运行 `tools/prepare-package.mjs`，从 `server/`、`electron/` 和 `dist/` 生成加密业务模块、字节码加载程序与混淆后的界面到 `.packaged/`。不要手工修改生成目录或用旧输出代替缺失源码。程序必须包含 `resources/chromium/chrome.exe`。
 
 交付前检查：
 
 ```powershell
 node tools/desktop-package-qa.mjs release-installer
 npx --no-install electron tools/verification-window-qa.mjs .packaged/electron/human-verification.js
-Get-Item .\release-installer\chaodekuai-1.4.58-setup.exe
-Get-FileHash .\release-installer\chaodekuai-1.4.58-setup.exe -Algorithm SHA256
+Get-Item .\release-installer\chaodekuai-1.4.59-setup.exe
+Get-FileHash .\release-installer\chaodekuai-1.4.59-setup.exe -Algorithm SHA256
 ```
 
 包检查核对版本、打包源码、浏览器、安全开关、登录窗口和未登录 API 鉴权，使用隔离用户目录。当前 EXE 未配置 Authenticode 签名；有证书后按 Electron Builder 签名配置构建。软件在线更新使用本项目的签名与授权后台分发服务；不要把 Electron Builder 的 `publish` 占位地址当作线上更新源。正式打包请运行 `npm run dist:win:installer`，以生成完整的外层安装包和配套更新签名。
@@ -211,7 +211,7 @@ sudo systemctl restart kua-yipu-auth
 
 正式客户端授权入口由 `server/auth-endpoint.js` 固定。源码桌面可用 `KUA_YIPU_AUTH_URL` 指向本机开发后台；**正式打包客户端忽略此环境变量**。迁移生产地址需要修改该模块默认地址、配置对应有效证书并重新打包。仅设置打包终端环境变量不能改变正式入口。
 
-授权服务 `/health` 中的版本为 `1.4.53`，是独立服务标识；当前桌面版本为 `1.4.58`。后台可配置 1/3/15 天等断线保持时间，不延长付费授权到期日，在线停用仍立即生效。2026-10-03 的后台菜单、版本记录和上传修复已部署，1.4.58 的规格映射修复需要更新客户端，不需要再次部署授权服务。
+授权服务 `/health` 中的版本为 `1.4.53`，是独立服务标识；当前桌面版本为 `1.4.59`。后台可配置 1/3/15 天等断线保持时间，不延长付费授权到期日，在线停用仍立即生效。2026-10-03 的后台菜单、版本记录和上传修复已部署，1.4.58 的规格映射修复需要更新客户端，不需要再次部署授权服务。
 
 ## 项目原理
 
@@ -301,3 +301,12 @@ git ls-tree -r --name-only origin/main
 ```
 
 `main` 中只保留当前实现及仍有用的测试、构建工具和文档。历史验证记录用于追溯，Git 提交历史用于恢复，不是另一份需要运行的旧源码。下载最新代码时无需切换历史版本分支。
+
+
+### 管理员账号、安全入口与源码保护（2026-10-05）
+
+后台左侧“系统设置 → 账号与密码”可修改当前管理员账号、密码或两者。必须验证当前密码，新密码为 12–128 位；保存后该管理员所有旧会话失效，重新登录即可。客户授权与安装包发布记录不受影响。
+
+服务器根地址转到官网，后台页面及资源只由 `KUA_YIPU_ADMIN_PATH` 配置的入口提供。增量部署脚本会生成并保留独立随机入口，配置仅存放在服务器 `/etc/kua-yipu/admin-entry.env`；不把实际入口提交到仓库或放到官网。入口隐藏不是权限校验，管理 API 仍须有效管理员会话并有限流。操作及恢复说明见 [授权服务 README](auth-server/README.md)。
+
+1.4.58 及更早版本的 ASAR 中可提取明文业务 JavaScript。**1.4.59 起，发行包中的 70 个本地业务模块采用 AES-256-GCM 加密，加载程序编译为对应 Electron 的 V8 字节码，界面与预加载脚本混淆。** 原有 ASAR 完整性校验和凭据系统加密继续启用。此保护提高静态提取成本，不能保证无法逆向：客户端运行时持有解密能力，攻击者仍可能分析内存或修改运行环境。源码仓库保留正常可维护源码且保持私有。详细范围、测试和限制见 [发行包源码保护](docs/source-protection.md)。
