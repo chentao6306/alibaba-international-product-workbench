@@ -6,8 +6,9 @@ import { fileURLToPath } from 'node:url';
 import { clientAllowed, licenseState, pagination, announcementInput, licenseFilters } from './policy.js';
 import { configureHttpSecurity } from './http-security.js';
 import { createActivationCredential, credentialResetRevokesSessions, validActivation, publicLicense, clientSessionAllowed, clientSession, tokenCodec, requireCredentialTransport, offlineGraceMinutes } from './security.js';
-import { promisify } from 'node:util';
 import { registerUpdateRoutes } from './updates.js';
+import { registerAdminPages } from './admin-pages.js';
+import { verifyAdminPassword, registerAdminAccountRoutes, postgresAccountChanger } from './admin-account.js';
 
 const app = express();
 configureHttpSecurity(app);
@@ -27,7 +28,6 @@ const daysValue = (value) => {
   return days;
 };
 const { sign, verify } = tokenCodec(signingSecret);
-const scrypt = promisify(crypto.scrypt);
 const passwordFingerprint = (hash) => crypto.createHmac('sha256', signingSecret).update(hash).digest('hex');
 const bearer = (request) => verify(request.headers.authorization?.replace(/^Bearer\s+/i, ''));
 const requireAdmin = async (request, response, next) => {
@@ -48,15 +48,13 @@ async function transaction(work) {
 const event = (client, licenseId, action, actor, metadata = {}) => client.query('INSERT INTO license_events (id,license_id,action,actor,metadata) VALUES ($1,$2,$3,$4,$5)', [id(), licenseId, action, actor, JSON.stringify(metadata)]);
 
 app.get('/health', (_request, response) => response.json({ ok: true, service: 'kua-yipu-auth', version: '1.4.53' }));
-app.get('/', (_request, response) => response.sendFile(path.join(__dirname, 'admin.html')));
-for (const file of ['admin.js', 'admin.css', 'admin-updates.js']) app.get(`/${file}`, (_request, response) => response.sendFile(path.join(__dirname, file)));
+registerAdminPages(app, { directory: __dirname });
+registerAdminAccountRoutes(app, { requireAdmin, changeAccount: postgresAccountChanger({ transaction, passwordFingerprint }) });
 app.post('/api/admin/login', async (request, response) => {
   const username = normalize(request.body?.username);
   if (username.length > 200 || typeof request.body?.password !== 'string' || request.body.password.length > 1024) throw fail('管理员账号或密码格式不正确');
   const result = await pool.query('SELECT * FROM admin_users WHERE username=$1', [username]);
-  const [, salt, expected] = String(result.rows[0]?.password_hash || '').split('$');
-  const computed = await scrypt(request.body.password, salt || 'invalid-admin-account', 64);
-  const valid = salt && /^[a-f0-9]{128}$/i.test(expected || '') && crypto.timingSafeEqual(computed, Buffer.from(expected, 'hex'));
+  const valid = await verifyAdminPassword(request.body.password, result.rows[0]?.password_hash);
   if (!valid) throw fail('管理员账号或密码错误', 401);
   const sid = id(); const exp = Date.now() + 8 * 60 * 60 * 1000;
   await transaction(async (client) => {

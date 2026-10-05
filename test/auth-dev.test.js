@@ -29,7 +29,7 @@ test('authorization service supports filtering, expiration correction, deletion,
     };
     token = (await api('/api/admin/login', { username: 'test', password: 'local-test-password' })).data.token;
     assert.ok(token);
-    assert.equal((await fetch(url + '/admin.js')).status, 200);
+    assert.equal((await fetch(url + '/admin/admin.js')).status, 200);
     const license = (await api('/api/admin/licenses', { alibabaAccount: 'test-account', days: 1 })).data;
     const a = (await api('/api/client/login', { username: 'test-account', deviceId: 'A' })).data.token;
     const b = (await api('/api/client/login', { username: 'test-account', deviceId: 'B' })).data.token;

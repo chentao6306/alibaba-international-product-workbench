@@ -18,3 +18,5 @@ button{border-radius:8px;background:var(--green);border-color:var(--green);paddi
 .website-release-links { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 22px; margin: 0 0 24px; padding: 14px 18px; border-radius: 8px; background: #edf6f1; font-size: 14px; }
 .website-release-links a { color: #147759; text-underline-offset: 4px; }
 .website-release-links span { color: #728b80; font-size: 13px; }
+
+.account-security-card{max-width:820px}.account-security-card p{line-height:1.8}.account-security-card form{max-width:560px}.account-security-card .field{margin:20px 0}.account-security-card input{width:100%}.account-security-card #passwordHint{font-size:13px;margin-top:-10px}.account-security-card button{margin-top:8px}

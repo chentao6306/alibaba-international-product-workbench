@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>抄得快授权管理</title><link rel="stylesheet" href="/admin.css"></head>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>抄得快授权管理</title><link rel="stylesheet" href="./admin.css"></head>
 <body>
 <aside id="adminSidebar" class="admin-sidebar" hidden>
   <div class="admin-brand"><strong>抄得快</strong><span>管理员后台</span></div>
@@ -8,6 +8,7 @@
     <details class="nav-group" open><summary>授权管理</summary><button role="tab" id="accountsTab" aria-controls="accountsPanel" aria-selected="true">授权账号</button><button id="addAccountNav" type="button">新增授权</button></details>
     <details class="nav-group" open><summary>软件管理</summary><button role="tab" id="updatesTab" aria-controls="updatesPanel" aria-selected="false">系统更新</button><button id="updateHistoryNav" type="button">版本记录</button></details>
     <details class="nav-group" open><summary>内容管理</summary><button role="tab" id="announcementsTab" aria-controls="announcementsPanel" aria-selected="false">公告管理</button><button id="newNoticeNav" type="button">新建公告</button></details>
+    <details class="nav-group" open><summary>系统设置</summary><button role="tab" id="securityTab" aria-controls="securityPanel" aria-selected="false">账号与密码</button></details>
   </nav>
   <div class="sidebar-footer">抄得快 · 管理中心</div>
 </aside>
@@ -46,10 +47,23 @@
         <p id="updateHistoryMessage" role="status" aria-live="polite"></p>
       </section>
     </div>
+    <div id="securityPanel" role="tabpanel" aria-labelledby="securityTab" hidden>
+      <section class="account-security-card"><h2>修改账号与密码</h2><p class="muted">仅修改当前管理员。保存后，当前账号在所有设备上的后台登录都会失效，请使用新账号和密码重新登录。</p>
+        <form id="accountSecurityForm">
+          <label class="field">管理员账号<input id="profileUsername" autocomplete="username" required maxlength="80"></label>
+          <label class="field">当前密码<input id="profileCurrentPassword" type="password" autocomplete="current-password" required maxlength="1024"></label>
+          <label class="field">新密码<input id="profileNewPassword" type="password" autocomplete="new-password" minlength="12" maxlength="128" aria-describedby="passwordHint"></label>
+          <p id="passwordHint" class="muted">12–128 位，建议组合字母、数字和符号。仅修改账号时，两项新密码均留空。</p>
+          <label class="field">确认新密码<input id="profileConfirmPassword" type="password" autocomplete="new-password" minlength="12" maxlength="128"></label>
+          <button id="saveAccountSecurity">保存并重新登录</button>
+          <p id="accountSecurityMessage" class="status-message" role="status" aria-live="polite"></p>
+        </form>
+      </section>
+    </div>
     <div id="announcementsPanel" role="tabpanel" aria-labelledby="announcementsTab" hidden><section><div class="row"><h2 style="flex:1;margin:0">公告管理</h2><button id="createNotice">新建公告</button></div><div id="announcements" class="table-wrap"></div><div id="noticePages" class="pagination"></div></section></div>
   </div>
   <dialog id="noticeDialog"><button class="close-dialog" aria-label="关闭">×</button><h2 id="noticeHeading">新建公告</h2><form id="noticeForm"><label class="field">标题<input id="noticeTitle" maxlength="160" required></label><label class="field">展示方式<select id="noticeKind"><option value="notice">公告列表</option><option value="popup">弹窗公告（同时进入公告列表）</option></select></label><label class="field">正文<textarea id="noticeContent" maxlength="20000" required></textarea></label><label class="field">发布状态<select id="noticeStatus"><option value="draft">草稿</option><option value="published">发布</option><option value="withdrawn">撤回</option></select></label><div class="dialog-actions"><button type="button" class="secondary" id="previewNotice">预览</button><button type="button" class="secondary" id="cancelNotice">取消</button><button id="saveNotice">保存公告</button></div><div id="noticeError" class="status-message" role="status"></div></form></dialog>
   <dialog id="credentialDialog"><button class="close-dialog" aria-label="关闭">×</button><h2>软件授权码</h2><p id="credentialAccount"></p><label class="field">授权码<input id="credentialValue" readonly autocomplete="off"></label><p>仅本次显示，请妥善保存。客户需要使用 1.4.6 或更新版本，首次登录填写后会加密保存。</p><p id="credentialEffect"></p><div class="dialog-actions"><button id="copyCredential" type="button">复制授权码</button></div><p id="credentialMessage" role="status"></p></dialog>
   <dialog id="previewDialog"><button class="close-dialog" aria-label="关闭">×</button><h2 id="previewTitle"></h2><div id="previewContent" class="notice-preview"></div></dialog>
   <dialog id="actionDialog"><h2 id="actionHeading"></h2><form id="actionForm"><p id="actionText"></p><p id="revokeSessionsField" hidden><label class="switch-label"><input id="revokeSessions" type="checkbox" disabled>同时退出已登录设备</label></p><label id="connectionField" class="field" hidden>断线后保持登录<select id="offlineGraceMinutes" required disabled><option value="60">1 小时</option><option value="1440">1 天</option><option value="4320">3 天</option><option value="21600">15 天</option></select></label><label id="extendField" class="field" hidden><span id="daysLabel">调整天数</span><input id="extendDays" type="number" min="1" max="36500" value="30" required></label><p id="expiryPreview" class="expiry-preview" hidden></p><div class="dialog-actions"><button type="button" id="cancelAction" class="secondary">取消</button><button id="confirmAction">确认</button></div><div id="actionError" class="status-message" role="alert"></div></form></dialog>
-</main><script src="/admin.js"></script><script src="/admin-updates.js" type="module"></script></body></html>
+</main><script src="./admin.js"></script><script src="./admin-updates.js" type="module"></script></body></html>

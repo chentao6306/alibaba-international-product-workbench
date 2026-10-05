@@ -36,7 +36,7 @@ try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  await page.goto(url);
+  await page.goto(url + '/admin/');
   await page.locator('#adminUser').fill('test'); await page.locator('#adminPass').fill('local-test-password');
   await page.locator('#loginForm button').click();
   await page.locator('#licenses tbody tr').first().waitFor();

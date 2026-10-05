@@ -15,7 +15,7 @@ function loggedIn(value) {
   document.body.classList.toggle('authenticated', value);
   $('adminIdentity').textContent = `${sessionStorage.getItem('auth-admin-name') || '已登录'} · 管理员`;
   if (value) $('pageTitle').textContent = document.querySelector('.admin-navigation [aria-selected="true"]').textContent;
-  else $('pageTitle').textContent = '抄得快授权管理';
+  else { $('pageTitle').textContent = '抄得快授权管理'; $('accountSecurityForm').reset(); sessionStorage.removeItem('auth-admin-name'); }
 }
 function showCredential(item) {
   if (!item.activationCode) return;
@@ -168,19 +168,43 @@ $('previewNotice').onclick = () => preview({ title: $('noticeTitle').value, cont
 $('cancelNotice').onclick = () => $('noticeDialog').close();
 $('createNotice').onclick = () => editNotice();
 document.querySelectorAll('.close-dialog').forEach((button) => { button.onclick = () => button.closest('dialog').close(); });
-for (const name of ['accounts', 'announcements', 'updates']) $(name + 'Tab').onclick = () => {
-  for (const other of ['accounts', 'announcements', 'updates']) { $(other + 'Panel').hidden = other !== name; $(other + 'Tab').setAttribute('aria-selected', String(other === name)); }
+for (const name of ['accounts', 'announcements', 'updates', 'security']) $(name + 'Tab').onclick = () => {
+  for (const other of ['accounts', 'announcements', 'updates', 'security']) { $(other + 'Panel').hidden = other !== name; $(other + 'Tab').setAttribute('aria-selected', String(other === name)); }
   if (name === 'announcements') loadNotices().catch((error) => message(error.message));
+  if (name === 'security') loadAdminAccount().catch((error) => { $('accountSecurityMessage').textContent = error.message; });
+  else clearAccountPasswords();
   $('pageTitle').textContent = $(name + 'Tab').textContent;
   message();
   window.scrollTo({ top: 0 });
+};
+function clearAccountPasswords() {
+  for (const id of ['profileCurrentPassword', 'profileNewPassword', 'profileConfirmPassword']) $(id).value = '';
+}
+async function loadAdminAccount() {
+  clearAccountPasswords(); $('accountSecurityMessage').textContent = '';
+  $('saveAccountSecurity').disabled = true;
+  try {
+    const account = await api('/api/admin/account');
+    if (token) $('profileUsername').value = account.username;
+  } finally { $('saveAccountSecurity').disabled = false; }
+}
+$('accountSecurityForm').onsubmit = async (event) => {
+  event.preventDefault(); $('saveAccountSecurity').disabled = true; $('accountSecurityMessage').textContent = '';
+  try {
+    const data = await api('/api/admin/account', { method: 'PATCH', body: JSON.stringify({ username: $('profileUsername').value, currentPassword: $('profileCurrentPassword').value, newPassword: $('profileNewPassword').value, confirmPassword: $('profileConfirmPassword').value }) });
+    token = ''; sessionStorage.removeItem('auth-admin-token'); sessionStorage.removeItem('auth-admin-name');
+    loggedIn(false); $('adminUser').value = data.username; $('adminPass').value = '';
+    message('账号信息已更新，原有后台登录已失效。请使用新的账号信息重新登录。', true);
+    $('adminPass').focus();
+  } catch (error) { $('accountSecurityMessage').textContent = error.message; if (!token) message(error.message); }
+  finally { clearAccountPasswords(); $('saveAccountSecurity').disabled = false; }
 };
 $('addAccountNav').onclick = () => { $('accountsTab').click(); $('activateForm').scrollIntoView({ behavior: 'smooth', block: 'center' }); $('account').focus({ preventScroll: true }); };
 $('updateHistoryNav').onclick = () => { $('updatesTab').click(); document.querySelector('.update-history').scrollIntoView({ behavior: 'smooth', block: 'start' }); };
 $('newNoticeNav').onclick = () => { $('announcementsTab').click(); $('createNotice').click(); };
 $('loginForm').onsubmit = async (event) => {
   event.preventDefault(); const button = event.target.querySelector('button'); button.disabled = true;
-  try { const data = await api('/api/admin/login', { method: 'POST', body: JSON.stringify({ username: $('adminUser').value, password: $('adminPass').value }) }); token = data.token; sessionStorage.setItem('auth-admin-token', token); sessionStorage.setItem('auth-admin-name', data.username || $('adminUser').value); $('adminPass').value = ''; loggedIn(true); await Promise.all([stats(), loadAccounts()]); message(); }
+  try { const data = await api('/api/admin/login', { method: 'POST', body: JSON.stringify({ username: $('adminUser').value, password: $('adminPass').value }) }); token = data.token; sessionStorage.setItem('auth-admin-token', token); sessionStorage.setItem('auth-admin-name', data.username || $('adminUser').value); $('adminPass').value = ''; loggedIn(true); $('accountsTab').click(); await Promise.all([stats(), loadAccounts()]); message(); }
   catch (error) { message(error.message); } finally { button.disabled = false; }
 };
 $('logout').onclick = async () => {

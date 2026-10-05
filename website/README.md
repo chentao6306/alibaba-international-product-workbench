@@ -43,7 +43,7 @@ npm run website:preview
 官网部署到与授权后台**同一来源**的 `/website/`，例如 `https://服务器IP/website/`。需使用覆盖该 IP 的有效 HTTPS 证书。沿用原有后台 HTTPS 配置，不另开开发端口供客户使用。
 
 1. 执行 `npm run website:build`，将 `dist-website/` **内部文件**复制到服务器 `/var/www/chaodekuai-website/`。不要上传浏览器配置、`.data`、环境变量、源码私钥或整个开发目录。
-2. 备份服务器现有后台代码与 Nginx 配置，再部署本次 `auth-server/updates.js`、`auth-server/admin.html`、`auth-server/admin.css`，重启授权服务。必须包含 `updates.js`，它提供固定下载入口；数据库和授权数据无迁移。
+2. 先按 `auth-server/README.md` 运行 `deploy/update-service.sh` 部署完整配套后台，不要只替换个别页面文件；数据库和授权数据无迁移。
 3. 将 `website/deploy/nginx-location.conf` 放到服务器，在现有 HTTPS `server` 块中 `include` 此文件。已有 `/` 后台入口和 `/updates/chaodekuai/` 代理继续使用。
 4. 执行 `sudo nginx -t`，通过后 `sudo systemctl reload nginx`。
 5. 打开 `https://服务器IP/website/`，核对官网、微信二维码、后台入口、当前版本说明和下载。
@@ -63,7 +63,7 @@ curl https://服务器IP/updates/chaodekuai/latest.json
 
 网页更新前保留上一份静态产物；回滚时恢复旧产物和本次备份的后台文件、Nginx 配置，并在配置校验通过后重载。不要回滚客户数据或更改现有版本目录。
 
-本项目当前服务器也可使用 `website/deploy/install.sh`：部署包保留 `dist-website/`、三个本次更新的 `auth-server/` 文件及 `website/deploy/` 结构，将包解压到服务器独立暂存目录后执行 `sudo bash 暂存目录/website/deploy/install.sh`。脚本针对现有 `kua-yipu-auth` 服务与 Nginx 站点配置，自动备份、切换静态目录、等待健康检查，失败会回滚；其他服务器需先审阅路径。不会携带或读取 SSH 密码。
+本项目当前服务器也可使用 `website/deploy/install.sh`：部署包保留 `dist-website/`、`website/deploy/` 结构，将包解压到服务器独立暂存目录后执行 `sudo bash 暂存目录/website/deploy/install.sh`。脚本针对现有 `kua-yipu-auth` 服务与 Nginx 站点配置，自动备份、切换静态目录、等待健康检查，失败会回滚；其他服务器需先审阅路径。不会携带或读取 SSH 密码。
 
 ## 验证
 

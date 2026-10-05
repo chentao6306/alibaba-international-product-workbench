@@ -167,3 +167,16 @@ PostgreSQL 集成测试仅允许 `AUTH_TEST_DATABASE_URL` 指向名称以 `auth_
 官网也使用同一份正式版本信息与安装包。`/updates/chaodekuai/download` 是公开的当前正式版下载入口，在请求时选取最新已发布版并返回正确 EXE 文件名，支持 Range，禁止缓存。草稿不公开；撤回最高版本后停止下载，不回退旧版。系统更新页提供“查看官网”和“下载当前官网正式版”入口。官网按 IP 部署到 `/website/` 的操作见 [官网部署](../website/README.md)。
 
 部署需配置 `KUA_YIPU_UPDATE_DIR` 和目录写权限，使用 `deploy/updates.conf`；Nginx 同时配置精确 `/api/admin/updates` 和前缀 `/api/admin/updates/` 路由，防止创建草稿的 POST 被 301 转为 GET。分块路由放行 5 MB 请求。完整说明和后台增量部署步骤见 [软件更新与部署](../docs/software-updates.md)。私钥只在构建电脑，不能上传到服务器。
+
+
+## 管理员修改账号密码与私有入口
+
+登录后台后选择“系统设置 → 账号与密码”。验证当前密码后可修改自己的账号、新密码或两者；新密码两次输入必须一致，长度 12–128 位。只改账号时新密码留空。服务端保存带独立盐的 scrypt 哈希，在同一事务中修改并删除该管理员的全部会话。账号冲突、当前密码错误均不修改任何记录。保存后须重新登录，其他管理员及客户授权不受影响。
+
+根路径 `/` 现在跳转 `/website/`，旧 `/admin.js`、`/admin.css`、`/admin-updates.js` 不再开放。开发预览默认入口为 `http://127.0.0.1:8790/admin/`，可用 `KUA_YIPU_ADMIN_PATH` 覆盖。开发环境修改后哈希持久化到开发状态文件，重启不会还原初始环境密码。
+
+生产运行 `deploy/update-service.sh` 时，自动生成 128 位随机入口并保存 `/etc/kua-yipu/admin-entry.env`（root 600），systemd 的 `admin-entry.conf` 加载该配置。重复部署保留现有入口。首次安装也需以 root 执行 `bash auth-server/deploy/admin-entry.sh` 后 `systemctl daemon-reload` 并重启服务。Docker/直接运行需自行设置唯一 `KUA_YIPU_ADMIN_PATH`（单段路径，不得使用 api/website/updates/health）。仅管理员通过 SSH 查看配置并保存书签，不要把实际路径提交到 Git 或放在官网链接里。页面禁止索引且不发送 Referer，API 保持会话鉴权、HTTPS 和限流；随机路径不是额外密码。
+
+忘记管理员密码时仍可按初始化说明显式执行 `bootstrap-admin.js`，只重置指定账号。例行部署不能执行它，否则会覆盖管理员自己设置的密码。修改账号后须使用新的账号名执行恢复。
+
+验证：`node --test test/admin-account.test.js test/auth-dev.test.js test/auth-security.test.js`。指定 `AUTH_TEST_DATABASE_URL` 可在独立 `auth_qa_` 数据库上验证生产事务，测试不会使用生产数据库。

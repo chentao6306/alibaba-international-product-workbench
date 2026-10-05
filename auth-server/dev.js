@@ -5,6 +5,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { clientAllowed, licenseState, pagination, announcementInput, licenseFilters, matchesLicenseFilters } from './policy.js';
 import { configureHttpSecurity } from './http-security.js';
+import { registerAdminPages } from './admin-pages.js';
+import { hashAdminPassword, verifyAdminPassword, changedAccount, registerAdminAccountRoutes } from './admin-account.js';
 import { createActivationCredential, credentialResetRevokesSessions, validActivation, publicLicense, clientSessionAllowed, clientSession, tokenCodec, requireCredentialTransport, offlineGraceMinutes } from './security.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -33,12 +35,14 @@ function writeState(state) {
 
 const { sign, verify } = tokenCodec(signingSecret);
 const adminSessions = new Map();
+const initialAdmin = { username: adminUsername, password_hash: await hashAdminPassword(adminPassword) };
+const currentAdmin = () => readState().adminAccount || initialAdmin;
 const session = (license, deviceId, version) => clientSession(license, deviceId, sign, version);
 
 const bearer = (request) => verify(request.headers.authorization?.replace(/^Bearer\s+/i, ''));
 const requireAdmin = (request, response, next) => {
   const auth = bearer(request);
-  if (!auth?.admin || auth.aud !== 'admin' || adminSessions.get(auth.sid) !== auth.exp) return response.status(401).json({ error: '管理员登录已失效' });
+  if (!auth?.admin || auth.aud !== 'admin' || auth.username !== currentAdmin().username || adminSessions.get(auth.sid) !== auth.exp) return response.status(401).json({ error: '管理员登录已失效' });
   request.admin = auth;
   next();
 };
@@ -46,15 +50,28 @@ const timestamp = () => new Date().toISOString();
 const newId = () => crypto.randomUUID();
 const addEvent = (state, licenseId, action, actor, metadata = {}) => state.events.unshift({ id: newId(), license_id: licenseId, action, actor, metadata, created_at: timestamp() });
 
-app.get('/', (_request, response) => response.sendFile(path.join(__dirname, 'admin.html')));
-for (const file of ['admin.js', 'admin.css']) app.get(`/${file}`, (_request, response) => response.sendFile(path.join(__dirname, file)));
+registerAdminPages(app, { directory: __dirname });
+registerAdminAccountRoutes(app, { requireAdmin, changeAccount: async (auth, input) => {
+  const previous = currentAdmin();
+  const updated = await changedAccount(previous, input);
+  const state = readState();
+  const latest = state.adminAccount || initialAdmin;
+  if (adminSessions.get(auth.sid) !== auth.exp || latest.username !== previous.username || latest.password_hash !== previous.password_hash) throw Object.assign(new Error('管理员登录已失效'), { status: 401 });
+  state.adminAccount = updated;
+  writeState(state);
+  adminSessions.clear();
+  return { username: updated.username };
+} });
 app.get('/health', (_request, response) => response.json({ ok: true, service: 'kua-yipu-auth-dev' }));
-app.post('/api/admin/login', (request, response) => {
-  if (request.body?.username !== adminUsername || request.body?.password !== adminPassword) return response.status(401).json({ error: '管理员账号或密码错误' });
+app.post('/api/admin/login', async (request, response) => {
+  const current = currentAdmin();
+  const valid = await verifyAdminPassword(request.body?.password, current.password_hash);
+  const latest = currentAdmin();
+  if (request.body?.username !== current.username || !valid || current.password_hash !== latest.password_hash || current.username !== latest.username) return response.status(401).json({ error: '管理员账号或密码错误' });
   const sid = newId(); const exp = Date.now() + 8 * 60 * 60 * 1000;
   for (const [key, expiry] of adminSessions) if (expiry <= Date.now()) adminSessions.delete(key);
   adminSessions.set(sid, exp);
-  response.json({ username: adminUsername, token: sign({ aud: 'admin', admin: true, username: adminUsername, sid, exp }) });
+  response.json({ username: current.username, token: sign({ aud: 'admin', admin: true, username: current.username, sid, exp }) });
 });
 app.post('/api/admin/logout', requireAdmin, (request, response) => { adminSessions.delete(request.admin.sid); response.json({ ok: true }); });
 
