@@ -286,6 +286,19 @@ export function readPostingAttributeSchema() {
   });
 }
 
+export function sourceSpecificationForField(product, field) {
+  if (!field.saleSpecification) return null;
+  const groups = (product.variantGroups || []).filter((group) => group.options?.length);
+  const byId = field.id && groups.filter((group) => attributeId(group) === field.id);
+  if (byId?.length) return byId.length === 1 ? byId[0] : null;
+  const names = new Set((field.labels || [field.label]).map(requiredAttributeKey));
+  // Sales dimensions can receive a different ID after a category change.
+  // Match the same complete aliases as the specification writer, only when
+  // there is no exact-ID group and the name identifies one source dimension.
+  const matches = groups.filter((group) => names.has(requiredAttributeKey(group.name)));
+  return matches.length === 1 ? matches[0] : null;
+}
+
 export function sourceAttributeForField(product, field) {
   const items = [...(product.attributes || []), ...(product.customAttributes || [])].filter((item) => item?.name && item.value != null && clean(item.value));
   const exactNames = new Set((field.labels || [field.label]).map(attributeNameKey));

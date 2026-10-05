@@ -1,6 +1,6 @@
 # 抄得快 · 阿里巴巴国际站商品工作台
 
-当前版本：**1.4.57**，更新日期：**2026-10-04**。最新完整源码以默认 **main** 分支为准。
+当前版本：**1.4.58**，更新日期：**2026-10-05**。最新完整源码以默认 **main** 分支为准。
 
 ## 常用命令速查
 
@@ -20,8 +20,8 @@ npm run prepare:chromium
 | 启动浏览器版 | `npm start` | 先构建前端，打开 `http://127.0.0.1:8787` |
 | 运行全部测试 | `npm test` | 部分用例会启动内置 Chromium |
 | 减少测试并发 | `npm test -- --test-concurrency=2` | 减少浏览器同时运行数量 |
-| 生成安装版 EXE | `npm run dist:win:installer` | `release-installer/chaodekuai-1.4.57-setup.exe` |
-| 生成便携版 EXE | `npm run dist:win:portable` | `release/chaodekuai-1.4.57-win-x64.exe` |
+| 生成安装版 EXE | `npm run dist:win:installer` | `release-installer/chaodekuai-1.4.58-setup.exe` |
+| 生成便携版 EXE | `npm run dist:win:portable` | `release/chaodekuai-1.4.58-win-x64.exe` |
 
 最常用：改代码用 `npm run dev`；测试桌面端先 `npm run build` 再 `npm run desktop`；给客户打包用 `npm run dist:win:installer`。
 
@@ -47,6 +47,8 @@ npm run prepare:chromium
 - 修复必填/选填缺失属性首次输入后失焦问题，支持已知下拉、多选项。已验证编辑保存后发布填写新值，并取消旧多选值、清除旧选项 ID。
 - 包含此前授权码重置、多端登录、临时断线保持、后台任务线程、产品链接与浏览器窗口处理修复。
 
+1.4.58 修复多个品类共用的销售规格处理：按属性 ID、完整名称和已知中英文别名识别目标控件，区分普通颜色、灯光颜色与镜片颜色，支持直接显示的必填规格。文本、下拉、单选、多选和图片规格复用各自的控件处理，回读完整值集合；SKU 行按实际目标名称与选项关联，避免规格译名不同导致价格、库存错配。已保存的图片规格值可直接使用，本次四件车灯商品不需要重新采集。完整测试 532/532 通过。验证范围和真实页面限制见 [1.4.58 验证记录](docs/verification-1.4.58.md)。
+
 1.4.57 修复汽车灯具类目发布重试：采集到的英文 `Purpose`、`Car Model`、`Voltage`、`Condition`、`Lumens`、`Color Temperature` 会映射到国际站对应的中文必填属性；OE 代码支持国际站没有下拉选项的可输入组合框，填写后触发提交事件并回读确认。已有商品无需重新采集，修复后可直接重试。完整测试 525/525 通过。
 
 1.4.56 修复编辑保存草稿和发布时的属性映射：OE 代码支持 `OE Number`、`OE Code`、`OEM Number` 等来源名称，即使来源和目标页面重新生成了不同属性 ID 也会填入目标 `OE代码`；商品规格按目标发布页实际显示的 `规格`、`Specification`、`型号` 等销售属性匹配，不再只依赖来源 ID，确保保存草稿时规格选项和值一起写入。普通属性仍保留 ID 校验，避免把用途、特征等同名字段误填。新增跨语言和跨 ID 回归测试，完整测试 524/524 通过。
@@ -63,7 +65,7 @@ Windows 桌面客户端，提供国际站、1688、速卖通商品采集、资�
 
 ## 源码与备份范围
 
-- [当前 1.4.57 完整源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/main)
+- [当前 1.4.58 完整源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/main)
 - [1.4.52 修复和验证记录](docs/verification-1.4.52.md)
 - [备份范围、解密和恢复说明](docs/stable-backup.md)
 
@@ -144,17 +146,17 @@ npm run desktop
 
 ## 生成 Windows EXE
 
-首次先完成 `npm ci` 和 Chromium 下载。确认 `package.json` 与锁文件版本均为 `1.4.57`，然后执行：
+首次先完成 `npm ci` 和 Chromium 下载。确认 `package.json` 与锁文件版本均为 `1.4.58`，然后执行：
 
 ```powershell
 npm test -- --test-concurrency=2
 npm run dist:win:installer
 ```
 
-输出：`release-installer/chaodekuai-1.4.57-setup.exe`。脚本依次构建前端、准备 Chromium，再执行 Electron Builder NSIS x64 打包。安装包支持选择安装目录、桌面和开始菜单快捷方式。
+输出：`release-installer/chaodekuai-1.4.58-setup.exe`。脚本依次构建前端、准备 Chromium，再执行 Electron Builder NSIS x64 打包。安装包支持选择安装目录、桌面和开始菜单快捷方式。
 
 ```powershell
-npm run dist:win:portable   # release/chaodekuai-1.4.57-win-x64.exe
+npm run dist:win:portable   # release/chaodekuai-1.4.58-win-x64.exe
 npm run dist:win            # 按 package.json 构建 Windows 目标
 ```
 
@@ -166,11 +168,13 @@ npm run prepare:chromium
 npx --no-install electron-builder --win nsis --x64 `
   --config.electronDist=node_modules/electron/dist `
   --config.directories.output=release-installer `
-  '--config.artifactName=chaodekuai-${version}-setup.${ext}' `
+  '--config.artifactName=chaodekuai-${version}-inner.${ext}' `
   --publish never
+node tools/build-setup.mjs
+node tools/verify-update-package.mjs release-installer
 ```
 
-便携版仍会在 Windows 用户目录保存商品、任务和登录资料。下次版本升级可用 `npm version 1.4.58 --no-git-tag-version` 同步清单与锁文件，再测试打包；此命令只是升级示例，不是运行当前版本的必要步骤。
+便携版仍会在 Windows 用户目录保存商品、任务和登录资料。下次版本升级可用 `npm version 1.4.59 --no-git-tag-version` 同步清单与锁文件，再测试打包；此命令只是升级示例，不是运行当前版本的必要步骤。
 
 `beforePack` 运行 `tools/prepare-package.mjs`，从 `server/` 和 `electron/` 生成 `.packaged/`。不要手工修改生成目录或用旧输出代替缺失源码。程序必须包含 `resources/chromium/chrome.exe`。
 
@@ -179,8 +183,8 @@ npx --no-install electron-builder --win nsis --x64 `
 ```powershell
 node tools/desktop-package-qa.mjs release-installer
 npx --no-install electron tools/verification-window-qa.mjs .packaged/electron/human-verification.js
-Get-Item .\release-installer\chaodekuai-1.4.57-setup.exe
-Get-FileHash .\release-installer\chaodekuai-1.4.57-setup.exe -Algorithm SHA256
+Get-Item .\release-installer\chaodekuai-1.4.58-setup.exe
+Get-FileHash .\release-installer\chaodekuai-1.4.58-setup.exe -Algorithm SHA256
 ```
 
 包检查核对版本、打包源码、浏览器、安全开关、登录窗口和未登录 API 鉴权，使用隔离用户目录。当前 EXE 未配置 Authenticode 签名；有证书后按 Electron Builder 签名配置构建。软件在线更新使用本项目的签名与授权后台分发服务；不要把 Electron Builder 的 `publish` 占位地址当作线上更新源。正式打包请运行 `npm run dist:win:installer`，以生成完整的外层安装包和配套更新签名。
@@ -202,7 +206,7 @@ sudo systemctl restart kua-yipu-auth
 
 正式客户端授权入口由 `server/auth-endpoint.js` 固定。源码桌面可用 `KUA_YIPU_AUTH_URL` 指向本机开发后台；**正式打包客户端忽略此环境变量**。迁移生产地址需要修改该模块默认地址、配置对应有效证书并重新打包。仅设置打包终端环境变量不能改变正式入口。
 
-授权服务 `/health` 中的版本为 `1.4.53`，是独立服务标识；当前桌面版本为 `1.4.57`。后台可配置 1/3/15 天等断线保持时间，不延长付费授权到期日，在线停用仍立即生效。2026-10-03 的后台菜单、版本记录和上传修复已部署，1.4.57 的属性映射修复需要更新客户端，不需要再次部署授权服务。
+授权服务 `/health` 中的版本为 `1.4.53`，是独立服务标识；当前桌面版本为 `1.4.58`。后台可配置 1/3/15 天等断线保持时间，不延长付费授权到期日，在线停用仍立即生效。2026-10-03 的后台菜单、版本记录和上传修复已部署，1.4.58 的规格映射修复需要更新客户端，不需要再次部署授权服务。
 
 ## 项目原理
 

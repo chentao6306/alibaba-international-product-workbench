@@ -21,7 +21,9 @@ export function resolveReferencedSkuRows(product, groups, { appliedGroups = [], 
       const rawValue = group.sourceGroups?.length
         ? sourceNames.map((name) => normalizeValue(attributes[name])).join(' / ')
         : attributes[sourceNames[0]];
-      let targetName = nameKey(group.name);
+      // The field writer observed this label on the same selected attribute
+      // ID. This also covers translations absent from the static alias list.
+      let targetName = nameKey(group.targetName || group.name);
       if (group.sourceGroups?.length && groups.length === 1) targetName = nameKey(groups[0].name);
       if (!targetNames.has(targetName)) continue;
       const actualValue = group.appliedValues?.[rawValue] ?? group.appliedValues?.[normalizeValue(rawValue)] ?? rawValue;

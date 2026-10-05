@@ -33,7 +33,7 @@ import { attributeMenuForControl, closePostingAttributeMenus, POSTING_DIALOG, ta
 export { closePostingAttributeMenus } from './posting-popups.js';
 import { isBrowserInteractionError, userFacingError } from './browser-error.js';
 import { ensureSimplifiedChinese } from './posting-language.js';
-import { attributeId, extractAlibabaAttributes, mergeSourceAttributes, packagingFromAttributes, readAlibabaAttributeRows, readPostingAttributeSchema, sourceAttributeForField, SOURCE_ATTRIBUTE_SCHEMA_VERSION, bindSourceAttributesToPostingSchema } from './category-attributes.js';
+import { attributeId, extractAlibabaAttributes, mergeSourceAttributes, packagingFromAttributes, readAlibabaAttributeRows, readPostingAttributeSchema, sourceAttributeForField, sourceSpecificationForField, SOURCE_ATTRIBUTE_SCHEMA_VERSION, bindSourceAttributesToPostingSchema } from './category-attributes.js';
 
 const WORKBENCH_URL = 'https://i.alibaba.com/';
 const SOURCE_DESCRIPTION_SELECTOR = '[data-module-name="module_description"], [data-testid="module-description"], [data-module-name="module_structure_description"], [data-testid="module-details-structure-description"]';
@@ -1260,7 +1260,7 @@ export function preparePublishProduct(product, options = {}) {
       return { ...group, optionImages };
     }
     const key = requiredAttributeKey(group.name);
-    const imageMap = /颜色|colou?r/i.test(group.name) ? product.colorImages
+    const imageMap = isColorVariantGroup(group) ? product.colorImages
       : /^(?:model(?: number)?|型号)$/i.test(group.name) ? product.modelImages : null;
     for (const value of group.options || []) {
       if (optionImages[value]) continue;
@@ -1651,8 +1651,14 @@ export function distinctAlibabaImageUrls(urls = []) {
   return result;
 }
 
+export function isColorVariantGroup(group) {
+  // Light Color, Lens Color and Color Temperature are independent properties.
+  // Only the ordinary Color dimension belongs to the legacy color writer.
+  return requiredAttributeKey(group?.name) === requiredAttributeKey('Color');
+}
+
 export function isRequiredTargetVariantGroup(group) {
-  if (!group?.name || /颜色|colou?r/i.test(group.name)) return false;
+  if (!group?.name || isColorVariantGroup(group)) return false;
   // Alibaba treats compatible model as a category attribute on the affected
   // phone/drone forms, not as a sale SKU dimension. Filling it through the
   // required-attribute path avoids the false "source specification does not
@@ -1662,9 +1668,8 @@ export function isRequiredTargetVariantGroup(group) {
   if (options.length > 1) return true;
   const imageBacked = Object.values(group.optionImages || {}).some(Boolean);
   const normalizedName = String(group.name || '').toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
-  // A single model with a source image is a real sale specification on forms
-  // that require an SKU image. Other single-value fields (for example Socket
-  // Standard) remain descriptive product data and must not block publishing.
+  // Single constants can be descriptive on another category. The target's
+  // exposed dimensions are added in fillVariantSpecs, regardless of type.
   return imageBacked && /^(?:model(?: number)?|型号)$/.test(normalizedName);
 }
 
@@ -2743,6 +2748,8 @@ export async function fillVariantSpecs(page, product) {
     .replace(/[_/-]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+  const saleAttributeLabel = (value) => String(value || '')
+    .replace(/(?:支持传图|supports?\s+(?:image|photo)(?:\s+upload)?|image\s+upload\s+supported)\s*$/i, '').trim();
   const saleAttributeAliasesFor = (name) => {
     const normalized = normalizeSaleAttributeName(name);
     if (/^(?:spec(?:ification)?s?|product specification|商品规格|规格|款式|style)$/.test(normalized)) {
@@ -2756,14 +2763,13 @@ export async function fillVariantSpecs(page, product) {
     }
     if (/^(?:position|location|位置)$/.test(normalized)) return ['position', 'location', '位置'];
     if (/^(?:颜色|colou?r|colour)$/.test(normalized)) return ['颜色', 'color', 'colour'];
-    return [String(name || '').trim()].filter(Boolean);
+    return requiredLabelAliases(name);
   };
   const availableSaleAttributes = await page.evaluate(() => {
     const root = document.querySelector('#saleAttributesItems');
-    if (!root) return [];
     const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
-    const controls = [...root.querySelectorAll('input[type="checkbox"], input[type="radio"], [role="checkbox"]')];
-    return controls.map((control) => {
+    const controls = [...(root?.querySelectorAll('input[type="checkbox"], input[type="radio"], [role="checkbox"]') || [])];
+    const attributes = controls.map((control) => {
       const id = control.value || control.getAttribute('data-value') || control.getAttribute('data-id') || '';
       const owner = control.closest('label')
         || control.closest('.items, .option-wrap, [data-attribute-id], [data-property-id]')
@@ -2774,21 +2780,28 @@ export async function fillVariantSpecs(page, product) {
         visible: visible(control) && visible(owner)
       };
     }).filter((item) => item.id && item.visible);
+    // Some categories render mandatory dimensions directly and leave the
+    // specification selector empty. Their visible rows are authoritative.
+    for (const row of document.querySelectorAll('#struct-specification [id^="p-"]')) {
+      if (!visible(row) || attributes.some((item) => item.id === row.id.slice(2))) continue;
+      const label = row.querySelector('.sell-o-addon-label, .label, label, legend')?.cloneNode(true);
+      label?.querySelectorAll('.upload-image-switch, .labelSubtitle, i, [role="tooltip"]').forEach((node) => node.remove());
+      attributes.push({ id: row.id.slice(2), label: String(label?.textContent || '').replace(/\s+/g, ' ').trim(), visible: true });
+    }
+    return attributes;
   }).catch(() => []);
   const candidateIdsFor = (group) => {
     const normalized = normalizeSaleAttributeName(group?.name);
     const ids = [group?.id].filter(Boolean).map(String);
-    if (/颜色|colou?r/i.test(normalized)) ids.push('191288010');
+    if (isColorVariantGroup(group)) ids.push('191288010');
     if (/^(?:socket standard|socket type|plug type|connector type|connector)$/i.test(normalized)) ids.push('400050816');
     const aliases = saleAttributeAliasesFor(group?.name).map(normalizeSaleAttributeName);
     const labelMatches = availableSaleAttributes
-      .map((item) => ({ ...item, normalized: normalizeSaleAttributeName(item.label) }))
-      .filter((item) => aliases.some((alias) => item.normalized === alias || item.normalized.includes(alias)))
-      .sort((left, right) => {
-        const leftExact = aliases.includes(left.normalized) ? 0 : 1;
-        const rightExact = aliases.includes(right.normalized) ? 0 : 1;
-        return leftExact - rightExact;
-      });
+      .map((item) => ({ ...item, normalized: normalizeSaleAttributeName(saleAttributeLabel(item.label)) }))
+      // Substring matching makes Color select Light Color and Size select
+      // Screen Size. Only IDs or complete known aliases identify a dimension.
+      .filter((item) => aliases.includes(item.normalized))
+      .sort((left, right) => aliases.indexOf(left.normalized) - aliases.indexOf(right.normalized));
     ids.push(...labelMatches.map((item) => item.id));
     return [...new Set(ids)];
   };
@@ -2805,7 +2818,7 @@ export async function fillVariantSpecs(page, product) {
   ).size > 1);
   const availableIds = [...new Set(multiGroups.map((group) => targetIds.get(group)).filter(Boolean))];
   for (const group of variantGroups) {
-    if (!/颜色|colou?r/i.test(group.name) && targetIds.has(group) && !groups.includes(group)) groups.push(group);
+    if (!isColorVariantGroup(group) && targetIds.has(group) && !groups.includes(group)) groups.push(group);
   }
   if (multiGroups.length > 1 && availableIds.length === 1) {
     const targetId = availableIds[0];
@@ -2826,7 +2839,7 @@ export async function fillVariantSpecs(page, product) {
     if (/^(?:socket standard|socket type|plug type|connector type|connector)$/i.test(normalized)) {
       return ['插座标准', '插头类型', '输出插头', '连接器类型', 'socket standard', 'socket type', 'plug type', 'output plug', 'connector type', 'connector'];
     }
-    return [String(name || '').trim()].filter(Boolean);
+    return requiredLabelAliases(name);
   };
   const rowFor = async (aliases) => {
     const rows = page.locator('#struct-specification [id^="p-"]');
@@ -2950,6 +2963,7 @@ export async function fillVariantSpecs(page, product) {
   };
   for (const group of groups) {
     group.appliedValues = {};
+    const sourceId = String(group.id || '');
     const targetId = targetIds.get(group)
       || candidateIdsFor(group).find((candidateId) => availableIds.includes(candidateId))
       || String(group.id || '');
@@ -2978,6 +2992,40 @@ export async function fillVariantSpecs(page, product) {
     if (row) {
       const rowId = await row.getAttribute('id');
       if (rowId?.startsWith('p-')) group.id = rowId.slice(2);
+      const targetLabel = availableSaleAttributes.find((item) => item.id === group.id)?.label;
+      if (targetLabel) group.targetName = saleAttributeLabel(targetLabel).replace(/^[*＊]\s*/, '').trim();
+    }
+    // Reuse the category control adapters for non-image specification rows.
+    // Fill the entire set at once so a single select/radio cannot silently
+    // retain only the last SKU, and stale checkbox selections are removed.
+    const imageInputs = row && await row.locator('input[role="colorCombobox"]').count();
+    const field = row && !imageInputs && (await page.evaluate(readPostingAttributeSchema))
+      .find((entry) => entry.saleSpecification && entry.id === String(group.id));
+    if (field && field.inputIndex >= 0 && !field.disabled) {
+      const rawValues = [...new Set(group.options || [])].filter(Boolean);
+      const values = rawValues.map((raw) => {
+        const value = englishSpecText(raw);
+        return targetValueCandidates(group, value).find((candidate) =>
+          field.options?.some((option) => attributeOptionMatchScore(candidate, option.label) === 100)) || value;
+      });
+      const valueIds = sourceId === String(group.id) ? Object.fromEntries(rawValues.map((raw, index) =>
+        [values[index], group.optionIds?.[raw]]).filter(([, id]) => id != null && Number(id) > 0)) : {};
+      const labels = {};
+      const options = { multiple: field.multiple, minimumScore: 100, valueIds, labels,
+        onValueCommitted: (id, label) => { labels[id] = label; } };
+      // A plain field represents one SKU option; combining several values in
+      // that field would discard the original variants.
+      const scalar = ['text', 'textarea', 'number', 'select', 'radio'].includes(field.controlType);
+      const filled = !(scalar && values.length > 1) && (field.controlType === 'multiText'
+        ? await fillRepeatableCategoryText(page, field, values)
+        : await fillChoice(page, categoryFieldLocator(page, field), values, options));
+      const actual = (await page.evaluate(readPostingAttributeSchema)).find((entry) => entry.id === field.id && entry.saleSpecification);
+      if (filled && actual && attributeFieldMatchesValue(actual, values, options)) {
+        rawValues.forEach((raw, index) => { group.appliedValues[raw] = labels[valueIds[values[index]]] || values[index]; });
+      } else {
+        rawValues.forEach((raw) => unmapped.push(`${group.name}: ${englishSpecText(raw)}`));
+      }
+      continue;
     }
     for (const rawValue of [...new Set(group.options || [])]) {
       let value = englishSpecText(rawValue);
@@ -2987,7 +3035,7 @@ export async function fillVariantSpecs(page, product) {
         continue;
       }
       const sourceOptionId = group.optionIds?.[rawValue];
-      if (sourceOptionId && String(sourceOptionId) !== '-1') {
+      if (sourceId === String(group.id) && sourceOptionId && Number(sourceOptionId) > 0) {
         const targetText = await row.evaluate((node, optionId) => {
           const key = Object.getOwnPropertyNames(node).find((name) => name.startsWith('__reactFiber'));
           let fiber = key && node[key];
@@ -3065,7 +3113,7 @@ async function visibleColorSpecControl(page) {
       excluded: Boolean(node.closest('[class*="customizedServices"], [class*="CustomizedServices"]')),
       top: node.getBoundingClientRect().top + window.scrollY
     })).catch(() => null);
-    if (!metadata || metadata.excluded || !/(?:^|\s)(?:颜色|colou?r)(?:\s|$)/i.test(metadata.text)) continue;
+    if (!metadata || metadata.excluded || !/^[*＊]?\s*(?:颜色|colou?r)(?:\s|[:：]|$)/i.test(metadata.text)) continue;
     const input = wrapper.locator('input[type="checkbox"]').first();
     if (!await input.count().catch(() => 0)) continue;
     candidates.push({ wrapper, input, top: metadata.top });
@@ -3102,7 +3150,7 @@ async function visibleColorSpecRow(page) {
       for (let depth = 0; node && depth < 7; depth += 1, node = node.parentElement) {
         if (/^p-/.test(node.id) && node.id !== 'p-191288010') break;
         const text = String(node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
-        if (!/颜色|colou?r/i.test(text) || /customizedServices|CustomizedServices/i.test(String(node.className || ''))) continue;
+        if (!/^[*＊]?\s*(?:颜色|colou?r)(?:\s|[:：]|$)/i.test(text) || /customizedServices|CustomizedServices/i.test(String(node.className || ''))) continue;
         node.setAttribute('data-codex-color-row', value);
         return true;
       }
@@ -3130,6 +3178,10 @@ export async function ensureColorSpecificationReady(page, timeout = 10000) {
 async function saleAttributeIsSelected(page, value) {
   return page.evaluate((expectedValue) => {
     const root = document.querySelector('#saleAttributesItems');
+    const selector = `input[value="${CSS.escape(String(expectedValue))}"]`;
+    const selectionControl = root?.querySelector(selector);
+    const fixedRow = document.querySelector(`#struct-specification [id="p-${CSS.escape(String(expectedValue))}"]`);
+    if (!selectionControl && fixedRow && (fixedRow.offsetWidth || fixedRow.offsetHeight || fixedRow.getClientRects().length)) return true;
     if (!root) {
       const input = document.querySelector(`input[value="${CSS.escape(String(expectedValue))}"]`);
       return Boolean(input && (input.checked || input.getAttribute('aria-checked') === 'true'
@@ -3525,15 +3577,15 @@ export function attributeFieldMatchesValue(field, value, { valueIds = {}, labels
 
 function categoryAttributeValue(product, field, source) {
   if (requiredAttributeKey(field.label) === '产地') return productOrigin(product);
+  const specification = sourceSpecificationForField(product, field);
+  if (specification) return specification.options;
   // Attribute lookup above already rejected nonmatching property IDs. Limit
   // fallback to top-level metadata, SKU groups and supported title inference.
   return source?.value ?? inferRequiredAttributeValue({ ...product, attributes: [], customAttributes: [] }, ...(field.labels || [field.label]));
 }
 
 function hasSourceSpecification(product, field) {
-  return field.saleSpecification && (product.variantGroups || []).some((group) => group.options?.length
-    && ((field.id && attributeId(group) === field.id)
-      || (field.labels || [field.label]).some((label) => requiredAttributeKey(label) === requiredAttributeKey(group.name))));
+  return Boolean(sourceSpecificationForField(product, field));
 }
 
 export async function fillCategoryAttributes(page, product, onProgress = () => {}) {
@@ -5544,7 +5596,7 @@ export class SellerPublisher {
     for (const group of product.variantGroups || []) {
       const name = String(group?.name || '').trim();
       const value = Array.isArray(group?.options) ? group.options.find(Boolean) : '';
-      if (!name || !value || /颜色|colou?r/i.test(name) || knownAttributeNames.has(normalizedName(name))) continue;
+      if (!name || !value || isColorVariantGroup(group) || knownAttributeNames.has(normalizedName(name))) continue;
       attributeItems.push({ name, value });
       knownAttributeNames.add(normalizedName(name));
     }
@@ -5631,7 +5683,7 @@ export class SellerPublisher {
     }
 
     onProgress('填写颜色和商品规格');
-    const colorGroup = (product.variantGroups || []).find((group) => /颜色|colou?r/i.test(group.name));
+    const colorGroup = (product.variantGroups || []).find(isColorVariantGroup);
     const colorValues = colorGroup?.options?.length ? colorGroup.options : [];
     const colorId = await colorSaleAttributeId(page);
     const targetSupportsColor = await saleAttributeIsAvailable(page, colorId);
@@ -6299,8 +6351,8 @@ export class SellerPublisher {
     const mediaReady = Promise.allSettled([
       this.downloadImageSet(product, product.mainImages?.length ? product.mainImages : [product.mainImage, ...(product.images || [])], 'main', 6),
       this.downloadImageSet(product, product.detailImages || [], 'detail', product.descriptionTemplate ? 30 : 8),
-      ...[...new Set((product.variantGroups || []).find((group) => /颜色|colou?r/i.test(group.name))?.options || [])].slice(0, 12).map((value, index) => {
-        const group = product.variantGroups.find((item) => /颜色|colou?r/i.test(item.name));
+      ...[...new Set((product.variantGroups || []).find(isColorVariantGroup)?.options || [])].slice(0, 12).map((value, index) => {
+        const group = product.variantGroups.find(isColorVariantGroup);
         return this.downloadImageSet(product, [group.optionImages?.[value] || group.optionImages?.[englishSpecText(value)]], `spec-color-${index}`, 1);
       }),
     ]);
@@ -6460,7 +6512,7 @@ export class SellerPublisher {
     // source color transaction immediately before submit: selected spec,
     // exact source value, and its uploaded source image must all be present.
     reportStage('复核颜色、型号和规格图片');
-    const finalColorGroup = (product.variantGroups || []).find((group) => /颜色|colou?r/i.test(group.name));
+    const finalColorGroup = (product.variantGroups || []).find(isColorVariantGroup);
     const finalColorId = await colorSaleAttributeId(page);
     const finalColorValues = [...new Set(finalColorGroup?.options || [])].map((value) => englishSpecText(value)).filter(Boolean);
     const finalUsesColorSaleSpec = shouldUseColorSaleSpecification(
@@ -6672,7 +6724,7 @@ export class SellerPublisher {
           if (blocked) throw new Error(`国际站规格修复失败：来源规格“${blocked}”未保留`);
           const download = (urls, prefix, limit) => this.downloadImageSet(product, urls, prefix, limit);
           const specImagesRepaired = await enableImageBackedVariantSpecs(page, product, result.groups, download, reportStage);
-          const colorGroup = (product.variantGroups || []).find((group) => /颜色|colou?r/i.test(group.name));
+          const colorGroup = (product.variantGroups || []).find(isColorVariantGroup);
           const colorId = await colorSaleAttributeId(page);
           let colorRepaired = false;
           if (shouldUseColorSaleSpecification(colorGroup, await saleAttributeIsAvailable(page, colorId))) {
