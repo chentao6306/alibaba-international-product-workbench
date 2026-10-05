@@ -5,6 +5,7 @@ import { productCategory } from './category-routing.js';
 import { attachCategoryRequirements } from './category-readiness.js';
 import { findWorkspaceJobs } from './store.js';
 import { productEditPatch } from './product-edit.js';
+import { sourcePlatform, sourcePlatformLabel } from './source-platform.js';
 
 const success = (status) => ['published', 'submitted', 'success'].includes(String(status || '').toLowerCase());
 const hash = (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -36,7 +37,9 @@ export function referenceCandidates(state) {
   return [...state.products.filter(publishedReference), ...(state.referenceTemplates || [])].map((product) => {
     const template = product.referenceTemplate || referenceTemplate(product);
     return { id: product.id, title: product.title, categoryId: template.categoryId, categoryPath: template.categoryPath,
-      source: product.referenceTemplate ? 'seller' : 'local', template };
+      source: product.referenceTemplate ? 'seller' : 'local',
+      sourcePlatform: product.referenceTemplate ? 'alibaba.com' : sourcePlatform(product),
+      sourcePlatformLabel: product.referenceTemplate ? '国际站卖家商品' : sourcePlatformLabel(product), template };
   });
 }
 

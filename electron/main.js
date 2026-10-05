@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage, session } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, session, shell } from 'electron';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -15,6 +15,7 @@ import { browserStep } from '../server/browser-step.js';
 import { captureSellerReferenceWithExecutor } from '../server/seller-reference.js';
 import { startLocalService } from './local-service.js';
 import { navigateSourceWindow, sourceProductUrl } from './source-navigation.js';
+import { parseCollectionUrl, sourcePlatform } from '../server/source-platform.js';
 import { Updater } from './updater.js';
 import { launchInstaller } from './update-install.js';
 import { UPDATE_CONFIG } from './update-config.js';
@@ -828,6 +829,11 @@ globalThis.__KUA_YIPU_SECURE_STORAGE = {
 handleLocalIpc('auth:enter', async () => enterSystem());
 handleLocalIpc('alibaba:open-source', async (_event, url) => {
   if (!currentSession?.verified || !authorizationLease.valid()) throw new Error('请先登录');
+  if (sourcePlatform({ sourceUrl: url }) !== 'alibaba.com') {
+    const target = parseCollectionUrl(url);
+    await shell.openExternal(target.url);
+    return { external: true };
+  }
   return openAlibabaSourceWindow(url);
 });
 app.on('before-quit', (event) => {

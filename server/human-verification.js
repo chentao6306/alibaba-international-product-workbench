@@ -5,6 +5,14 @@ export const withVerificationContext = (options, run) => verificationContext.run
 export const verificationOptions = () => verificationContext.getStore() || {};
 export const verificationPaused = () => Object.assign(new Error('人工验证等待已暂停，已保存的数据保留，可继续任务'), { code: 'COLLECT_PAUSED' });
 
+export function verificationUrlAllowed(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !url.username && !url.password && (!url.port || url.port === '443')
+      && /(^|\.)(?:alibaba\.com|1688\.com|aliexpress\.com|alicdn\.com|made-in-china\.com)$/.test(url.hostname);
+  } catch { return false; }
+}
+
 // This function is serialized into either Chromium or an Electron web view.
 export function inspectVerificationDocument() {
   const visible = (node) => {

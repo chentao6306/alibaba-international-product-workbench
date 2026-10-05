@@ -42,10 +42,13 @@ const COLLECTION_VIEWS = {
   image: { title: '以图搜品采集', platform: 'alibaba.com', method: 'image-search', placeholder: 'https://www.alibaba.com/search/page?SearchScene=imageTextSearch&imagePath=...' },
   domestic: { title: '1688 采集', platform: '1688', method: 'product', placeholder: 'https://detail.1688.com/offer/...' },
   aliexpress: { title: '速卖通采集', platform: 'aliexpress', method: 'product', placeholder: 'https://www.aliexpress.com/item/...' },
+  madeinchina: { title: '中国制造网采集', platform: 'made-in-china', method: 'product', placeholder: 'https://供应商.en.made-in-china.com/product/商品编号/China-商品名称.html', note: '支持单件、多链接及店铺采集。明确匹配的国际站类目会自动带入；也可引用从1688或国际站采集后已成功上架的同类商品。发布前请核对售价、属性和规格；询价商品需填写售价。' },
 };
 
 function LinkCollectionView({ entry, state, refresh, notify, onMenu, navigate, folderId }) {
-  const config = COLLECTION_VIEWS[entry];
+  const [micMethod, setMicMethod] = useState('product');
+  const config = { ...COLLECTION_VIEWS[entry], ...(entry === 'madeinchina' ? { method: micMethod } : {}) };
+  const shop = config.method === 'shop-products';
   const [urls, setUrls] = useState('');
   const [busy, setBusy] = useState(false);
   const [options, setOptions] = useState({ startPage: 1, endPage: 1, maxProducts: 100, delaySeconds: 3 });
@@ -69,11 +72,13 @@ function LinkCollectionView({ entry, state, refresh, notify, onMenu, navigate, f
     <Header title={config.title} subtitle={`${sourcePlatformLabel({ sourcePlatform: config.platform })} → 阿里巴巴国际站`} onMenu={onMenu} />
     <CollectionFolders {...{ state, folderId, refresh, notify }} />
     <section className="collection-entry">
-      <div className="section-title"><h2>{config.method === 'image-search' ? '搜索结果链接' : '商品链接'}</h2>{config.platform !== 'alibaba.com' && <button className="secondary-button" onClick={login} disabled={busy || running}><ExternalLink size={16} />平台登录</button>}</div>
+      <div className="section-title"><h2>{shop ? '店铺链接' : config.method === 'image-search' ? '搜索结果链接' : '商品链接'}</h2>{config.platform !== 'alibaba.com' && <button className="secondary-button" onClick={login} disabled={busy || running}><ExternalLink size={16} />平台登录</button>}</div>
+      {config.note && <p className="collection-entry-note">{config.note}</p>}
       <form onSubmit={submit} className="link-collection-form">
-        <label><span>{config.method === 'image-search' ? '国际站以图搜品结果页' : '商品详情页（每行一个）'}</span><textarea aria-label="采集链接" rows={config.method === 'image-search' ? 4 : 7} value={urls} onChange={(event) => setUrls(event.target.value)} placeholder={config.placeholder} required /></label>
+        {entry === 'madeinchina' && <label><span>采集方式</span><select aria-label="中国制造网采集方式" disabled={busy || running} value={micMethod} onChange={(event) => { setMicMethod(event.target.value); setUrls(''); }}><option value="product">单个商品 / 多链接批量采集</option><option value="shop-products">店铺 / 店铺商品分组采集</option></select></label>}
+        <label><span>{shop ? '店铺首页、商品列表或商品分组链接（一个）' : config.method === 'image-search' ? '国际站以图搜品结果页' : '商品详情页（每行一个）'}</span><textarea aria-label="采集链接" rows={shop || config.method === 'image-search' ? 4 : 7} value={urls} onChange={(event) => setUrls(event.target.value)} placeholder={shop ? 'https://供应商.en.made-in-china.com/' : config.placeholder} required /></label>
         <div className="link-collection-options">
-          {config.method === 'image-search' && [['startPage', '起始页'], ['endPage', '结束页'], ['maxProducts', '商品上限']].map(([key, label]) => <label key={key}><span>{label}</span><input type="number" min="1" max={key === 'maxProducts' ? 1000 : 100} value={options[key]} onChange={(event) => setOptions({ ...options, [key]: Number(event.target.value) })} /></label>)}
+          {(shop || config.method === 'image-search') && [['startPage', '起始页'], ['endPage', '结束页'], ['maxProducts', '商品上限']].map(([key, label]) => <label key={key}><span>{label}</span><input type="number" min="1" max={key === 'maxProducts' ? 1000 : 100} value={options[key]} onChange={(event) => setOptions({ ...options, [key]: Number(event.target.value) })} /></label>)}
           <label><span>采集间隔（秒）</span><input type="number" min="0" max="60" step="0.5" value={options.delaySeconds} onChange={(event) => setOptions({ ...options, delaySeconds: Number(event.target.value) })} /></label>
           <button className="primary-button" disabled={busy || active || !urls.trim() || !folderId}>{busy ? <LoaderCircle size={17} className="spin" /> : <Play size={17} />}{active ? '采集任务未完成' : '开始采集'}</button>
         </div>
@@ -807,6 +812,7 @@ const NAV = [
   { id: 'image', label: '以图搜品采集', icon: ScanSearch },
   { id: 'domestic', label: '1688 采集', icon: Store },
   { id: 'aliexpress', label: '速卖通采集', icon: Globe },
+  { id: 'madeinchina', label: '中国制造网采集', icon: Store },
   { id: 'products', label: '商品工作台', icon: Boxes },
   { id: 'publish', label: '上架任务', icon: CloudUpload },
   { id: 'announcements', label: '公告', icon: Bell },

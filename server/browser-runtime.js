@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright-core';
 import { readPrivateSession } from './private-session-storage.js';
-import { inspectVerificationDocument, verificationOptions, verificationPaused, waitForVerification } from './human-verification.js';
+import { inspectVerificationDocument, verificationOptions, verificationPaused, waitForVerification, verificationUrlAllowed } from './human-verification.js';
 import { browserStep } from './browser-step.js';
 import { nativeBrowserWindows } from './native-browser-window.js';
 
@@ -313,7 +313,7 @@ export async function waitForHumanVerification(page, options = {}) {
         if (handled.verified && handled.url) {
           try {
             const target = new URL(handled.url);
-            if (target.protocol === 'https:' && /(^|\.)(?:alibaba\.com|1688\.com|aliexpress\.com|alicdn\.com)$/.test(target.hostname)) resumeUrl = target.href;
+            if (verificationUrlAllowed(target.href)) resumeUrl = target.href;
           } catch {}
         }
         onWaiting('验证已完成，正在恢复商品采集');

@@ -5,7 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright-core';
 import { findChromium, launchPersistent, waitForHumanVerification } from '../server/browser-runtime.js';
-import { inspectVerificationDocument, waitForVerification, verificationOptions, withVerificationContext } from '../server/human-verification.js';
+import { inspectVerificationDocument, waitForVerification, verificationOptions, withVerificationContext, verificationUrlAllowed } from '../server/human-verification.js';
+
+test('verification accepts the supported supplier domains and rejects spoofed or credential-bearing destinations', () => {
+  for (const host of ['www.alibaba.com', 'detail.1688.com', 'www.aliexpress.com', 'g.alicdn.com', 'supplier.en.made-in-china.com']) assert.equal(verificationUrlAllowed(`https://${host}/verify`), true);
+  for (const url of ['https://made-in-china.com.evil.test/verify', 'https://evil-made-in-china.com/verify', 'https://user:secret@supplier.en.made-in-china.com/', 'http://supplier.en.made-in-china.com/', 'https://supplier.en.made-in-china.com:8443/', 'file:///tmp/test']) assert.equal(verificationUrlAllowed(url), false);
+});
 
 test('human verification waits beyond days and requires consecutive healthy pages after refresh', async () => {
   let elapsed = 0;

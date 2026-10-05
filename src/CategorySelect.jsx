@@ -15,7 +15,7 @@ async function request(url, options) {
   return data;
 }
 
-export default function CategorySelect({ path = '', categoryId = '', onChange, onCancel }) {
+export default function CategorySelect({ path = '', categoryId = '', suggestions = [], onChange, onCancel }) {
   const [catalog, setCatalog] = useState(null);
   const [meta, setMeta] = useState(null);
   const [error, setError] = useState('');
@@ -81,6 +81,7 @@ export default function CategorySelect({ path = '', categoryId = '', onChange, o
     if (event.key === 'Enter' && event.target.tagName === 'INPUT') { event.preventDefault(); if (mode === 'reference' && referenceUrl.trim() && !reading) readReference(); }
   }}>
     <div className="category-picker-current">当前类目：{path || '未选择'}{categoryId ? `（ID ${categoryId}）` : ''}</div>
+    {!!suggestions.length && catalog && <div className="category-picker-results"><strong>根据来源类目找到的候选，请核对具体商品</strong><div role="listbox" aria-label="来源类目候选">{suggestions.map((item) => catalog.get(item.id)).filter((node) => node?.leaf).map((node) => renderChoice(node, true))}</div></div>}
     <div className="category-picker-toolbar">
       <div role="tablist" aria-label="类目选择方式">{[['browse', '浏览类目'], ['search', '搜索类目'], ['recent', '最近使用'], ['reference', '读取同类商品']].map(([id, title]) => <button type="button" role="tab" aria-selected={mode === id} key={id} onClick={() => changeMode(id)}>{title}</button>)}</div>
       <select aria-label="类目显示语言" value={language} onChange={(event) => setLanguage(event.target.value)}><option value="en">English</option><option value="zh">简体中文</option></select>

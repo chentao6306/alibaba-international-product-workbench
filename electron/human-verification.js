@@ -1,14 +1,10 @@
 import { BrowserWindow, WebContentsView, ipcMain } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { inspectVerificationDocument, waitForVerification, verificationPaused } from '../server/human-verification.js';
+import { inspectVerificationDocument, waitForVerification, verificationPaused, verificationUrlAllowed as allowedUrl } from '../server/human-verification.js';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const sessions = new Map();
-const allowedUrl = (value) => {
-  try { const url = new URL(value); return url.protocol === 'https:' && /(^|\.)(?:alibaba\.com|1688\.com|aliexpress\.com|alicdn\.com)$/.test(url.hostname); }
-  catch { return false; }
-};
 
 ipcMain.handle('verification:refresh', (event) => {
   const current = sessions.get(event.sender.id);
@@ -102,7 +98,7 @@ export async function showHumanVerification({ url, partition, icon, shouldStop =
     // leaving the actual collector challenge unresolved.
     for (const cookie of requestCookies) {
       const domain = String(cookie.domain || '').replace(/^\./, '');
-      if (!/(^|\.)(?:alibaba\.com|1688\.com|aliexpress\.com|alicdn\.com)$/.test(domain)) continue;
+      if (!allowedUrl(`https://${domain}/`)) continue;
       const nextCookie = { url: `https://${domain}${cookie.path || '/'}`,
         name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path || '/',
         secure: cookie.secure, httpOnly: cookie.httpOnly,

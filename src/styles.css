@@ -131,9 +131,10 @@ main { margin-left: 232px; padding: 31px 34px 60px; max-width: 1640px; }
 .platform-1688 { color: #ad591c; }
 .platform-aliexpress { color: #994753; }
 .collection-entry { background: white; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.collection-entry-note { margin: 20px 22px 0; color: var(--muted); font-size: 13px; line-height: 1.7; }
 .link-collection-form { padding: 22px; display: grid; gap: 18px; }
 .link-collection-form label { display: flex; flex-direction: column; min-width: 0; gap: 7px; font-size: 12px; color: var(--muted); }
-.link-collection-form textarea, .link-collection-form input { min-width: 0; width: 100%; padding: 10px; border: 1px solid #cfd6da; border-radius: 5px; background: white; color: var(--ink); }
+.link-collection-form textarea, .link-collection-form input, .link-collection-form select { min-width: 0; width: 100%; padding: 10px; border: 1px solid #cfd6da; border-radius: 5px; background: white; color: var(--ink); }
 .link-collection-form textarea { resize: vertical; overflow-wrap: anywhere; line-height: 1.6; }
 .link-collection-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); align-items: end; gap: 16px; }
 .link-collection-options button { height: 40px; }

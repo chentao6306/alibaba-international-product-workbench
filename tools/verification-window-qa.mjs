@@ -5,12 +5,18 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import sharp from 'sharp';
+import { createRequire } from 'node:module';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'verification-window-qa-'));
 app.setPath('userData', path.join(root, 'profile'));
 app.on('window-all-closed', () => {});
 async function main() {
   await app.whenReady();
+  if (process.argv[2] && fs.existsSync(path.resolve(process.argv[2]) + '.bin')) {
+    await import('bytenode');
+    const directory = path.dirname(path.resolve(process.argv[2]));
+    createRequire(import.meta.url)(path.join(directory, 'protected-loader.jsc'))(path.dirname(directory));
+  }
   const { showHumanVerification } = await import(process.argv[2]
     ? pathToFileURL(path.resolve(process.argv[2])).href : '../electron/human-verification.js');
   const watchdog = setTimeout(() => { console.error('Verification window QA timed out'); app.exit(1); }, 60000);
@@ -37,6 +43,11 @@ async function main() {
   };
   let saved = 0;
   try {
+    phase = 'ready';
+    await showHumanVerification({ url: 'https://supplier.en.made-in-china.com/product/TestId123/China-Product.html', partition,
+      requestCookies: [{ name: 'mic-qa-session', value: 'synthetic', domain: '.made-in-china.com', path: '/', secure: true, httpOnly: true }],
+      saveSession: async ({ webContents }) => { assert.equal((await webContents.session.cookies.get({ domain: 'made-in-china.com', name: 'mic-qa-session' }))[0]?.value, 'synthetic'); },
+    });
     phase = 'stalled-challenge';
     let stalled;
     const stalledOperation = showHumanVerification({ url: 'https://www.alibaba.com/product-detail/qa.html', partition,

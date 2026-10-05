@@ -32,6 +32,8 @@ import { AnnouncementInbox } from './announcements.js';
 import { normalizeSellerGroup } from './seller-groups.js';
 import { categoryChangePatch, productEditPatch } from './product-edit.js';
 import { CATEGORY_CATALOG as categoryCatalog } from './category-catalog-data.js';
+import { createCategoryCatalog } from './category-catalog-model.js';
+import { mapSourceCategory } from './source-category-mapping.js';
 import { SecureSettings } from './secure-settings.js';
 import { DEFAULT_PROCESSING, prepareMarketplaceProduct, processingSettings, translateProductTitle } from './product-processing.js';
 import { initializeCollectionFolders, requireCollectionFolder, saveCollectionFolder, deleteCollectionFolder, moveProductsToFolder, findCollectedProduct } from './collection-folders.js';
@@ -71,6 +73,7 @@ function directoryBytes(directory) {
 }
 
 const store = new JsonStore(path.join(dataDir, 'workspace.json'));
+const sourceCategoryCatalog = createCategoryCatalog(categoryCatalog.nodes);
 const secureSettings = new SecureSettings(dataDir);
 async function processingPatch(product) {
   let apiKey = '';
@@ -523,12 +526,17 @@ async function startLinkCollectJob(jobId) {
   const completedKeys = new Set(metadata.completedKeys || []);
   const failures = [...(metadata.failures || [])];
   const options = { ...metadata.options, collectionMethod: metadata.collectionMethod,
-    prepareProduct: async (product) => ({ ...product, ...await processingPatch(product), _collectedSnapshot: product }),
+    prepareProduct: async (product) => ({ ...product, ...mapSourceCategory(product, sourceCategoryCatalog), ...await processingPatch(product), _collectedSnapshot: product._collectedSnapshot || product }),
     completedKeys: [...completedKeys],
     shouldStop: () => ['pause_requested', 'paused', 'cancelled'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status)),
   };
   options.onWaiting = (message) => { if (!options.shouldStop()) store.patchJob(jobId, { message }); };
   try {
+    if (metadata.collectionMethod === 'shop-products') {
+      const checkpoint = new CollectionCheckpoint(dataDir, jobId);
+      options.checkpoint = checkpoint.read();
+      options.onCheckpoint = (value) => { checkpoint.write(value); options.checkpoint = value; };
+    }
     store.patchJob(jobId, { status: 'running', message: '正在读取来源商品' });
     const progress = (event) => {
       if (event.product) saveCollectedProduct('', event.product, options);
@@ -545,6 +553,7 @@ async function startLinkCollectJob(jobId) {
     };
     const products = await withVerificationContext(options, () => metadata.collectionMethod === 'image-search'
       ? collector.collectSearch(metadata.links[0], progress, options)
+      : metadata.collectionMethod === 'shop-products' ? collector.collectMadeInChinaShop(metadata.links[0], progress, options)
       : collector.collectLinks(metadata.links, progress, options));
     if (options.shouldStop()) throw Object.assign(new Error('已暂停采集'), { code: 'COLLECT_PAUSED' });
     store.patchJob(jobId, { status: failures.length === completedKeys.size ? 'failed' : 'completed', progress: completedKeys.size, total: completedKeys.size,
@@ -558,7 +567,7 @@ async function startLinkCollectJob(jobId) {
 app.post('/api/collect/links', (request, response, next) => {
   try {
     requireCollectionFolder(store.read(), request.body.collectionFolderId);
-    const method = request.body.method === 'image-search' ? 'image-search' : 'product';
+    const method = ['image-search', 'shop-products'].includes(request.body.method) ? request.body.method : 'product';
     const links = collectionUrls(request.body.urls, method, request.body.platform);
     const unfinished = store.read().jobs.find((item) => item.type === 'collect' && item.metadata?.collectionMethod === method
       && item.metadata?.collectionFolderId === request.body.collectionFolderId
@@ -734,7 +743,8 @@ app.post('/api/products/:id/refresh-detail', async (request, response, next) => 
     const state = store.read();
     const product = state.products.find((item) => item.id === request.params.id);
     if (!product) return next(Object.assign(new Error('没有找到该商品'), { status: 404 }));
-    const [enriched] = await collector.enrichProducts([product]);
+    const [collected] = await collector.enrichProducts([product]);
+    const { _collectedSnapshot: sourceSnapshot, ...enriched } = collected;
     const updated = store.update((draft) => {
       const target = draft.products.find((item) => item.id === product.id);
       // A public listing can be readable while Alibaba blocks an individual
@@ -743,12 +753,12 @@ app.post('/api/products/:id/refresh-detail', async (request, response, next) => 
       const hasWarning = Boolean(enriched?.collectWarning);
       if (hasWarning) Object.assign(target, { collectWarning: enriched.collectWarning });
       else {
-        Object.assign(target, enriched);
+        Object.assign(target, enriched, mapSourceCategory(enriched, sourceCategoryCatalog));
         delete target.collectWarning;
       }
       Object.assign(target, { status: 'ready', updatedAt: new Date().toISOString() });
       delete target.publishResult;
-      if (!hasWarning) syncProductModel(attachCategoryRequirements(target, draft.postingSchemas), { captureSource: true, sourceSnapshot: enriched });
+      if (!hasWarning) syncProductModel(attachCategoryRequirements(target, draft.postingSchemas), { captureSource: true, sourceSnapshot: sourceSnapshot || enriched });
       return target;
     });
     response.json(updated);

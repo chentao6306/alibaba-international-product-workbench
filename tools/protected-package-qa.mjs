@@ -20,7 +20,7 @@ for (const file of encrypted) {
 assert.equal(entries.some((name) => /^\/(server|electron|dist)\/.*\.map$/.test(name)), false);
 assert.ok(extractFile(archive, 'electron/protected-loader.jsc').length > 1000);
 const stage = fs.mkdtempSync(path.resolve('.data', 'protected-qa-'));
-const selected = ['source-collection', 'cross-category-attributes', 'attribute-commit', 'multi-text-attributes', 'alibaba-login', 'logistics-policy', 'sku-reference'];
+const selected = ['source-collection', 'cross-category-attributes', 'attribute-commit', 'multi-text-attributes', 'alibaba-login', 'logistics-policy', 'sku-reference', 'made-in-china', 'human-verification'];
 const files = [];
 for (const name of selected) {
   const original = fs.readFileSync(`test/${name}.test.js`, 'utf8');

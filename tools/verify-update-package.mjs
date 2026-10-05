@@ -3,7 +3,6 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { transform } from 'esbuild';
 import { verifyArtifact } from '../auth-server/update-protocol.js';
 import { UPDATE_CONFIG } from '../electron/update-config.js';
 
@@ -15,11 +14,13 @@ const archive = path.join(release, 'win-unpacked', 'resources', 'app.asar');
 let modules = 0;
 for (const directory of ['electron', 'server']) {
   for (const name of fs.readdirSync(directory).filter((name) => /\.(js|cjs|html)$/.test(name))) {
-    const source = fs.readFileSync(path.join(directory, name), 'utf8');
-    const expected = /\.(js|cjs)$/.test(name) ? (await transform(source, { loader: 'js', target: 'node22', minifyWhitespace: true,
-      minifySyntax: false, minifyIdentifiers: false, legalComments: 'none', sourcemap: false })).code : source;
-    assert.equal(asar.extractFile(archive, `${directory}/${name}`).toString(), expected, `Stale module: ${directory}/${name}`);
+    const generated = path.join('.packaged', directory, name);
+    assert.ok(fs.existsSync(generated), `Missing protected build output: ${directory}/${name}`);
+    assert.ok(asar.extractFile(archive, `${directory}/${name}`).equals(fs.readFileSync(generated)), `Stale module: ${directory}/${name}`);
     modules++;
+  }
+  for (const name of fs.readdirSync(path.join('.packaged', directory)).filter((name) => /\.(?:bin|jsc)$/.test(name))) {
+    assert.ok(asar.extractFile(archive, `${directory}/${name}`).equals(fs.readFileSync(path.join('.packaged', directory, name))), `Stale protected module: ${directory}/${name}`);
   }
 }
 assert.equal(asar.extractFile(archive, 'auth-server/update-protocol.js').toString(), fs.readFileSync('auth-server/update-protocol.js', 'utf8'));

@@ -1,5 +1,6 @@
 import { load } from 'cheerio';
 import JSON5 from 'json5';
+import { extractMadeInChinaProduct } from './made-in-china-source-data.js';
 
 const text = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
 const list = (value) => Array.isArray(value) ? value : [];
@@ -47,6 +48,7 @@ export function readAssignedJson(script, name) {
 }
 
 export function extractMarketplaceProduct(html, platform, baseUrl, pageData = {}) {
+  if (platform === 'made-in-china') return extractMadeInChinaProduct(html, baseUrl);
   const $ = load(html);
   const context = platform === '1688' ? pageData.context?.result : null;
   const modules = context?.data || {};

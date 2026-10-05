@@ -1,8 +1,23 @@
 import path from 'node:path';
 import { hasExplicitHumanChallenge, hidePage, launchPersistent, revealPage, settlePage, syncAlibabaCookies, waitForHumanVerification } from './browser-runtime.js';
 import { SOURCE_LANGUAGE_HEADERS, withSourceLocale } from './source-locale.js';
-import { parseCollectionUrl, sourcePlatform } from './source-platform.js';
+import { parseCollectionUrl, sourcePlatform, sourcePlatformLabel } from './source-platform.js';
 import { extractMarketplaceProduct, marketplaceDescriptionHtml } from './marketplace-source-data.js';
+import { readMadeInChinaProduct, fetchMadeInChinaHtml } from './made-in-china-source-data.js';
+import { cacheMadeInChinaImages } from './made-in-china-media.js';
+import { extractMadeInChinaListing, collectMadeInChinaShop } from './made-in-china-shop.js';
+
+function mergeMarketplaceDetail(base, parsed) {
+  // Preserve an explicitly chosen target category and previously converted prices.
+  return { ...base, ...parsed, sourceId: base.sourceId || parsed.sourceId,
+    ...(base.source?.snapshot && base.title !== base.source.snapshot.title ? { title: base.title } : {}),
+    categoryId: base.categoryId || '', categoryPath: base.categoryPath || [],
+    ...(base.priceConversion ? {
+      price: base.price, currencySymbol: base.currencySymbol, priceTiers: base.priceTiers,
+      skus: base.skus, fobPrice: base.fobPrice, priceMode: base.priceMode, priceConversion: base.priceConversion,
+    } : {}),
+  };
+}
 
 function absoluteUrl(value, base) {
   if (!value) return '';
@@ -94,6 +109,7 @@ export async function readInternationalModules(page) {
 
 export class ShopCollector {
   constructor(dataDir, detailReader = null) {
+    this.dataDir = dataDir;
     this.profileDir = path.join(dataDir, 'collector-profile');
     this.detailReader = detailReader;
     this.context = null;
@@ -456,6 +472,25 @@ export class ShopCollector {
     });
   }
 
+  async collectMadeInChinaShop(link, onProgress = () => {}, options = {}) {
+    return collectMadeInChinaShop(link, onProgress, options, {
+      readListing: async (url) => {
+        const html = await fetchMadeInChinaHtml(url, 'shop-products');
+        const listing = html && extractMadeInChinaListing(html, url);
+        if (listing?.readable) return listing;
+        return this.withPage(async (page) => {
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+          await settlePage(page);
+          await waitForHumanVerification(page);
+          const landed = parseCollectionUrl(page.url(), 'shop-products', 'made-in-china');
+          if (landed.url !== url) throw new Error('店铺商品列表已跳转，请检查店铺链接和页码');
+          return extractMadeInChinaListing(await page.content(), url);
+        });
+      },
+      collectLinks: (...args) => this.collectLinks(...args),
+    });
+  }
+
   async collectLinks(links, onProgress = () => {}, options = {}) {
     const products = [];
     const completed = new Set(options.completedKeys || []);
@@ -497,7 +532,9 @@ export class ShopCollector {
           sourcePlatform: 'alibaba.com',
         });
       } else {
-        result.push(await this.withPage((page) => this.readMarketplaceDetail(page, product)));
+        const direct = sourcePlatform(product) === 'made-in-china' ? await readMadeInChinaProduct(product.sourceUrl) : null;
+        const enriched = direct ? mergeMarketplaceDetail(product, direct) : await this.withPage((page) => this.readMarketplaceDetail(page, product));
+        result.push(sourcePlatform(product) === 'made-in-china' ? await cacheMadeInChinaImages(enriched, this.dataDir) : enriched);
       }
     }
     return result;
@@ -548,9 +585,13 @@ export class ShopCollector {
     await page.goto(base.sourceUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await settlePage(page);
     const login = /login|passport|signin/i.test(new URL(page.url()).hostname + new URL(page.url()).pathname);
-    if (login) throw new Error(`${platform === '1688' ? '1688' : '速卖通'}需要登录，请在采集页打开平台登录后重试`);
+    if (login) throw new Error(`${sourcePlatformLabel(base)}需要登录，请在采集页打开平台登录后重试`);
     await waitForHumanVerification(page);
-    await page.locator('v-detail-l, #desc-lazyload-container, #product-description, .module-od-product-description, [class*="description--origin"]').first().scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+    if (platform === 'made-in-china') {
+      const landed = parseCollectionUrl(page.url(), 'product', platform);
+      if (landed.sourceId !== parseCollectionUrl(base.sourceUrl, 'product', platform).sourceId) throw new Error('中国制造网商品已跳转到其他商品，请检查来源链接');
+    }
+    await page.locator('v-detail-l, #desc-lazyload-container, #product-description, #product .rich-text, .module-od-product-description, [class*="description--origin"]').first().scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
     await page.waitForTimeout(1000);
     const globals = await page.evaluate(() => {
       const result = {};
@@ -562,7 +603,7 @@ export class ShopCollector {
       return result;
     });
     const parsed = extractMarketplaceProduct(await page.content(), platform, base.sourceUrl, globals);
-    if (!parsed.title || !parsed.mainImages.length || (!Number(parsed.price) && !parsed.skus.length)) throw new Error('未读取到完整商品数据（标题、图片或价格），请完成平台登录或验证后重试');
+    if (!parsed.title || !parsed.mainImages.length || (platform !== 'made-in-china' && !Number(parsed.price) && !parsed.skus.length)) throw new Error('未读取到完整商品数据（标题、图片或价格），请完成平台登录或验证后重试');
     if (!parsed.detailImages.length && parsed.descriptionUrl) {
       const url = new URL(parsed.descriptionUrl);
       if (url.protocol === 'https:' && (/^(?:itemcdn\.tmall\.com)$/.test(url.hostname) || /(^|\.)(?:1688\.com|alicdn\.com|aliexpress\.com)$/.test(url.hostname))) {
@@ -576,26 +617,19 @@ export class ShopCollector {
         }
       }
     }
-    // Refresh source fields without discarding an explicit target category or USD pricing.
-    return { ...base, ...parsed, sourceId: base.sourceId,
-      ...(base.source?.snapshot && base.title !== base.source.snapshot.title ? { title: base.title } : {}),
-      categoryId: base.categoryId || '', categoryPath: base.categoryPath || [],
-      ...(base.priceConversion ? {
-        price: base.price, currencySymbol: base.currencySymbol, priceTiers: base.priceTiers,
-        skus: base.skus, fobPrice: base.fobPrice, priceMode: base.priceMode, priceConversion: base.priceConversion,
-      } : {}),
-    };
+    return mergeMarketplaceDetail(base, parsed);
   }
 
   async openMarketplace(platform) {
-    if (!['1688', 'aliexpress'].includes(platform)) throw new Error('不支持该平台');
+    const homes = { '1688': 'https://www.1688.com/', aliexpress: 'https://www.aliexpress.com/', 'made-in-china': 'https://www.made-in-china.com/' };
+    if (!Object.hasOwn(homes, platform)) throw new Error('不支持该平台');
     await this.resetContext();
     this.context = await launchPersistent(this.profileDir, { headless: false });
     const openedContext = this.context;
     openedContext.on('close', () => { if (this.context === openedContext) { this.context = null; this.verificationPage = null; this.visible = false; } });
     this.visible = true;
     this.verificationPage = this.context.pages()[0] || await this.context.newPage();
-    await this.verificationPage.goto(platform === '1688' ? 'https://www.1688.com/' : 'https://www.aliexpress.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await this.verificationPage.goto(homes[platform], { waitUntil: 'domcontentloaded', timeout: 60000 });
     await revealPage(this.verificationPage);
     return this.status();
   }

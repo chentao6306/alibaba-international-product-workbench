@@ -48,6 +48,9 @@ test('fills translated image specifications and their images without writing int
   const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
   try {
     const page = await browser.newPage();
+    // Upload previews are synthetic. Keep their load events independent of DNS
+    // and network availability across successive setContent calls.
+    await page.route('https://example.test/**', (route) => route.fulfill({ contentType: 'image/png', body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0n0AAAAASUVORK5CYII=', 'base64') }));
     page.setDefaultTimeout(1000);
     for (const [id, name, label, values, sourceId, fixed] of [
       ['191292949', 'Light Color', '灯光颜色', ['Natural White'], '191292949'],
