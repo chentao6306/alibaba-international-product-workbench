@@ -22,10 +22,15 @@ npm run prepare:chromium
 | 减少测试并发 | `npm test -- --test-concurrency=2` | 减少浏览器同时运行数量 |
 | 生成安装版 EXE | `npm run dist:win:installer` | `release-installer/chaodekuai-1.4.58-setup.exe` |
 | 生成便携版 EXE | `npm run dist:win:portable` | `release/chaodekuai-1.4.58-win-x64.exe` |
+| 启动官网开发预览 | `npm run website:dev` | `http://127.0.0.1:5175/website/` |
+| 构建官网 | `npm run website:build` | 独立输出 `dist-website/` |
+| 预览官网成品 | `npm run website:preview` | `http://127.0.0.1:4175/website/` |
 
 最常用：改代码用 `npm run dev`；测试桌面端先 `npm run build` 再 `npm run desktop`；给客户打包用 `npm run dist:win:installer`。
 
 ## 在线更新和管理员发布
+
+官网源码在 `website/`，支持电脑和手机浏览，包含功能介绍、入门指南、软件下载及微信二维码。无需域名，可部署到现有服务器 `https://服务器IP/website/`。官网安装包与桌面更新共用后台“系统更新”：上传签名安装包并正式发布后自动同步；草稿不公开，撤回最新版本会停止官网下载。固定下载入口每次获取当前正式版，不依赖写死的版本文件。启动、部署、客服配置及验证见 [官网说明](website/README.md)。
 
 1.4.53 新增“设置 → 软件更新”：显示版本与更新说明、自动检查、下载进度、断点续传、退出后安装。正在执行任务或保存资料时不会开始安装。低于 1.4.53 的旧客户端需要先手动安装一次当前版本，以后可在软件中更新。
 

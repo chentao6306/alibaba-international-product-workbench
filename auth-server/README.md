@@ -164,4 +164,6 @@ PostgreSQL 集成测试仅允许 `AUTH_TEST_DATABASE_URL` 指向名称以 `auth_
 
 登录后台后通过左侧“软件管理 → 系统更新”，上传正式安装包及构建生成的 `.exe.update.json`，填写标题和说明，保存草稿再正式发布。下方版本记录显示完整说明、状态、时间和大小，每条记录可编辑、发布、停止分发或下载。支持上传暂停和分块续传，只有管理员可写。侧栏分组可展开/收起，还可跳转新增授权、版本记录和新建公告；手机上菜单移到顶部。
 
+官网也使用同一份正式版本信息与安装包。`/updates/chaodekuai/download` 是公开的当前正式版下载入口，在请求时选取最新已发布版并返回正确 EXE 文件名，支持 Range，禁止缓存。草稿不公开；撤回最高版本后停止下载，不回退旧版。系统更新页提供“查看官网”和“下载当前官网正式版”入口。官网按 IP 部署到 `/website/` 的操作见 [官网部署](../website/README.md)。
+
 部署需配置 `KUA_YIPU_UPDATE_DIR` 和目录写权限，使用 `deploy/updates.conf`；Nginx 同时配置精确 `/api/admin/updates` 和前缀 `/api/admin/updates/` 路由，防止创建草稿的 POST 被 301 转为 GET。分块路由放行 5 MB 请求。完整说明和后台增量部署步骤见 [软件更新与部署](../docs/software-updates.md)。私钥只在构建电脑，不能上传到服务器。

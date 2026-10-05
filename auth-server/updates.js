@@ -40,12 +40,22 @@ export function registerUpdateRoutes(app, { requireAdmin, directory, publicKey =
   };
   const publicRelease = (item) => ({ title: item.title, notes: item.notes, publishedAt: item.publishedAt, envelope: item.envelope, url: `/updates/chaodekuai/files/${item.id}.exe` });
   const prefix = '/api/admin/updates';
-  app.get('/updates/chaodekuai/latest.json', (_request, response) => {
+  const latestRelease = () => {
     // Withdrawing the newest release stops distribution rather than silently
     // advertising an older package to clients that have not updated yet.
     const newest = read().filter((entry) => entry.publishedAt).sort((a, b) => compareVersions(b.artifact.version, a.artifact.version))[0];
-    const item = newest?.status === 'published' && newest.complete ? newest : null;
+    return newest?.status === 'published' && newest.complete ? newest : null;
+  };
+  app.get('/updates/chaodekuai/latest.json', (_request, response) => {
+    const item = latestRelease();
     response.set('Cache-Control', 'no-store').json({ release: item ? publicRelease(item) : null });
+  });
+  // Resolve at download time as well, including for visitors with a stale tab.
+  app.get('/updates/chaodekuai/download', (_request, response) => {
+    response.set('Cache-Control', 'no-store');
+    const item = latestRelease();
+    if (!item || !fs.existsSync(file(item))) throw fail('当前暂无可下载的正式版，请稍后重试', 404);
+    response.download(file(item), item.artifact.filename);
   });
   app.get('/updates/chaodekuai/files/:filename', (request, response) => {
     const item = find(request.params.filename.replace(/\.exe$/, ''));

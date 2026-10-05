@@ -27,7 +27,8 @@
     <div id="updatesPanel" role="tabpanel" aria-labelledby="updatesTab" hidden>
       <section class="update-card" id="updateEditor">
         <div class="update-card-heading"><h2>发布软件更新</h2><button id="newUpdate" class="secondary" type="button" hidden>新建版本</button></div>
-        <p class="update-intro">上传正式版安装包和构建时生成的签名文件，填写更新说明。上传完成后点击“正式发布”，客户的软件即可检查到更新。只有管理员可以管理版本。</p>
+        <p class="update-intro">上传正式版安装包和构建时生成的签名文件，填写更新说明。点击“正式发布”后，软件内更新与官网下载安装包同步生效，无需再次上传。草稿不对外开放；停止分发最新版本后，官网也会暂停下载。只有管理员可以管理版本。</p>
+        <div class="website-release-links"><a href="/website/" target="_blank" rel="noopener">查看官网 ↗</a><a href="/updates/chaodekuai/download">下载当前官网正式版</a><span>官网自动展示最新正式版及其更新说明</span></div>
         <p id="updateEditing" class="update-editing" hidden></p>
         <form id="updateForm">
           <div class="update-file-grid"><label class="field">安装包 EXE<input id="updateInstaller" type="file" accept=".exe"></label><label class="field">安装包签名文件（.exe.update.json）<input id="updateSignature" type="file" accept=".json"></label></div>

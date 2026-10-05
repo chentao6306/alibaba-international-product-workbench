@@ -84,6 +84,31 @@ test('invalid uploaded bytes cannot become a published release and can be reuplo
   assert.equal((await api(`/${item.id}`, { title: 'x', notes: '', status: 'published' }, 'PATCH')).status, 400);
 });
 
+test('website download tracks administrator releases and withdrawal at request time', async (t) => {
+  const { api, base, publish } = await fixture(t);
+  const downloadUrl = `${base}/updates/chaodekuai/download`;
+  assert.equal((await fetch(downloadUrl)).status, 404);
+  await publish('1.4.58');
+  const draft = (await api('', { envelope: envelope('1.4.59'), title: '官网同步更新', notes: '新的说明' })).data;
+  await api(`/${draft.id}/file?offset=0`, payload, 'PUT', true);
+  await api(`/${draft.id}/complete`, {});
+  const oldDownload = await fetch(downloadUrl, { method: 'HEAD' });
+  assert.equal(oldDownload.status, 200);
+  assert.match(oldDownload.headers.get('content-disposition'), /chaodekuai-1.4.58-setup.exe/);
+  await api(`/${draft.id}`, { title: '官网同步更新', notes: '新的说明', status: 'published' }, 'PATCH');
+  const latest = await fetch(`${base}/updates/chaodekuai/latest.json`).then(response => response.json());
+  assert.equal(latest.release.title, '官网同步更新');
+  assert.equal(latest.release.notes, '新的说明');
+  const download = await fetch(downloadUrl, { headers: { Range: 'bytes=0-99' } });
+  assert.equal(download.status, 206);
+  assert.equal(download.headers.get('cache-control'), 'no-store');
+  assert.match(download.headers.get('content-disposition'), /chaodekuai-1.4.59-setup.exe/);
+  assert.deepEqual(Buffer.from(await download.arrayBuffer()), payload.subarray(0, 100));
+  await api(`/${draft.id}`, { title: '官网同步更新', notes: '停止分发', status: 'withdrawn' }, 'PATCH');
+  assert.equal((await fetch(downloadUrl)).status, 404);
+  assert.equal((await fetch(`${base}/updates/chaodekuai/latest.json`).then(response => response.json())).release, null);
+});
+
 test('administrators can download verified drafts and withdrawn packages without exposing them publicly', async (t) => {
   const { api, base } = await fixture(t);
   const item = (await api('/', { envelope: envelope(), title: '草稿标题', notes: '初始说明' })).data;
