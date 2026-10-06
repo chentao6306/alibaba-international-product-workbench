@@ -7,7 +7,7 @@ staging=$(pwd -P)
 [[ "$staging" == /var/tmp/kua-yipu-announcements-* ]] || exit 1
 export PATH=/opt/kua-yipu-runtime/node-v22.23.2-linux-x64/bin:$PATH
 node --input-type=module -e 'import sharp from "sharp"; await sharp({create:{width:1,height:1,channels:3,background:"white"}}).webp().toBuffer();'
-for file in auth-server/{index,policy,announcement-content,announcement-images,admin,admin-announcements,admin-pages}.js; do node --check "$file"; done
+for file in auth-server/{index,policy,announcement-content,announcement-images,admin,admin-announcements,admin-image-upload,admin-pages}.js; do node --check "$file"; done
 backup="/var/backups/kua-yipu-announcements-$(date +%Y%m%d%H%M%S)"
 install -d -m 700 "$backup"
 cp -a /opt/kua-yipu-auth/auth-server /opt/kua-yipu-auth/package.json /opt/kua-yipu-auth/package-lock.json "$backup/"
@@ -34,7 +34,7 @@ trap rollback ERR
 runuser -u postgres -- psql --set ON_ERROR_STOP=1 --dbname "$database" < auth-server/schema.sql >/dev/null
 cp -a node_modules/. /opt/kua-yipu-auth/node_modules/
 install -m 644 package.json package-lock.json /opt/kua-yipu-auth/
-install -m 644 auth-server/{index,policy,announcement-content,announcement-images,admin,admin-announcements,admin-pages,http-security}.js auth-server/{admin.html,admin.css,schema.sql} /opt/kua-yipu-auth/auth-server/
+install -m 644 auth-server/{index,policy,announcement-content,announcement-images,admin,admin-announcements,admin-image-upload,admin-pages,http-security}.js auth-server/{admin.html,admin.css,schema.sql} /opt/kua-yipu-auth/auth-server/
 chown -R kua-yipu:kua-yipu /opt/kua-yipu-auth/node_modules
 chown kua-yipu:kua-yipu /opt/kua-yipu-auth/package*.json /opt/kua-yipu-auth/auth-server/*.{js,css,html,sql}
 install -d -m 700 -o kua-yipu -g kua-yipu /var/lib/kua-yipu/updates/announcement-images

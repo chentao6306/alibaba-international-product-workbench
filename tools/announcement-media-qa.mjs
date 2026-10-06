@@ -21,7 +21,8 @@ try {
     child.once('error', reject);
     child.stdout.on('data', chunk => { const url = String(chunk).match(/http:\/\/127\.0\.0\.1:\d+/)?.[0]; if (url) { clearTimeout(timer); resolve(url); } });
   });
-  browser = await chromium.launch({ executablePath: findChromium(), headless: true, args: ['--mute-audio'] });
+  const browserOptions = process.env.ANNOUNCEMENT_QA_BROWSER ? { channel: process.env.ANNOUNCEMENT_QA_BROWSER } : { executablePath: findChromium() };
+  browser = await chromium.launch({ ...browserOptions, headless: true, args: ['--mute-audio'] });
   const page = await browser.newPage({ viewport: { width: 1440, height: 1050 } });
   adminPage = page;
   const errors = [];

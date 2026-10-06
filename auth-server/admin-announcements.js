@@ -1,4 +1,5 @@
 import { announcementBlocks, validateAnnouncementBlocks, ANNOUNCEMENT_MAX_IMAGES, ANNOUNCEMENT_MAX_BLOCKS } from './announcement-content.js';
+import { uploadAnnouncementImage } from './admin-image-upload.js';
 
 export function createNoticeEditor({ getToken }) {
   const $ = id => document.getElementById(id);
@@ -77,28 +78,27 @@ export function createNoticeEditor({ getToken }) {
   $('addNoticeText').onclick = () => { blocks.push({ type: 'text', text: '' }); render(); $('noticeBlocks').lastElementChild?.querySelector('textarea')?.focus(); };
   $('addNoticeImages').onclick = () => $('noticeImageFiles').click();
   $('noticeImageFiles').onchange = async event => {
-    const files = [...event.target.files]; event.target.value = '';
+    const input = event.target;
+    const files = [...input.files];
     if (!files.length || uploading) return;
     if (files.length + blocks.filter(block => block.type === 'image').length > ANNOUNCEMENT_MAX_IMAGES || files.length + blocks.length > ANNOUNCEMENT_MAX_BLOCKS) {
-      $('noticeError').textContent = '每条公告最多 10 张图片、40 个段落'; return;
+      input.value = ''; $('noticeError').textContent = '每条公告最多 10 张图片、40 个段落'; return;
     }
     if (files.some(file => file.size > 8 * 1024 * 1024 || !['image/jpeg', 'image/png', 'image/webp'].includes(file.type))) {
-      $('noticeError').textContent = '请选择 JPG、PNG 或 WebP 图片，单张不超过 8 MB'; return;
+      input.value = ''; $('noticeError').textContent = '请选择 JPG、PNG 或 WebP 图片，单张不超过 8 MB'; return;
     }
     const current = generation;
     uploading = true; render();
     try {
       for (const [index, file] of files.entries()) {
         $('noticeError').textContent = `正在上传图片 ${index + 1}/${files.length}…`;
-        const response = await fetch('/api/admin/announcement-images', { method: 'POST', headers: { 'content-type': file.type, authorization: `Bearer ${getToken()}` }, body: file, signal: AbortSignal.timeout(60000) });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) throw Error(data.error || '图片上传失败，请重试');
+        const data = await uploadAnnouncementImage(file, { token: getToken() });
         if (current !== generation) return;
         blocks.push({ type: 'image', src: data.src, alt: '' });
       }
       $('noticeError').textContent = '图片已上传，保存公告后生效';
     } catch (error) { if (current === generation) $('noticeError').textContent = error.message; }
-    finally { if (current === generation) { uploading = false; render(); } }
+    finally { if (current === generation) { input.value = ''; uploading = false; render(); } }
   };
   function preview(item) {
     const content = $('previewContent'); content.replaceChildren();
@@ -115,7 +115,7 @@ export function createNoticeEditor({ getToken }) {
   $('noticeDialog').addEventListener('close', () => { release(); uploading = false; });
   $('previewDialog').addEventListener('close', () => { if (!$('noticeDialog').open) release(); });
   return {
-    reset(item) { release(); uploading = false; blocks = announcementBlocks(item).map(block => ({ ...block })); if (!blocks.length) blocks.push({ type: 'text', text: '' }); render(); },
+    reset(item) { release(); uploading = false; $('noticeImageFiles').value = ''; blocks = announcementBlocks(item).map(block => ({ ...block })); if (!blocks.length) blocks.push({ type: 'text', text: '' }); render(); },
     value() { if (uploading) throw Error('图片正在上传，请稍候'); return validateAnnouncementBlocks(blocks); },
     preview,
   };

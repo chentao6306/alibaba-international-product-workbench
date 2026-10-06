@@ -11,7 +11,7 @@ export function registerAdminPages(app, { directory, adminPath = process.env.KUA
     if (!request.path.endsWith('/')) return response.redirect(308, `${entry}/`);
     response.sendFile(path.join(directory, 'admin.html'));
   });
-  for (const file of ['admin.js', 'admin.css', 'admin-updates.js', 'admin-announcements.js', 'announcement-content.js']) {
+  for (const file of ['admin.js', 'admin.css', 'admin-updates.js', 'admin-announcements.js', 'admin-image-upload.js', 'announcement-content.js']) {
     app.get(`${entry}/${file}`, (_request, response) => {
       response.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
       response.sendFile(path.join(directory, file));
