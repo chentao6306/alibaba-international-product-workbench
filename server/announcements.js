@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { validateAnnouncementBlocks } from '../auth-server/announcement-content.js';
 
 export class AnnouncementInbox {
   constructor(file, baseUrl, account = 'local') {
@@ -26,7 +27,8 @@ export class AnnouncementInbox {
         if (!Array.isArray(items)) throw new Error('公告数据格式异常');
         const valid = items.every((item) => item && typeof item.id === 'string' && Number.isInteger(item.revision) && typeof item.title === 'string' && typeof item.content === 'string');
         if (!valid) throw new Error('公告数据格式异常');
-        this.items = items;
+        this.items = items.map(item => ({ ...item, blocks: Array.isArray(item.blocks) && item.blocks.length
+          ? validateAnnouncementBlocks(item.blocks).map(block => block.type === 'image' ? { ...block, src: new URL(block.src, this.baseUrl).href } : block) : [] }));
         const ids = new Set(items.map((item) => item.id));
         const state = this.readState();
         let changed = false;

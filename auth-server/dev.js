@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { clientAllowed, licenseState, pagination, announcementInput, licenseFilters, matchesLicenseFilters } from './policy.js';
 import { configureHttpSecurity } from './http-security.js';
 import { registerAdminPages } from './admin-pages.js';
+import { registerAnnouncementImages } from './announcement-images.js';
 import { hashAdminPassword, verifyAdminPassword, changedAccount, registerAdminAccountRoutes } from './admin-account.js';
 import { createActivationCredential, credentialResetRevokesSessions, validActivation, publicLicense, clientSessionAllowed, clientSession, tokenCodec, requireCredentialTransport, offlineGraceMinutes } from './security.js';
 
@@ -47,6 +48,11 @@ const requireAdmin = (request, response, next) => {
   next();
 };
 const timestamp = () => new Date().toISOString();
+const validateAnnouncementImages = registerAnnouncementImages(app, {
+  requireAdmin,
+  directory: process.env.KUA_YIPU_ANNOUNCEMENT_DIR || path.join(path.dirname(stateFile), 'announcement-images'),
+  isPublished: async src => readState().announcements.some(item => item.status === 'published' && item.blocks?.some(block => block.type === 'image' && block.src === src)),
+});
 const newId = () => crypto.randomUUID();
 const addEvent = (state, licenseId, action, actor, metadata = {}) => state.events.unshift({ id: newId(), license_id: licenseId, action, actor, metadata, created_at: timestamp() });
 
@@ -193,13 +199,17 @@ app.get('/api/admin/announcements', requireAdmin, (request, response) => {
   const items = readState().announcements;
   response.json({ items: items.slice(offset, offset + pageSize), total: items.length, page, pageSize });
 });
-app.post('/api/admin/announcements', requireAdmin, (request, response) => {
-  const data = announcementInput(request.body); const state = readState();
+app.post('/api/admin/announcements', requireAdmin, async (request, response) => {
+  const data = announcementInput(request.body);
+  await validateAnnouncementImages(data.blocks);
+  const state = readState();
   const item = { ...data, id: newId(), revision: 1, author: request.admin.username, created_at: timestamp(), updated_at: timestamp(), published_at: data.status === 'published' ? timestamp() : null };
   state.announcements.unshift(item); writeState(state); response.status(201).json(item);
 });
-app.patch('/api/admin/announcements/:id', requireAdmin, (request, response) => {
-  const data = announcementInput(request.body); const state = readState();
+app.patch('/api/admin/announcements/:id', requireAdmin, async (request, response) => {
+  const data = announcementInput(request.body);
+  await validateAnnouncementImages(data.blocks);
+  const state = readState();
   const item = state.announcements.find((entry) => entry.id === request.params.id);
   if (!item) return response.status(404).json({ error: '公告不存在' });
   Object.assign(item, data, { revision: item.revision + 1, author: request.admin.username, updated_at: timestamp(), published_at: data.status === 'published' ? timestamp() : item.published_at });

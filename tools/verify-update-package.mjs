@@ -23,7 +23,9 @@ for (const directory of ['electron', 'server']) {
     assert.ok(asar.extractFile(archive, `${directory}/${name}`).equals(fs.readFileSync(path.join('.packaged', directory, name))), `Stale protected module: ${directory}/${name}`);
   }
 }
-assert.equal(asar.extractFile(archive, 'auth-server/update-protocol.js').toString(), fs.readFileSync('auth-server/update-protocol.js', 'utf8'));
+for (const file of ['auth-server/update-protocol.js', 'auth-server/announcement-content.js']) {
+  assert.equal(asar.extractFile(archive, file).toString(), fs.readFileSync(file, 'utf8'), `Stale shared module: ${file}`);
+}
 assert.equal(JSON.parse(asar.extractFile(archive, 'package.json')).version, pkg.version);
 for (const entry of asar.listPackage(archive)) assert.ok(!/\/(?:\.data|\.env)(?:\/|$)|private\.pem$/.test(entry.replaceAll('\\', '/')), `Private data bundled: ${entry}`);
 const executable = path.join(release, `chaodekuai-${pkg.version}-setup.exe`);

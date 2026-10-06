@@ -1,6 +1,14 @@
-# 授权服务器 · 1.4.55 客户端配套服务
+# 授权服务器 · 1.4.64 客户端配套服务
 
-这是独立运行的 Linux/Express/PostgreSQL 服务。完整源码在本目录，依赖使用根目录 `package.json` 和 `package-lock.json`。`index.js` 是生产入口；`dev.js` 只用于本机 JSON 数据预览，不用于正式部署。客户端当前版本 1.4.55，服务健康接口的独立版本标识为 1.4.53。1.4.55 仅修复客户端上架流程，现有后台无需重复部署。
+这是独立运行的 Linux/Express/PostgreSQL 服务。完整源码在本目录，依赖使用根目录 `package.json` 和 `package-lock.json`。`index.js` 是生产入口；`dev.js` 只用于本机 JSON 数据预览，不用于正式部署。客户端当前版本 1.4.64，服务健康接口的独立版本标识为 1.4.53。本次服务升级包含公告图片上传、图文正文、每次进入软件弹窗策略，需同时更新服务文件、依赖和数据库结构。
+
+## 图文与重复弹窗公告
+
+后台“新建公告”可添加文字段落和 JPG、PNG、WebP 图片（每条最多 10 张，单张上传最多 8 MiB），支持调整顺序、图片说明和预览。展示方式选择“每次进入软件都弹窗”时，1.4.64 及以后客户端在每次打开软件进入工作台时显示，关闭后不会因定时刷新或窗口重新获得焦点而重复。旧客户端继续显示文字正文及图片升级提示，重复弹窗需升级客户端。
+
+图片由 `sharp` 校验并转存为 WebP，最大边长 2400 像素；不接收任意 HTML 或外部图片地址。仅正式发布的公告图片允许客户端访问，草稿、未关联、撤回或删除后不再公开。文件默认位于 `KUA_YIPU_UPDATE_DIR/announcement-images`，可用 `KUA_YIPU_ANNOUNCEMENT_DIR` 覆盖；该目录必须持久化、可由服务用户写入，并随数据库一起备份。暂未自动清理已不被引用的文件。
+
+Nginx 为 `/api/admin/announcement-images` 单独配置 `client_max_body_size 8m`，保持其他 API 原有限额。`tools/deploy-announcement-proxy.mjs` 可幂等更新当前服务的代理配置。此次部署使用暂存目录 `/var/tmp/kua-yipu-announcements-版本号`：先安装含 `sharp` 的服务依赖并运行 `auth-server/deploy/announcement-qa.sh`，再运行 `auth-server/deploy/update-announcements.sh isolated-tests-passed`，后者备份源码、依赖、代理配置和数据库，执行增量迁移并在健康检查失败时回滚代码。
 
 ## 配置与安全边界
 

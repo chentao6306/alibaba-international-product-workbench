@@ -8,6 +8,7 @@ import { configureHttpSecurity } from './http-security.js';
 import { createActivationCredential, credentialResetRevokesSessions, validActivation, publicLicense, clientSessionAllowed, clientSession, tokenCodec, requireCredentialTransport, offlineGraceMinutes } from './security.js';
 import { registerUpdateRoutes } from './updates.js';
 import { registerAdminPages } from './admin-pages.js';
+import { registerAnnouncementImages } from './announcement-images.js';
 import { verifyAdminPassword, registerAdminAccountRoutes, postgresAccountChanger } from './admin-account.js';
 
 const app = express();
@@ -39,6 +40,11 @@ const requireAdmin = async (request, response, next) => {
 };
 const session = (license, deviceId, version) => clientSession(license, deviceId, sign, version);
 registerUpdateRoutes(app, { requireAdmin, directory: process.env.KUA_YIPU_UPDATE_DIR || path.join(__dirname, '.data', 'updates') });
+const validateAnnouncementImages = registerAnnouncementImages(app, {
+  requireAdmin,
+  directory: process.env.KUA_YIPU_ANNOUNCEMENT_DIR || path.join(process.env.KUA_YIPU_UPDATE_DIR || path.join(__dirname, '.data', 'updates'), 'announcement-images'),
+  isPublished: async src => Boolean((await pool.query("SELECT 1 FROM announcements WHERE status='published' AND blocks @> $1::jsonb LIMIT 1", [JSON.stringify([{ type: 'image', src }])])).rows.length),
+});
 async function transaction(work) {
   const client = await pool.connect();
   try { await client.query('BEGIN'); const result = await work(client); await client.query('COMMIT'); return result; }
@@ -191,7 +197,7 @@ app.get('/api/admin/stats', requireAdmin, async (_request, response) => {
 // Published announcements are public product notices; drafts remain admin-only.
 app.get('/api/announcements', async (_request, response) => {
   response.set('Cache-Control', 'no-store');
-  response.json((await pool.query("SELECT id,title,content,kind,revision,published_at,updated_at FROM announcements WHERE status='published' ORDER BY published_at DESC,id")).rows);
+  response.json((await pool.query("SELECT id,title,content,blocks,kind,popup_policy,revision,published_at,updated_at FROM announcements WHERE status='published' ORDER BY published_at DESC,id")).rows);
 });
 app.get('/api/admin/announcements', requireAdmin, async (request, response) => {
   const { page, pageSize, offset } = pagination(request.query);
@@ -201,12 +207,14 @@ app.get('/api/admin/announcements', requireAdmin, async (request, response) => {
 });
 app.post('/api/admin/announcements', requireAdmin, async (request, response) => {
   const data = announcementInput(request.body);
-  const result = await pool.query(`INSERT INTO announcements (id,title,content,kind,status,author,published_at) VALUES ($1,$2,$3,$4,$5,$6,CASE WHEN $5='published' THEN now() ELSE NULL END) RETURNING *`, [id(), data.title, data.content, data.kind, data.status, request.admin.username]);
+  await validateAnnouncementImages(data.blocks);
+  const result = await pool.query(`INSERT INTO announcements (id,title,content,kind,status,author,blocks,popup_policy,published_at) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,CASE WHEN $5='published' THEN now() ELSE NULL END) RETURNING *`, [id(), data.title, data.content, data.kind, data.status, request.admin.username, JSON.stringify(data.blocks), data.popup_policy]);
   response.status(201).json(result.rows[0]);
 });
 app.patch('/api/admin/announcements/:id', requireAdmin, async (request, response) => {
   const data = announcementInput(request.body);
-  const result = await pool.query(`UPDATE announcements SET title=$2,content=$3,kind=$4,status=$5,author=$6,revision=revision+1,published_at=CASE WHEN $5='published' THEN now() ELSE published_at END,updated_at=now() WHERE id=$1 RETURNING *`, [request.params.id, data.title, data.content, data.kind, data.status, request.admin.username]);
+  await validateAnnouncementImages(data.blocks);
+  const result = await pool.query(`UPDATE announcements SET title=$2,content=$3,kind=$4,status=$5,author=$6,blocks=$7::jsonb,popup_policy=$8,revision=revision+1,published_at=CASE WHEN $5='published' THEN now() ELSE published_at END,updated_at=now() WHERE id=$1 RETURNING *`, [request.params.id, data.title, data.content, data.kind, data.status, request.admin.username, JSON.stringify(data.blocks), data.popup_policy]);
   if (!result.rows[0]) throw fail('公告不存在', 404);
   response.json(result.rows[0]);
 });

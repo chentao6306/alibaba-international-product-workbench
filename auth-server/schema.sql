@@ -76,3 +76,5 @@ CREATE TABLE IF NOT EXISTS announcements (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS announcements_published ON announcements(status, published_at DESC);
+ALTER TABLE announcements ADD COLUMN IF NOT EXISTS blocks JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE announcements ADD COLUMN IF NOT EXISTS popup_policy TEXT NOT NULL DEFAULT 'once' CHECK (popup_policy IN ('once','every-login'));

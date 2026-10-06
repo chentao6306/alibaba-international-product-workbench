@@ -37,7 +37,7 @@ rollback() {
 trap rollback ERR
 runuser -u postgres -- psql --set ON_ERROR_STOP=1 --dbname "$database" < schema.sql >/dev/null
 runuser -u postgres -- psql --set ON_ERROR_STOP=1 --dbname "$database" --command "GRANT ALL PRIVILEGES ON TABLE admin_sessions TO \"$role\"" >/dev/null
-install -m 644 index.js security.js http-security.js policy.js schema.sql admin.html admin.js admin.css admin-updates.js admin-account.js admin-pages.js updates.js update-key.js update-protocol.js /opt/kua-yipu-auth/auth-server/
+install -m 644 index.js security.js http-security.js policy.js schema.sql admin.html admin.js admin.css admin-updates.js admin-account.js admin-pages.js admin-announcements.js announcement-content.js announcement-images.js updates.js update-key.js update-protocol.js /opt/kua-yipu-auth/auth-server/
 mkdir -p /etc/systemd/system/kua-yipu-auth.service.d
 install -m 644 deploy/service-hardening.conf "$override"
 install -d -m 700 -o kua-yipu -g kua-yipu /var/lib/kua-yipu/updates

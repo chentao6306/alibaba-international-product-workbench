@@ -1,8 +1,8 @@
 # 抄得快 · 阿里巴巴国际站商品工作台
 
-当前版本：**1.4.63**，更新日期：**2026-10-06**。最新完整源码以默认 **main** 分支为准。
+当前版本：**1.4.64**，更新日期：**2026-10-06**。最新完整源码以默认 **main** 分支为准。
 
-1.4.63 修复“店铺采集”误显示中国制造网的问题：国际站和中国制造网入口各自固定采集平台，商品工作台和上架任务的平台筛选不再影响店铺、分组、数量及采集请求。保留 1.4.62 的分组采集、静音、属性与多规格定价修复。见 [本次验证记录](docs/verification-1.4.63.md)。
+1.4.64 支持文字、图片和图文混排公告，后台可上传图片、调整段落顺序及预览。展示方式可选公告列表、弹窗一次（更新后再次提示）、每次进入软件都弹窗；最后一种关闭后本次会话不重复，下次打开软件仍显示。图片公告和重复弹窗需要客户端升级至 1.4.64，旧版保留文字及升级提示。保留 1.4.63 的国际站/中国制造网采集入口隔离修复。见 [本次验证记录](docs/verification-1.4.64.md)。
 
 ## 常用命令速查
 
@@ -22,8 +22,8 @@ npm run prepare:chromium
 | 启动浏览器版 | `npm start` | 先构建前端，打开 `http://127.0.0.1:8787` |
 | 运行全部测试 | `npm test` | 部分用例会启动内置 Chromium |
 | 减少测试并发 | `npm test -- --test-concurrency=2` | 减少浏览器同时运行数量 |
-| 生成安装版 EXE | `npm run dist:win:installer` | `release-installer/chaodekuai-1.4.63-setup.exe` |
-| 生成便携版 EXE | `npm run dist:win:portable` | `release/chaodekuai-1.4.63-win-x64.exe` |
+| 生成安装版 EXE | `npm run dist:win:installer` | `release-installer/chaodekuai-1.4.64-setup.exe` |
+| 生成便携版 EXE | `npm run dist:win:portable` | `release/chaodekuai-1.4.64-win-x64.exe` |
 | 启动官网开发预览 | `npm run website:dev` | `http://127.0.0.1:5175/website/` |
 | 构建官网 | `npm run website:build` | 独立输出 `dist-website/` |
 | 预览官网成品 | `npm run website:preview` | `http://127.0.0.1:4175/website/` |

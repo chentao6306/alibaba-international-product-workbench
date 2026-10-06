@@ -1,3 +1,5 @@
+import { announcementPlainText, validateAnnouncementBlocks } from './announcement-content.js';
+
 export function licenseState(license, time = Date.now()) {
   if (license.deleted_at) return 'deleted';
   if (license.status !== 'active') return license.status;
@@ -37,11 +39,16 @@ export function pagination(query = {}) {
 
 export function announcementInput(body) {
   const title = String(body?.title || '').trim();
-  const content = String(body?.content || '').trim();
+  const plain = String(body?.content || '').trim();
+  const suppliedBlocks = body?.blocks;
+  const blocks = validateAnnouncementBlocks(suppliedBlocks === undefined || Array.isArray(suppliedBlocks) && !suppliedBlocks.length
+    ? [{ type: 'text', text: plain }] : suppliedBlocks);
+  const content = announcementPlainText(blocks);
   const kind = body?.kind || 'notice';
+  const popupPolicy = body?.popup_policy || 'once';
   const status = body?.status || 'draft';
-  if (!title || title.length > 160 || !content || content.length > 20000 || !['notice', 'popup'].includes(kind) || !['draft', 'published', 'withdrawn'].includes(status)) {
+  if (!title || title.length > 160 || !['notice', 'popup'].includes(kind) || !['once', 'every-login'].includes(popupPolicy) || !['draft', 'published', 'withdrawn'].includes(status)) {
     throw Object.assign(new Error('请填写公告标题、正文并选择有效的公告类型和状态'), { status: 400 });
   }
-  return { title, content, kind, status };
+  return { title, content, blocks, kind, popup_policy: kind === 'popup' ? popupPolicy : 'once', status };
 }

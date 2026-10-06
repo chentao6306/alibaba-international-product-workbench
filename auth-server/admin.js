@@ -1,3 +1,4 @@
+import { createNoticeEditor } from './admin-announcements.js';
 const $ = (id) => document.getElementById(id);
 let token = sessionStorage.getItem('auth-admin-token') || '';
 let page = 1; let noticePage = 1; let licenses = []; let notices = []; let noticeId = ''; let action = null;
@@ -148,23 +149,28 @@ async function loadNotices() {
   if (serial !== noticeRequest) return;
   if (!data.items.length && noticePage > 1) { noticePage = Math.max(1, Math.ceil(data.total / data.pageSize)); return loadNotices(); }
   notices = data.items;
-  $('announcements').innerHTML = `<table><thead><tr><th>标题</th><th>展示方式</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody>${notices.map((item, index) => `<tr><td class="notice-title">${escape(item.title)}</td><td>${item.kind === 'popup' ? '弹窗公告' : '公告列表'}</td><td>${badge(item.status)}</td><td>${escape(time(item.updated_at))}</td><td><div class="actions"><button class="secondary" data-notice="${index}">编辑</button><button class="secondary" data-preview="${index}">预览</button><button class="danger" data-delete-notice="${index}">删除</button></div></td></tr>`).join('')}</tbody></table>${!notices.length ? '<div class="empty">暂无公告</div>' : ''}`;
+  $('announcements').innerHTML = `<table><thead><tr><th>标题</th><th>展示方式</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody>${notices.map((item, index) => `<tr><td class="notice-title">${escape(item.title)}</td><td>${item.kind === 'popup' ? item.popup_policy === 'every-login' ? '每次进入都弹窗' : '弹窗一次' : '公告列表'}</td><td>${badge(item.status)}</td><td>${escape(time(item.updated_at))}</td><td><div class="actions"><button class="secondary" data-notice="${index}">编辑</button><button class="secondary" data-preview="${index}">预览</button><button class="danger" data-delete-notice="${index}">删除</button></div></td></tr>`).join('')}</tbody></table>${!notices.length ? '<div class="empty">暂无公告</div>' : ''}`;
   $('announcements').querySelectorAll('[data-notice]').forEach((button) => { button.onclick = () => editNotice(notices[button.dataset.notice]); });
   $('announcements').querySelectorAll('[data-preview]').forEach((button) => { button.onclick = () => preview(notices[button.dataset.preview]); });
   $('announcements').querySelectorAll('[data-delete-notice]').forEach((button) => { button.onclick = () => openAction(notices[button.dataset.deleteNotice], 'deleteNotice'); });
   pages($('noticePages'), data, (value) => { noticePage = value; loadNotices().catch((error) => message(error.message)); });
 }
+const noticeEditor = createNoticeEditor({ getToken: () => token });
 function editNotice(item = {}) {
   noticeId = item.id || ''; $('noticeHeading').textContent = noticeId ? '编辑公告' : '新建公告';
-  $('noticeTitle').value = item.title || ''; $('noticeContent').value = item.content || ''; $('noticeKind').value = item.kind || 'notice'; $('noticeStatus').value = item.status || 'draft'; $('noticeError').textContent = ''; $('noticeDialog').showModal();
+  $('noticeTitle').value = item.title || ''; noticeEditor.reset(item); $('noticeKind').value = item.kind === 'popup' && item.popup_policy === 'every-login' ? 'popup-always' : item.kind || 'notice'; $('noticeStatus').value = item.status || 'draft'; $('noticeError').textContent = ''; $('noticeDialog').showModal();
 }
-function preview(item) { $('previewTitle').textContent = item.title; $('previewContent').textContent = item.content; $('previewDialog').showModal(); }
+function preview(item) { noticeEditor.preview(item); }
+function noticeInput() {
+  const kind = $('noticeKind').value;
+  return { title: $('noticeTitle').value, blocks: noticeEditor.value(), kind: kind === 'notice' ? 'notice' : 'popup', popup_policy: kind === 'popup-always' ? 'every-login' : 'once', status: $('noticeStatus').value };
+}
 $('noticeForm').onsubmit = async (event) => {
   event.preventDefault(); $('saveNotice').disabled = true;
-  try { await api(`/api/admin/announcements${noticeId ? `/${noticeId}` : ''}`, { method: noticeId ? 'PATCH' : 'POST', body: JSON.stringify({ title: $('noticeTitle').value, content: $('noticeContent').value, kind: $('noticeKind').value, status: $('noticeStatus').value }) }); $('noticeDialog').close(); await loadNotices(); message('公告已保存', true); }
+  try { await api(`/api/admin/announcements${noticeId ? `/${noticeId}` : ''}`, { method: noticeId ? 'PATCH' : 'POST', body: JSON.stringify(noticeInput()) }); $('noticeDialog').close(); await loadNotices(); message('公告已保存', true); }
   catch (error) { $('noticeError').textContent = error.message; } finally { $('saveNotice').disabled = false; }
 };
-$('previewNotice').onclick = () => preview({ title: $('noticeTitle').value, content: $('noticeContent').value });
+$('previewNotice').onclick = () => { try { preview(noticeInput()); } catch (error) { $('noticeError').textContent = error.message; } };
 $('cancelNotice').onclick = () => $('noticeDialog').close();
 $('createNotice').onclick = () => editNotice();
 document.querySelectorAll('.close-dialog').forEach((button) => { button.onclick = () => button.closest('dialog').close(); });

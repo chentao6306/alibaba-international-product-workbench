@@ -425,6 +425,11 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--orange); }
 .announcement-row strong { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .announcement-row small { flex-shrink: 0; color: #74818b; }
 .announcement-body { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; padding: 20px 0; font-size: 14px; }
+.announcement-body p { margin: 0 0 16px; }
+.announcement-image { margin: 16px 0; white-space: normal; }
+.announcement-image img { display: block; width: auto; max-width: 100%; height: auto; margin: 0 auto; border-radius: 6px; }
+.announcement-image figcaption { text-align: center; color: var(--muted); white-space: pre-wrap; margin-top: 8px; }
+.announcement-image [role=status] { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
 .sidebar nav { overflow-y: auto; min-height: 0; }
 .reference-list strong { font-size: 13px; overflow-wrap: anywhere; }
 .reference-list > div { min-width: 0; }
