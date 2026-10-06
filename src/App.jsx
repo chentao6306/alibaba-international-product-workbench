@@ -161,11 +161,11 @@ function MadeInChinaModes({ mode, onChange }) {
 
 function MadeInChinaView(props) {
   const [mode, setMode] = useState('shop');
-  return mode === 'shop' ? <SourceView {...props} platform="made-in-china" onModeChange={setMode} />
+  return mode === 'shop' ? <SourceView {...props} collectionPlatform="made-in-china" onModeChange={setMode} />
     : <LinkCollectionView {...props} entry="madeinchina" onModeChange={setMode} />;
 }
 
-function SourceView({ state: workspace, refresh, notify, onMenu, folderId, platform = 'alibaba.com', onModeChange }) {
+function SourceView({ state: workspace, refresh, notify, onMenu, folderId, collectionPlatform: platform = 'alibaba.com', onModeChange }) {
   const mic = platform === 'made-in-china';
   const shops = workspace.shops.filter(shop => sourcePlatform({ ...shop, sourceUrl: shop.url }) === platform);
   const shopIds = new Set(shops.map(shop => shop.id));
@@ -844,7 +844,7 @@ export default function App() {
   const inbox = useAnnouncements();
   const [state, setState] = useState(EMPTY);
   const [view, setView] = useState('source');
-  const [platform, setPlatform] = useState('all');
+  const [productPlatform, setProductPlatform] = useState('all');
   const [notice, setNotice] = useState(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const refreshInFlight = useRef(null);
@@ -877,13 +877,16 @@ export default function App() {
     return () => { mounted.current = false; clearInterval(timer); };
   }, []);
   function notify(text, type = 'success') { setNotice({ text, type }); setTimeout(() => setNotice(null), 4200); }
-  function navigate(id, nextPlatform) { setView(id); if (nextPlatform) setPlatform(nextPlatform); setMenuOpen(false); }
+  function navigate(id, nextPlatform) { setView(id); if (nextPlatform) setProductPlatform(nextPlatform); setMenuOpen(false); }
   const folderId = state.settings.activeCollectionFolderId || '';
-  const props = { state, refresh, notify, platform, setPlatform, navigate, folderId, onMenu: () => setMenuOpen(true) };
+  const props = { state, refresh, notify, navigate, folderId, onMenu: () => setMenuOpen(true) };
+  // Product filters persist between the workbench and publishing, but must
+  // never change the platform assigned to a collection menu entry.
+  const productFilter = { platform: productPlatform, setPlatform: setProductPlatform };
   return <div className="app-shell">
     <aside className={`sidebar ${menuOpen ? 'open' : ''}`}><div className="brand"><img className="brand-logo" src="/brand.png" alt="抄得快" /><span><strong>抄得快</strong><small>国际站商品工作台</small></span><button className="icon-button close-nav" onClick={() => setMenuOpen(false)}><X size={18} /></button></div><nav>{NAV.map(({ id, label, icon: Icon }) => <button key={id} className={view === id ? 'active' : ''} onClick={() => navigate(id)}><Icon size={19} /><span>{label}</span>{id === 'products' && state.products.length > 0 && <b>{state.products.length}</b>}{id === 'publish' && state.products.some((item) => item.selected) && <b>{state.products.filter((item) => item.selected).length}</b>}{id === 'announcements' && inbox.unread > 0 && <i className="unread-dot" aria-label="有未读公告" />}<ChevronRight size={15} /></button>)}</nav><div className="sidebar-foot"><span className={`system-dot ${state.browser.browserOpen ? 'online' : ''}`} /><div><strong>本地服务</strong><small>运行正常</small></div></div></aside>
     {menuOpen && <button className="nav-backdrop" onClick={() => setMenuOpen(false)} />}
-    <main><AuthorizationConnection />{view === 'source' && <SourceView {...props} />}{view === 'madeinchina' && <MadeInChinaView {...props} />}{COLLECTION_VIEWS[view] && view !== 'madeinchina' && <LinkCollectionView key={view} entry={view} {...props} />}{view === 'products' && <ProductsView {...props} />}{view === 'publish' && <PublishView {...props} />}{view === 'settings' && <SettingsView {...props} />}{view === 'announcements' && <><Header title="公告" onMenu={() => setMenuOpen(true)} /><AnnouncementsView inbox={inbox} /></>}</main><AnnouncementPopup inbox={inbox} />
+    <main><AuthorizationConnection />{view === 'source' && <SourceView {...props} collectionPlatform="alibaba.com" />}{view === 'madeinchina' && <MadeInChinaView {...props} />}{COLLECTION_VIEWS[view] && view !== 'madeinchina' && <LinkCollectionView key={view} entry={view} {...props} />}{view === 'products' && <ProductsView {...props} {...productFilter} />}{view === 'publish' && <PublishView {...props} {...productFilter} />}{view === 'settings' && <SettingsView {...props} />}{view === 'announcements' && <><Header title="公告" onMenu={() => setMenuOpen(true)} /><AnnouncementsView inbox={inbox} /></>}</main><AnnouncementPopup inbox={inbox} />
     <Notice notice={notice} onClose={() => setNotice(null)} />
   </div>;
 }
