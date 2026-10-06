@@ -424,6 +424,7 @@ function ProductsView({ state, refresh, notify, onMenu, platform, setPlatform, n
 
   async function openEditor(products, batch = false) {
     const request = ++editorRequest.current;
+    if (batch) { setBatchEditing(products); return; }
     setLoadingEditor(true);
     try {
       // Read serially so large selections cannot flood the renderer with JSON.
@@ -539,6 +540,7 @@ function BatchEditor({ products, references, onClose, onSaved, notify }) {
   }
   const [usdRate, setUsdRate] = useState('');
   const [tab, setTab] = useState('basic');
+  const [previewPage, setPreviewPage] = useState(0);
   const [locale, setLocale] = useState('zh');
   const [referenceOpen, setReferenceOpen] = useState(false);
   const [form, setForm] = useState({ titlePrefix: '', titleSuffix: '', subtitle: '', keywords: '', origin: '', brand: '', productType: '', category: '', categoryId: '', pricePercent: '0', priceFixed: '0', stock: '', moq: '', deliveryDays: '', weight: '', length: '', width: '', height: '', description: '', attrName: '', attrValue: '', attrMode: 'upsert', specName: '', specOption: '', specMode: 'upsert', skuPrice: '', skuStock: '', fobMinPrice: '', fobMaxPrice: '', country: 'United States', countryPrice: '', imageAction: 'dedupe', skuRows: null });
@@ -615,11 +617,15 @@ function BatchEditor({ products, references, onClose, onSaved, notify }) {
     if (tab === 'regional') return { current: product.regionalPricing ? JSON.stringify(product.regionalPricing) : '未设置', next: form.countryPrice ? `${form.country}: ${form.countryPrice}` : '等待填写地区价格' };
     return { current: '当前值', next: '等待填写修改值' };
   }
-  function exportSku() {
-    const rows = products.flatMap((p) => (p.skus || []).map((sku) => ({ product: p.title, ...(sku.attributes || {}), price: sku.price || '', stock: sku.stock ?? '' })));
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), 'SKU');
-    XLSX.writeFile(workbook, 'sku-export.xlsx');
+  async function exportSku() {
+    try {
+      const details = [];
+      for (const product of products) details.push(product.summary ? await api('/api/products/' + encodeURIComponent(product.id)) : product);
+      const rows = details.flatMap((p) => (p.skus || []).map((sku) => ({ product: p.title, ...(sku.attributes || {}), price: sku.price || '', stock: sku.stock ?? '' })));
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), 'SKU');
+      XLSX.writeFile(workbook, 'sku-export.xlsx');
+    } catch (error) { notify(error.message, 'error'); }
   }
   function importSku(event) {
     const file = event.target.files?.[0];
@@ -651,7 +657,8 @@ function BatchEditor({ products, references, onClose, onSaved, notify }) {
       {tab === 'detail' && <BatchDescriptionEditor products={products} onSaved={onSaved} notify={notify} onGuardChange={setImageGuard} />}
       {tab === 'regional' && <><label className="batch-field"><span>销售国家/地区</span><OriginCountrySelect ariaLabel="定价国家/地区" value={form.country} onChange={(country) => setForm((current) => ({ ...current, country }))} /></label>{field('该地区价格', 'countryPrice', 'number')}</>}
     </div>
-    {!['images', 'detail'].includes(tab) && <><div className="batch-preview"><div className="batch-preview-title"><strong>修改预览</strong><span>先确认每个商品的当前值和修改后值，再点击保存</span></div><div className="batch-preview-table"><div className="batch-preview-head"><span>商品名称</span><span>旧值-修改前</span><span>新值-修改后</span></div>{products.map((product) => { const row = previewFor(product); return <div className="batch-preview-row" key={product.id}><strong title={product.title}>{product.title || '未命名商品'}</strong><span title={row.current}>{row.current}</span><span className={row.next.includes('等待') || row.next.includes('请选择') ? 'pending' : ''} title={row.next}>{row.next}</span></div>; })}</div></div>
+    {!['images', 'detail'].includes(tab) && <><div className="batch-preview"><div className="batch-preview-title"><strong>修改预览</strong><span>先确认每个商品的当前值和修改后值，再点击保存</span></div><div className="batch-preview-table"><div className="batch-preview-head"><span>商品名称</span><span>旧值-修改前</span><span>新值-修改后</span></div>{products.slice(previewPage * 30, (previewPage + 1) * 30).map((product) => { const row = previewFor(product); return <div className="batch-preview-row" key={product.id}><strong title={product.title}>{product.title || '未命名商品'}</strong><span title={row.current}>{row.current}</span><span className={row.next.includes('等待') || row.next.includes('请选择') ? 'pending' : ''} title={row.next}>{row.next}</span></div>; })}</div></div>
+    <div className="batch-actions"><button type="button" disabled={!previewPage} onClick={() => setPreviewPage(previewPage - 1)}>上一页</button><span>预览第 {previewPage + 1} / {Math.ceil(products.length / 30)} 页，共 {products.length} 件</span><button type="button" disabled={(previewPage + 1) * 30 >= products.length} onClick={() => setPreviewPage(previewPage + 1)}>下一页</button></div>
     <div className="drawer-actions"><button type="button" className="secondary-button" onClick={closeBatch}>取消</button><button className="primary-button" onClick={apply}><Save size={17} />应用到 {products.length} 件商品</button></div></>}
   </aside>{referenceOpen && <ReferenceDialog products={products} references={references} onClose={() => setReferenceOpen(false)} onSaved={onSaved} notify={notify} />}</div>;
 }
@@ -849,6 +856,7 @@ export default function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   const refreshInFlight = useRef(null);
   const stateRevision = useRef('');
+  const activityRevision = useRef('');
   const mounted = useRef(true);
   async function refresh() {
     // State includes captured product details. Keep only one request active so
@@ -859,6 +867,9 @@ export default function App() {
       .then((nextState) => {
         if (mounted.current) {
           stateRevision.current = nextState.revision;
+          const activity = JSON.stringify([nextState.jobs, nextState.browser, nextState.collectorBrowser]);
+          if (nextState.unchanged && activity === activityRevision.current) return nextState;
+          activityRevision.current = activity;
           setState((previous) => nextState.unchanged
             ? { ...previous, jobs: nextState.jobs, browser: nextState.browser, collectorBrowser: nextState.collectorBrowser }
             : nextState);

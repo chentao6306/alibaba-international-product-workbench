@@ -8,8 +8,30 @@ import net from 'node:net';
 import sharp from 'sharp';
 
 const MAX_BYTES = 12 * 1024 * 1024;
-const imageOptions = { limitInputPixels: 16000000, animated: false };
+const imageOptions = { limitInputPixels: 100000000, animated: false };
+const OUTPUT_PIXELS = 16000000;
 export const imageError = (message, status = 400) => Object.assign(new Error(message), { status });
+
+export function friendlyImageError(error) {
+  if (error.status) return error;
+  if (/pixel limit/i.test(error.message)) return imageError('图片超过 1 亿像素，请缩小尺寸后重试（文件大小小不代表像素少）');
+  if (/unsupported image|corrupt|bad seek|premature|invalid|Vips|pngload|jpegload|webpload/i.test(error.message)) return imageError('图片损坏或格式不受支持，请重新上传 JPG、PNG 或 WebP 图片');
+  if (/timeout|aborted|ECONN|ENOTFOUND|fetch failed/i.test(error.message)) return imageError('图片下载失败或超时，请检查网络后重试');
+  return imageError(`图片处理失败：${error.message}`);
+}
+
+// Decode large sources with a bounded input limit, and shrink before allocating
+// raw pixels/compositing. Tall detail images retain their aspect ratio.
+async function imagePipeline(buffer) {
+  try {
+    const metadata = await sharp(buffer, imageOptions).metadata();
+    if (!['jpeg', 'png', 'webp'].includes(metadata.format)) throw imageError('仅支持 JPG、PNG 或 WebP 图片');
+    const rotated = [5, 6, 7, 8].includes(metadata.orientation);
+    const width = rotated ? metadata.height : metadata.width, height = rotated ? metadata.width : metadata.height;
+    const scale = Math.min(1, Math.sqrt(OUTPUT_PIXELS / (width * height)), 16000 / width, 16000 / height);
+    return sharp(buffer, imageOptions).rotate().resize({ width: Math.max(1, Math.floor(width * scale)), height: Math.max(1, Math.floor(height * scale)), fit: 'inside', withoutEnlargement: true });
+  } catch (error) { throw friendlyImageError(error); }
+}
 
 export function isPublicImageAddress(address) {
   if (net.isIPv4(address)) {
@@ -80,7 +102,7 @@ export async function readImage(mediaDir, url) {
     buffer = await fs.readFile(file);
   } else buffer = await download(url);
   if (!buffer.length || buffer.length > MAX_BYTES) throw imageError('图片为空或超过 12 MB');
-  const metadata = await sharp(buffer, imageOptions).metadata();
+  const metadata = await sharp(buffer, imageOptions).metadata().catch((error) => { throw friendlyImageError(error); });
   if (!['jpeg', 'png', 'webp'].includes(metadata.format)) throw imageError('仅支持 JPG、PNG 或 WebP 图片');
   return buffer;
 }
@@ -90,12 +112,12 @@ export async function uploadImage(mediaDir, data) {
   if (!match) throw imageError('仅支持 JPG、PNG 或 WebP 图片');
   const buffer = Buffer.from(match[1], 'base64');
   if (!buffer.length || buffer.length > 5 * 1024 * 1024) throw imageError('上传图片不能超过 5 MB');
-  const metadata = await sharp(buffer, imageOptions).metadata();
+  const metadata = await sharp(buffer, imageOptions).metadata().catch((error) => { throw friendlyImageError(error); });
   if (!['jpeg', 'png', 'webp'].includes(metadata.format)) throw imageError('图片内容无效');
   const extension = metadata.format === 'jpeg' ? 'jpg' : metadata.format;
   const url = `/media/${randomUUID()}.${extension}`;
   // Decode/re-encode to validate the full image, remove metadata and apply EXIF orientation.
-  await sharp(buffer, imageOptions).rotate().toFile(path.join(mediaDir, path.basename(url)));
+  await (await imagePipeline(buffer)).toFile(path.join(mediaDir, path.basename(url))).catch((error) => { throw friendlyImageError(error); });
   return url;
 }
 
@@ -135,7 +157,7 @@ async function imageWatermarkOverlay(buffer, width, height, settings) {
 
 export async function addWatermark(buffer, value, watermarkImage) {
   const settings = watermarkSettings(value);
-  const base = await sharp(buffer, imageOptions).rotate().png().toBuffer();
+  const base = await (await imagePipeline(buffer)).png().toBuffer();
   const { width, height } = await sharp(base).metadata();
   if (settings.type === 'image') return compositeWatermark(base, await imageWatermarkOverlay(watermarkImage, width, height, settings), settings);
   const fontSize = Math.max(8, Math.round(Math.min(width, height) * settings.size / 100));
@@ -164,7 +186,7 @@ export function repairRegion(value) {
 
 export async function repairWatermark(buffer, selection) {
   const region = repairRegion(selection);
-  const { data, info } = await sharp(buffer, imageOptions).rotate().ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const { data, info } = await (await imagePipeline(buffer)).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   const { width, height, channels } = info;
   if (width < 8 || height < 8) throw imageError('图片太小，无法修复');
   const x0 = Math.min(width - 1, Math.floor(region.x * width)), y0 = Math.min(height - 1, Math.floor(region.y * height));
@@ -173,14 +195,17 @@ export async function repairWatermark(buffer, selection) {
   const original = Buffer.from(data);
   // Boundary interpolation reconstructs simple backgrounds without changing pixels
   // outside the mask. No cloud upload or claim of recovering hidden source pixels.
-  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
-    const samples = [];
-    if (x0 > 0) samples.push([x0 - 1, y, 1 / (x - x0 + 1) ** 2]);
-    if (x1 < width - 1) samples.push([x1 + 1, y, 1 / (x1 - x + 1) ** 2]);
-    if (y0 > 0) samples.push([x, y0 - 1, 1 / (y - y0 + 1) ** 2]);
-    if (y1 < height - 1) samples.push([x, y1 + 1, 1 / (y1 - y + 1) ** 2]);
-    const total = samples.reduce((sum, item) => sum + item[2], 0);
-    for (let channel = 0; channel < channels; channel++) data[(y * width + x) * channels + channel] = Math.round(samples.reduce((sum, [sx, sy, weight]) => sum + original[(sy * width + sx) * channels + channel] * weight, 0) / total);
+  for (let y = y0; y <= y1; y++) {
+    if ((y - y0) % 16 === 0) await new Promise((resolve) => setImmediate(resolve));
+    for (let x = x0; x <= x1; x++) {
+      const samples = [];
+      if (x0 > 0) samples.push([x0 - 1, y, 1 / (x - x0 + 1) ** 2]);
+      if (x1 < width - 1) samples.push([x1 + 1, y, 1 / (x1 - x + 1) ** 2]);
+      if (y0 > 0) samples.push([x, y0 - 1, 1 / (y - y0 + 1) ** 2]);
+      if (y1 < height - 1) samples.push([x, y1 + 1, 1 / (y1 - y + 1) ** 2]);
+      const total = samples.reduce((sum, item) => sum + item[2], 0);
+      for (let channel = 0; channel < channels; channel++) data[(y * width + x) * channels + channel] = Math.round(samples.reduce((sum, [sx, sy, weight]) => sum + original[(sy * width + sx) * channels + channel] * weight, 0) / total);
+    }
   }
   return sharp(data, { raw: info }).png().toBuffer();
 }
@@ -208,7 +233,13 @@ export async function processImage(mediaDir, { url, action, watermark, region })
   // Reapplying replaces our layer instead of burning a second watermark into it.
   let base = previous?.watermarkBase || url;
   const input = await readImage(mediaDir, base);
-  if (!base.startsWith('/media/')) base = await saveImage(mediaDir, await sharp(input, imageOptions).rotate().png().toBuffer(), { source: base });
+  if (!base.startsWith('/media/')) {
+    // Preserve original bytes for exact watermark removal, without decoding a
+    // large remote image a second time just to take a snapshot.
+    const { format } = await sharp(input, imageOptions).metadata();
+    base = `/media/${randomUUID()}.${format === 'jpeg' ? 'jpg' : format}`;
+    await fs.writeFile(path.join(mediaDir, path.basename(base)), input, { flag: 'wx', mode: 0o600 });
+  }
   let output, history;
   if (action === 'watermark') {
     watermark = watermarkSettings(watermark);

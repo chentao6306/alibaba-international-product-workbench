@@ -29,3 +29,7 @@
 .bie-summary { max-height: 160px; overflow: auto; font-size: 12px; color: #65787c; }
 .bie-footer { position: sticky; bottom: -20px; padding: 14px 0; background: white; border-top: 1px solid #dce4e5; z-index: 2; }
 @media (max-width: 600px) { .bie-settings, .bie-comparison { grid-template-columns: 1fr; } .bie-actions button { max-width: 100%; } }
+
+.batch-failures { border: 1px solid #f0c6ac; background: #fff8f2; padding: 16px; border-radius: 10px; margin: 12px 0; overflow-wrap: anywhere; }
+.batch-failures p { padding: 10px 0; border-bottom: 1px solid #ecdccc; margin: 0; }
+.batch-failures button { margin: 6px 8px 0 0; padding: 6px 12px; }

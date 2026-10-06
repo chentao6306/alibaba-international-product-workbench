@@ -12,6 +12,7 @@ test('task polling omits detail captures and resends product lists only when vis
     const store = new JsonStore(path.join(root, 'workspace.json'));
     store.update((state) => {
       state.products = [{ id: 'a', title: 'Camera', status: 'ready', descriptionHtml: '<p>Details</p>',
+        description: 'd'.repeat(2000000), structuredDescription: { html: 'h'.repeat(2000000) },
         source: { snapshot: { title: 'Original camera', payload: 'x'.repeat(2000000) } },
         skus: [{ code: 'sku' }], publishHistory: [{ result: { status: 'published' }, snapshot: { payload: 'x'.repeat(2000000) } }] }];
     });
@@ -19,6 +20,9 @@ test('task polling omits detail captures and resends product lists only when vis
     const first = read();
     assert.ok(JSON.stringify(first).length < 5000);
     assert.equal(first.products[0].skuCount, 1);
+    assert.equal(first.products[0].description.length, 80);
+    assert.equal(first.products[0].structuredDescription, undefined);
+    assert.equal(store.read((s) => s.products[0].description.length), 2000000);
     assert.equal(first.products[0].hasDescription, true);
     assert.equal(first.products[0].publishedSuccessfully, true);
     const job = store.createJob('publish');

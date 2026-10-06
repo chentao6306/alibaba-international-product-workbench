@@ -1,8 +1,8 @@
 # 抄得快 · 阿里巴巴国际站商品工作台
 
-当前版本：**1.4.64**，更新日期：**2026-10-06**。最新完整源码以默认 **main** 分支为准。
+当前版本：**1.4.65**，更新日期：**2026-10-06**。最新完整源码以默认 **main** 分支为准。
 
-1.4.64 支持文字、图片和图文混排公告，后台可上传图片、调整段落顺序及预览。展示方式可选公告列表、弹窗一次（更新后再次提示）、每次进入软件都弹窗；最后一种关闭后本次会话不重复，下次打开软件仍显示。图片公告和重复弹窗需要客户端升级至 1.4.64，旧版保留文字及升级提示。保留 1.4.63 的国际站/中国制造网采集入口隔离修复。见 [本次验证记录](docs/verification-1.4.64.md)。
+1.4.65 优化大批量商品编辑：批量水印和详情模板不再受 200 件选择限制，自动分批处理；超大图片等比缩小后添加文字或 LOGO 水印，坏图单独列出商品、图片序号和原因，可仅重试失败图片。批量窗口按需加载、预览分页，并减少后台轮询携带的详情数据。保留 1.4.64 的图文公告与每次进入软件弹窗功能。见 [本次验证记录](docs/verification-1.4.65.md)。
 
 ## 常用命令速查
 
@@ -22,8 +22,8 @@ npm run prepare:chromium
 | 启动浏览器版 | `npm start` | 先构建前端，打开 `http://127.0.0.1:8787` |
 | 运行全部测试 | `npm test` | 部分用例会启动内置 Chromium |
 | 减少测试并发 | `npm test -- --test-concurrency=2` | 减少浏览器同时运行数量 |
-| 生成安装版 EXE | `npm run dist:win:installer` | `release-installer/chaodekuai-1.4.64-setup.exe` |
-| 生成便携版 EXE | `npm run dist:win:portable` | `release/chaodekuai-1.4.64-win-x64.exe` |
+| 生成安装版 EXE | `npm run dist:win:installer` | `release-installer/chaodekuai-1.4.65-setup.exe` |
+| 生成便携版 EXE | `npm run dist:win:portable` | `release/chaodekuai-1.4.65-win-x64.exe` |
 | 启动官网开发预览 | `npm run website:dev` | `http://127.0.0.1:5175/website/` |
 | 构建官网 | `npm run website:build` | 独立输出 `dist-website/` |
 | 预览官网成品 | `npm run website:preview` | `http://127.0.0.1:4175/website/` |
@@ -83,7 +83,7 @@ Windows 桌面客户端，提供国际站、1688、速卖通、中国制造网�
 
 ## 源码与备份范围
 
-- [当前 1.4.63 完整源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/main)
+- [当前 1.4.65 完整源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/main)
 - [1.4.52 修复和验证记录](docs/verification-1.4.52.md)
 - [备份范围、解密和恢复说明](docs/stable-backup.md)
 
@@ -171,10 +171,10 @@ npm test -- --test-concurrency=2
 npm run dist:win:installer
 ```
 
-输出：`release-installer/chaodekuai-1.4.63-setup.exe`。脚本依次构建前端、准备 Chromium，再执行 Electron Builder NSIS x64 打包。安装包支持选择安装目录、桌面和开始菜单快捷方式。
+输出：`release-installer/chaodekuai-1.4.65-setup.exe`。脚本依次构建前端、准备 Chromium，再执行 Electron Builder NSIS x64 打包。安装包支持选择安装目录、桌面和开始菜单快捷方式。
 
 ```powershell
-npm run dist:win:portable   # release/chaodekuai-1.4.63-win-x64.exe
+npm run dist:win:portable   # release/chaodekuai-1.4.65-win-x64.exe
 npm run dist:win            # 按 package.json 构建 Windows 目标
 ```
 
@@ -201,8 +201,8 @@ node tools/verify-update-package.mjs release-installer
 ```powershell
 node tools/desktop-package-qa.mjs release-installer
 npx --no-install electron tools/verification-window-qa.mjs .packaged/electron/human-verification.js
-Get-Item .\release-installer\chaodekuai-1.4.63-setup.exe
-Get-FileHash .\release-installer\chaodekuai-1.4.63-setup.exe -Algorithm SHA256
+Get-Item .\release-installer\chaodekuai-1.4.65-setup.exe
+Get-FileHash .\release-installer\chaodekuai-1.4.65-setup.exe -Algorithm SHA256
 ```
 
 包检查核对版本、打包源码、浏览器、安全开关、登录窗口和未登录 API 鉴权，使用隔离用户目录。当前 EXE 未配置 Authenticode 签名；有证书后按 Electron Builder 签名配置构建。软件在线更新使用本项目的签名与授权后台分发服务；不要把 Electron Builder 的 `publish` 占位地址当作线上更新源。正式打包请运行 `npm run dist:win:installer`，以生成完整的外层安装包和配套更新签名。
@@ -224,7 +224,7 @@ sudo systemctl restart kua-yipu-auth
 
 正式客户端授权入口由 `server/auth-endpoint.js` 固定。源码桌面可用 `KUA_YIPU_AUTH_URL` 指向本机开发后台；**正式打包客户端忽略此环境变量**。迁移生产地址需要修改该模块默认地址、配置对应有效证书并重新打包。仅设置打包终端环境变量不能改变正式入口。
 
-授权服务 `/health` 中的版本为 `1.4.53`，是独立服务标识；当前桌面版本为 `1.4.63`。后台可配置 1/3/15 天等断线保持时间，不延长付费授权到期日，在线停用仍立即生效。2026-10-03 的后台菜单、版本记录和上传修复已部署，本次中国制造网采集需要更新客户端，不需要再次部署授权服务。
+授权服务 `/health` 中的版本为 `1.4.53`，是独立服务标识；当前桌面版本为 `1.4.65`。后台可配置 1/3/15 天等断线保持时间，不延长付费授权到期日，在线停用仍立即生效。2026-10-03 的后台菜单、版本记录和上传修复已部署，本次中国制造网采集需要更新客户端，不需要再次部署授权服务。
 
 ## 项目原理
 

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { categoryReadiness, CATEGORY_SCHEMA_MAX_AGE_MS } from './category-readiness.js';
 
 const DETAIL_FIELDS = new Set(['source', 'working', 'auditTrail', 'publishHistory', 'sourceLanguageEvidence',
-  'descriptionHtml', 'skus', 'postingRequirements', 'categoryReference']);
+  'descriptionHtml', 'structuredDescription', 'description', 'skus', 'postingRequirements', 'categoryReference']);
 
 export function summarizeProduct(product) {
   const savedReadiness = product.quality?.categoryReadiness;
@@ -13,8 +13,9 @@ export function summarizeProduct(product) {
   return {
     ...Object.fromEntries(Object.entries(product).filter(([key]) => !DETAIL_FIELDS.has(key))),
     summary: true,
+    description: String(product.description || '').slice(0, 80),
     skuCount: (product.skus || []).length,
-    hasDescription: Boolean(product.description || product.descriptionHtml),
+    hasDescription: Boolean(product.description || product.descriptionHtml || product.structuredDescription?.html),
     categoryReadiness: useSavedReadiness ? savedReadiness : categoryReadiness(product),
     publishedSuccessfully: product.status === 'published' || (product.publishHistory || []).some((entry) =>
       ['published', 'submitted', 'success'].includes(String(entry.result?.status || entry.status || '').toLowerCase())),

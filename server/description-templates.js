@@ -74,7 +74,8 @@ export function renderDescriptionTemplate(product, template, mode) {
   if (mode !== 'replace') for (const url of productImages) if (!images.includes(url)) images.push(url);
   if (images.length > 30) throw fail(`“${product.title || product.id}”详情图超过 30 张，请精简模板或现有图片`);
   const $result = load(html, null, false);
-  for (const url of images) if (!templateImageUrls(html).includes(url)) $result.root().append($result('<img>').attr('src', url));
+  const present = new Set(templateImageUrls(html));
+  for (const url of images) if (!present.has(url)) $result.root().append($result('<img>').attr('src', url));
   const finalHtml = $result.root().html() || '';
   return { descriptionHtml: finalHtml, description: $result.root().text().trim(), detailImages: images,
     structuredDescription: { ...product.structuredDescription, html: finalHtml, text: $result.root().text().trim(), images },
@@ -155,31 +156,49 @@ export function registerDescriptionTemplateApi(app, { store, mediaDir }) {
     if (!Array.isArray(ids) || !ids.length || ids.length > 200 || ids.some((id) => typeof id !== 'string') || new Set(ids).size !== ids.length) throw fail('请选择 1～200 件商品');
     const template = (state.descriptionTemplates || []).find((t) => t.id === body.templateId);
     if (!template || template.version !== body.version) throw fail('模板已更新或删除，请重新选择并预览', 409);
-    return ids.map((id) => {
-      const product = state.products.find((p) => p.id === id);
-      if (!product) throw fail('部分商品已删除，请刷新', 409);
-      const patch = renderDescriptionTemplate(product, template, body.mode);
-      return { id, title: product.title, revision: descriptionRevision(product), beforeHtml: sanitizeTemplateHtml(product.descriptionHtml || `<p>${escape(product.description)}</p>`), patch };
-    });
+    const index = new Map(state.products.map((p) => [p.id, p])), items = [], failures = [];
+    for (const id of ids) {
+      const product = index.get(id);
+      try {
+        if (!product) throw fail('商品已删除，请刷新', 409);
+        const patch = renderDescriptionTemplate(product, template, body.mode);
+        items.push({ id, title: product.title, revision: descriptionRevision(product),
+          ...(body.summary ? {} : { beforeHtml: sanitizeTemplateHtml(product.descriptionHtml || `<p>${escape(product.description)}</p>`), patch }) });
+      } catch (error) {
+        if (!body.partial) throw error;
+        failures.push({ id, title: product?.title || id, error: error.message });
+      }
+    }
+    return { items, failures };
   }
   app.post('/api/description-templates/preview', (request, response, next) => {
-    try { response.json({ items: preview(store.read(), request.body || {}) }); } catch (error) { next(error); }
+    // Compute the small response before cloning; never clone the entire product
+    // catalog or send hundreds of full before/after documents to the renderer.
+    try { response.json(store.read((s) => preview(s, request.body || {}))); } catch (error) { next(error); }
   });
   app.post('/api/description-templates/apply', (request, response, next) => {
     try {
-      const count = store.update((s) => {
-        const items = preview(s, request.body || {});
+      const body = request.body || {}, partial = body.partial === true;
+      const result = store.update((s) => {
+        const { items, failures } = preview(s, { ...body, summary: false });
+        const index = new Map(s.products.map((p) => [p.id, p])), ready = [];
         for (const item of items) {
-          if (request.body.revisions?.[item.id] !== item.revision) throw fail('商品详情已修改，请重新预览后应用', 409);
-          if (findWorkspaceJobs(s, { productIds: [item.id] }, ['queued', 'running', 'pause_requested']).length) throw fail('商品正在处理，请暂停或完成任务后应用模板', 409);
+          try {
+            if (body.revisions?.[item.id] !== item.revision) throw fail('商品详情已修改，请重新预览后应用', 409);
+            if (findWorkspaceJobs(s, { productIds: [item.id] }, ['queued', 'running', 'pause_requested']).length) throw fail('商品正在处理，请暂停或完成任务后应用模板', 409);
+            ready.push(item);
+          } catch (error) {
+            if (!partial) throw error;
+            failures.push({ id: item.id, title: item.title, error: error.message });
+          }
         }
-        for (const item of items) {
-          const product = s.products.find((p) => p.id === item.id); syncProductModel(product);
+        for (const item of ready) {
+          const product = index.get(item.id); syncProductModel(product);
           recordProductMutation(product, { ...item.patch, status: 'ready' }, { actor: 'user', action: 'description-template' });
         }
-        return items.length;
+        return partial ? { updated: ready.length, saved: ready.map((p) => p.id), failures } : { updated: ready.length };
       });
-      response.json({ updated: count });
+      response.json(result);
     } catch (error) { next(error); }
   });
 }

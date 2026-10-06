@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { editImageLists } from '../server/product-images.js';
 import './BatchImageEditor.css';
+import { chunks, processImageTargets, sameImages } from './batch-operations.js';
+import BatchFailures from './BatchFailures.jsx';
 
 async function request(url, body) {
   const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -20,18 +22,27 @@ export default function BatchImageEditor({ products, onSaved, notify, onGuardCha
   const [repairTarget, setRepairTarget] = useState(null), [region, setRegion] = useState(null);
   const [repairAll, setRepairAll] = useState(false), [comparison, setComparison] = useState(null);
   const alive = useRef(true), lock = useRef(false), drag = useRef(null);
-  const dirty = JSON.stringify(drafts) !== JSON.stringify(originals);
+  const [failures, setFailures] = useState([]), [saveFailures, setSaveFailures] = useState([]);
+  const lastOperation = useRef(null);
+  const dirty = useMemo(() => drafts.some((p, i) => !originals[i] || !sameImages(p, originals[i])), [drafts, originals]);
   const shown = drafts.find((p) => p.id === productId) || drafts[0];
   useEffect(() => {
     alive.current = true;
-    request('/api/products/image-drafts', { ids: products.map((p) => p.id) })
-      .then((items) => { if (alive.current) { setOriginals(items); setDrafts(items); setProductId(items[0]?.id || ''); setError(''); } })
-      .catch((e) => { if (alive.current) setError(e.message); })
+    (async () => {
+      const items = [];
+      for (const ids of chunks(products.map((p) => p.id))) {
+        const batch = await request('/api/products/image-drafts', { ids });
+        if (!alive.current) return;
+        items.push(...batch); setMessage(`读取商品图片 ${items.length}/${products.length}`);
+      }
+      setOriginals(items); setDrafts(items); setProductId(items[0]?.id || ''); setError('');
+    })().catch((e) => { if (alive.current) setError(e.message); })
       .finally(() => { if (alive.current) { setBusy(false); setMessage(''); } });
     return () => { alive.current = false; };
   }, []);
   useEffect(() => { onGuardChange({ busy, dirty }); }, [busy, dirty, onGuardChange]);
   function stage(next) {
+    setFailures([]); setSaveFailures([]);
     setUndo((history) => [...history.slice(-19), drafts]);
     setDrafts(next); setComparison(null); setRepairTarget(null); setRegion(null);
   }
@@ -87,21 +98,48 @@ export default function BatchImageEditor({ products, onSaved, notify, onGuardCha
         if (action !== 'repair' || repairAll || p.id === repairTarget.id && index === repairTarget.index) targets.push({ id: p.id, key, index, url });
       });
       if (!targets.length) throw new Error('所选范围没有图片');
-      const cache = new Map(), next = structuredClone(drafts);
-      let changed = 0;
-      for (let i = 0; i < targets.length; i++) {
-        const target = targets[i]; setMessage(`处理图片 ${i + 1}/${targets.length}，保存前仅更新预览`);
-        let result = cache.get(target.url);
-        if (!result) { result = await request('/api/media/process', { url: target.url, action, watermark, region }); cache.set(target.url, result); }
-        next.find((p) => p.id === target.id)[target.key][target.index] = result.url;
-        if (result.changed) changed++;
+      const titles = new Map(drafts.map((p) => [p.id, p.title]));
+      await processTargets(targets.map((target) => ({ ...target, title: titles.get(target.id) })), { action, watermark: { ...watermark }, region: region && { ...region } });
+    });
+  }
+  async function processTargets(targets, operation) {
+    lastOperation.current = operation;
+    const results = await processImageTargets(targets, (target) => request('/api/media/process', { url: target.url, ...operation }),
+      (done, total) => { if (alive.current) setMessage(`处理图片 ${done}/${total}，成功结果保存前仅更新预览`); });
+    if (!alive.current) return;
+    const next = drafts.map((p) => ({ ...p, mainImages: [...p.mainImages], detailImages: [...p.detailImages] }));
+    const index = new Map(next.map((p) => [p.id, p])), failed = [];
+    let first;
+    for (const { target, result, error } of results) {
+      if (error) { failed.push({ ...target, error }); continue; }
+      index.get(target.id)[target.key][target.index] = result.url;
+      if (result.changed && !first) first = { before: target.url, after: result.url };
+    }
+    if (first) { stage(next); setComparison(first); }
+    setFailures(failed);
+    if (failed.length) setError(`有 ${failed.length} 张图片未完成，请查看下方失败清单；成功图片可保存，也可只重试失败图片。`);
+    else if (!first) notify('所选图片没有需要修改的水印');
+  }
+  async function saveImages() {
+    await run(async () => {
+      const pending = drafts.filter((p, i) => !sameImages(p, originals[i]));
+      const saved = new Map(), failed = []; let updated = 0, completed = 0;
+      for (const items of chunks(pending)) {
+        try {
+          const result = await request('/api/products/save-images', { items, partial: true });
+          result.saved.forEach((p) => saved.set(p.id, p.revision));
+          failed.push(...result.failures); updated += result.updated;
+        } catch (error) { failed.push(...items.map((p) => ({ id: p.id, error: error.message }))); }
+        completed += items.length;
+        if (!alive.current) return;
+        setMessage(`保存图片 ${completed}/${pending.length}，已更新 ${updated} 件`);
       }
-      if (!alive.current) return;
-      if (!changed) return notify('所选图片没有本软件添加的水印');
-      stage(next);
-      const first = targets[0];
-      setComparison({ before: first.url, after: next.find((p) => p.id === first.id)[first.key][first.index] });
-      if (action === 'repair') { setRepairTarget(null); setRegion(null); }
+      const refreshed = drafts.map((p) => saved.has(p.id) ? { ...p, revision: saved.get(p.id) } : p);
+      setDrafts(refreshed); setOriginals(originals.map((p, i) => saved.has(p.id) ? refreshed[i] : p)); setUndo([]);
+      const byId = new Map(drafts.map((p) => [p.id, p]));
+      setSaveFailures(failed.map((p) => ({ ...p, title: byId.get(p.id)?.title })));
+      if (!failed.length && !failures.length) onSaved({ updated });
+      else { setError(`已保存 ${updated} 件商品；${failed.length} 件保存失败，${failures.length} 张图片处理未完成。`); notify(`已保存 ${updated} 件商品，请查看未完成清单`); }
     });
   }
   function pointer(event) {
@@ -119,6 +157,8 @@ export default function BatchImageEditor({ products, onSaved, notify, onGuardCha
   return <section className="batch-image-editor" aria-label="批量图片编辑">
     <p className="batch-help">所有操作先生成预览，点击“保存图片修改”后才会应用。上传图片会用于全部 {products.length} 件已选商品；原始采集快照保留。</p>
     {error && <p className="bie-error" role="alert">{error}</p>}
+    <BatchFailures items={failures} busy={busy} onSelect={setProductId} onRetry={() => run(() => processTargets(failures, lastOperation.current))} />
+    <BatchFailures items={saveFailures} busy={busy} onSelect={setProductId} />
     {busy && <p role="status">{message || '处理中…'}</p>}
     <fieldset disabled={busy || !drafts.length}>
       <legend>图片整理</legend>
@@ -147,7 +187,7 @@ export default function BatchImageEditor({ products, onSaved, notify, onGuardCha
     {comparison && <div className="bie-comparison">{[['before', '处理前'], ['after', '处理后']].map(([key, label]) => <figure key={key}><figcaption>{label}</figcaption><img src={comparison[key]} alt={label} /></figure>)}</div>}
     <label className="bie-product">预览商品<select aria-label="预览商品" value={shown?.id || ''} disabled={busy} onChange={(e) => { setProductId(e.target.value); setRepairTarget(null); setRegion(null); }}>{drafts.map((p) => <option key={p.id} value={p.id}>{p.title || p.id}</option>)}</select></label>
     {shown && [['mainImages', '主图'], ['detailImages', '详情图']].map(([key, label]) => <div key={key}><h3>{label} · {shown[key].length} 张</h3><div className="bie-grid">{shown[key].map((url, index) => <article key={`${index}-${url}`}><img src={url} alt={`${label} ${index + 1}`} loading="lazy" /><span>{label} {index + 1}</span><button type="button" className="secondary-button" disabled={busy} onClick={() => removeOne(key, index)}>删除{label} {index + 1}</button><button type="button" className="secondary-button" disabled={busy} aria-label={`删除${label} ${index + 1} 的软件水印`} onClick={() => transform('remove-watermark', { id: shown.id, key, index })}>删除软件水印</button><button type="button" className="secondary-button" disabled={busy} onClick={() => { setRepairTarget({ id: shown.id, key, index, url }); setRegion(null); setRepairAll(false); }}>修复原图水印</button></article>)}</div>{!shown[key].length && <p className="batch-help">暂无{label}</p>}</div>)}
-    <div className="bie-summary">{drafts.map((p, i) => <p key={p.id}>{p.title || p.id}：主图 {originals[i].mainImages.length} → {p.mainImages.length}，详情图 {originals[i].detailImages.length} → {p.detailImages.length}</p>)}</div>
-    <div className="bie-footer"><button type="button" className="secondary-button" disabled={busy || !undo.length} onClick={() => { setDrafts(undo.at(-1)); setUndo(undo.slice(0, -1)); setComparison(null); setRepairTarget(null); }}>撤销上一步</button><button type="button" className="secondary-button" disabled={busy || !dirty} onClick={() => { stage(structuredClone(originals)); setRepairTarget(null); }}>恢复本次编辑前图片</button><button type="button" className="primary-button" disabled={busy || !dirty || !drafts.length} onClick={() => run(async () => { setMessage('保存图片修改…'); const result = await request('/api/products/save-images', { items: drafts }); onSaved(result); })}>保存图片修改</button></div>
+    <p className="batch-help">共 {drafts.length} 件商品，保存时自动分批处理。可用上方“预览商品”切换查看。</p>
+    <div className="bie-footer"><button type="button" className="secondary-button" disabled={busy || !undo.length} onClick={() => { setFailures([]); setSaveFailures([]); setDrafts(undo.at(-1)); setUndo(undo.slice(0, -1)); setComparison(null); setRepairTarget(null); }}>撤销上一步</button><button type="button" className="secondary-button" disabled={busy || !dirty} onClick={() => { stage(structuredClone(originals)); setRepairTarget(null); }}>恢复本次编辑前图片</button><button type="button" className="primary-button" disabled={busy || !dirty || !drafts.length} onClick={saveImages}>保存图片修改</button></div>
   </section>;
 }
