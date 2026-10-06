@@ -168,7 +168,8 @@ export async function launchPersistent(profileDir, options = {}) {
       '--no-first-run',
       '--no-default-browser-check',
       '--disable-session-crashed-bubble',
-      ...(options.args || [])
+      ...(options.args || []),
+      '--mute-audio'
     ])]
   };
   try {

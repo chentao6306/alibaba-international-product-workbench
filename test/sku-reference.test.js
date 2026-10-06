@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright-core';
 import { findChromium } from '../server/browser-runtime.js';
-import { fillReferencedSkuRows } from '../server/sku-reference.js';
+import { fillReferencedSkuRows, selectSkuPricing, usesSkuPricing } from '../server/sku-reference.js';
 import { fillAndVerify, preparePublishProduct, validateProductData } from '../server/publisher.js';
 
 test('keeps referenced zero stock and blank codes during publish preparation', () => {
@@ -13,6 +13,45 @@ test('keeps referenced zero stock and blank codes during publish preparation', (
   assert.equal(validateProductData(prepared).some((message) => /SKU 库存/.test(message)), false);
   prepared.skus[0].enabled = true;
   assert.ok(validateProductData(prepared).some((message) => /SKU 库存/.test(message)));
+});
+
+test('preserves different collected SKU prices and refuses to invent a missing variant price', () => {
+  const product = { price: 5, variantGroups: [{ name: 'Color', options: ['Blue', 'White', 'Black'] }],
+    priceMode: 'quantity-tier', skus: [{ attributes: { Color: 'Blue' }, price: '12.34' }, { attributes: { Color: 'White' }, price: '23.45' }, { attributes: { Color: 'Black' }, price: '' }] };
+  const prepared = preparePublishProduct(product);
+  assert.equal(prepared.priceMode, 'sku');
+  assert.deepEqual(prepared.skus.map(sku => sku.price), ['12.34', '23.45', '']);
+  assert.ok(validateProductData(prepared).includes('SKU 缺少价格'));
+  assert.equal(usesSkuPricing({ skus: [{ price: 5 }, { price: 5 }], priceMode: 'quantity-tier' }), false);
+});
+
+test('writes distinct non-reference prices by variant identity in a virtual SKU matrix', { skip: !findChromium(), timeout: 40000 }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<label><input type="radio" name="mode" checked>根据数量设置阶梯价</label><label><input type="radio" name="mode" id="sku-mode">根据规格设置价格</label><input placeholder="最小起订量">
+      <div id="sku"><table class="sku-header"><tr><th><div class="th-saleProps-label"><span>颜色</span></div><div class="checkSelectBabel"><span class="labelText">Black</span><span class="labelText">Blue</span></div></th><th><div class="th-saleProps-label"><span>尺寸</span></div><div class="checkSelectBabel"><span class="labelText">S</span><span class="labelText">M</span></div></th></tr></table>
+      <div class="virtualized-table-scroll-wrapper" style="height:100px;overflow:auto"><div style="height:400px"><table id="body"></table></div></div></div>
+      <script>window.rows=Array.from({length:4},()=>({price:'5',code:'',stock:'',enabled:true}));let offset=0;
+        const render=()=>{document.getElementById('body').innerHTML=rows.slice(offset,offset+2).map((row,i)=>'<tr><td data-name="skuOuterId" data-row="'+(offset+i)+'"><input value="'+row.code+'"></td><td data-name="skuPrice"><input value="'+row.price+'"></td><td data-name="skuStock"><input value="'+row.stock+'"></td><td data-name="operate"><button role="switch" aria-checked="'+row.enabled+'">Toggle</button></td></tr>').join('');
+          document.querySelectorAll('#body tr').forEach((tr,i)=>{const row=rows[offset+i];['code','price','stock'].forEach((key,j)=>{tr.querySelectorAll('input')[j].oninput=e=>row[key]=e.target.value;});tr.querySelector('button').onclick=e=>{row.enabled=!row.enabled;e.target.setAttribute('aria-checked',row.enabled);};});};
+        document.querySelector('.virtualized-table-scroll-wrapper').onscroll=e=>{const next=e.target.scrollTop>0?2:0;if(next!==offset){offset=next;render();}};render();</script>`);
+    const product = { moq: 10, variantGroups: [{ name: 'Color', options: ['Blue', 'Black'] }, { name: 'Size', options: ['M', 'S'] }], skus: [
+      { attributes: { Color: 'Blue', Size: 'S' }, price: 23.45, code: 'B-S', stock: 20 },
+      { attributes: { Color: 'Black', Size: 'M' }, price: 14.5, code: 'K-M', stock: 10 },
+      { attributes: { Color: 'Black', Size: 'S' }, price: 12.34, code: 'K-S', stock: 30 },
+    ] };
+    await selectSkuPricing(page, product, fillAndVerify);
+    assert.equal(await page.locator('#sku-mode').isChecked(), true);
+    assert.equal(await page.getByPlaceholder('最小起订量').inputValue(), '10');
+    assert.deepEqual(await fillReferencedSkuRows(page, product, fillAndVerify, () => {}, { appliedGroups: [{ name: 'Size', targetName: '尺寸' }] }), { filled: 4 });
+    assert.deepEqual(await page.evaluate(() => rows.map(row => [row.price, row.code, row.stock, row.enabled])), [
+      ['12.34', 'K-S', '30', true], ['14.50', 'K-M', '10', true], ['23.45', 'B-S', '20', true], ['5', '', '', false],
+    ]);
+    await page.setContent('<input role="input-price" value="99">');
+    await assert.rejects(selectSkuPricing(page, product, fillAndVerify), { code: 'PUBLISH_FIELD_NOT_READY' });
+    assert.equal(await page.locator('input').inputValue(), '99');
+  } finally { await browser.close(); }
 });
 
 test('writes reference codes and quantities by SKU identity across virtual pages and disables missing combinations', { skip: !findChromium() }, async () => {

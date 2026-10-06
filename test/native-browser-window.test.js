@@ -12,7 +12,10 @@ test('hides only owned native windows, retaining the verified session and workin
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'owned-browser-'));
   let context, other;
   try {
-    context = await launchPersistent(path.join(root, 'verified'), { headless: false });
+    context = await launchPersistent(path.join(root, 'verified'), { headless: false, args: ['--enable-automation'] });
+    const commandSession = await context.newCDPSession(context.pages()[0]);
+    assert.ok((await commandSession.send('Browser.getBrowserCommandLine')).arguments.includes('--mute-audio'));
+    await commandSession.detach();
     other = await launchPersistent(path.join(root, 'other'), { headless: false });
     // The fallback retains Chromium's initial blank tab and opens a separate
     // verification tab; closing the sole native tab would terminate Chromium.

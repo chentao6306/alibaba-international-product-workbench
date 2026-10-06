@@ -339,22 +339,24 @@ app.post('/api/groups/delete', (request, response, next) => {
 app.post('/api/shops/read-groups', async (request, response, next) => {
   try {
     const result = await collector.listGroups(request.body.url);
+    const platform = result.sourcePlatform || sourcePlatform({ sourceUrl: result.shopUrl });
+    if (request.body.platform && request.body.platform !== platform) throw new Error('链接与当前采集平台不一致');
     const now = new Date().toISOString();
     const saved = store.update((state) => {
       let shop = state.shops.find((item) => item.url === result.shopUrl);
       if (!shop) {
-        shop = { id: newId(), url: result.shopUrl, name: result.shopName, createdAt: now, updatedAt: now };
+        shop = { id: newId(), url: result.shopUrl, name: result.shopName, sourcePlatform: platform, createdAt: now, updatedAt: now };
         state.shops.unshift(shop);
       } else {
-        Object.assign(shop, { name: result.shopName, updatedAt: now });
+        Object.assign(shop, { name: result.shopName, sourcePlatform: platform, updatedAt: now });
       }
       const incomingIds = new Set();
       for (const groupData of result.groups) {
         let group = state.groups.find((item) => item.shopId === shop.id && item.externalId === groupData.externalId);
         if (!group) {
-          group = { id: newId(), shopId: shop.id, status: 'ready', collectedCount: 0, ...groupData };
+          group = { id: newId(), shopId: shop.id, sourcePlatform: platform, status: 'ready', collectedCount: 0, ...groupData };
           state.groups.push(group);
-        } else Object.assign(group, groupData, { status: 'ready' });
+        } else Object.assign(group, groupData, { sourcePlatform: platform });
         incomingIds.add(group.id);
       }
       return { shop, groups: state.groups.filter((item) => incomingIds.has(item.id)) };
@@ -389,7 +391,12 @@ function saveCollectedProduct(groupId, raw, options = {}) {
       product = syncProductModel({ id: newId(), shopId: target?.shopId || '', groupId: groupId || '', selected: false, status: 'ready', createdAt: now, ...normalized }, { captureSource: true, sourceSnapshot: collectedSnapshot || raw, capturedAt: now });
       draft.products.unshift(product);
     } else {
-      if (options.collectionMethod) return product;
+      if (options.collectionMethod) {
+        // A product collected through a direct link may later be discovered
+        // in a shop group. Associate it without replacing the user's edits.
+        if (target && !product.groupId) { product.groupId = groupId; product.shopId = target.shopId; }
+        return product;
+      }
       for (const field of ['stock', 'skus']) {
         if (hasManualStock(product, field)) normalized[field] = product[field];
       }
@@ -511,7 +518,16 @@ app.post('/api/groups/:id/collect', (request, response, next) => {
   const unfinished = state.jobs.find((item) => item.type === 'collect' && item.metadata?.groupId === group.id && ['queued', 'running', 'pause_requested', 'paused'].includes(item.status));
   if (unfinished) return next(Object.assign(new Error('该分组已有未完成的采集任务，请先继续或取消该任务'), { status: 409 }));
   const options = { collectionFolderId: request.body.collectionFolderId, ...collectionPageRange(request.body), delaySeconds: Math.max(0, Number(request.body.delaySeconds || 0)), destinationCountry: String(request.body.destinationCountry || ''), sort: String(request.body.sort || 'default') };
-  const job = store.createJob('collect', { groupId: group.id, groupName: group.name, collectionFolderId: options.collectionFolderId, options });
+  const platform = sourcePlatform({ ...group, sourceUrl: group.url });
+  const mic = platform === 'made-in-china';
+  if (mic) {
+    options.delaySeconds = Math.min(60, options.delaySeconds || 0);
+    options.maxProducts = Number(request.body.maxProducts) > 0 ? Math.floor(Number(request.body.maxProducts)) : null;
+    options.destinationCountry = ''; options.sort = 'default';
+  }
+  const job = store.createJob('collect', { groupId: group.id, groupName: group.name, sourcePlatform: platform,
+    ...(mic ? { collectionMethod: 'shop-products', links: [parseCollectionUrl(group.url, 'shop-products', platform)] } : {}),
+    collectionFolderId: options.collectionFolderId, options });
   store.update((draft) => { const target = draft.groups.find((item) => item.id === group.id); target.status = 'collecting'; target.activeJobId = job.id; });
   response.status(202).json(job);
   setImmediate(() => queueCollection(job.id));
@@ -523,6 +539,11 @@ async function startLinkCollectJob(jobId) {
   if (!job || !['queued', 'running'].includes(job.status)) return;
   activeCollectJobs.add(jobId);
   const metadata = job.metadata;
+  if (metadata.groupId && !store.read().groups.some(group => group.id === metadata.groupId)) {
+    store.patchJob(jobId, { status: 'cancelled', message: '店铺分组已删除' });
+    activeCollectJobs.delete(jobId);
+    return;
+  }
   const completedKeys = new Set(metadata.completedKeys || []);
   const failures = [...(metadata.failures || [])];
   const options = { ...metadata.options, collectionMethod: metadata.collectionMethod,
@@ -538,13 +559,18 @@ async function startLinkCollectJob(jobId) {
       options.onCheckpoint = (value) => { checkpoint.write(value); options.checkpoint = value; };
     }
     store.patchJob(jobId, { status: 'running', message: '正在读取来源商品' });
+    if (metadata.groupId) store.update(state => {
+      const group = state.groups.find(item => item.id === metadata.groupId);
+      if (group) Object.assign(group, { status: 'collecting', activeJobId: jobId });
+    });
     const progress = (event) => {
-      if (event.product) saveCollectedProduct('', event.product, options);
+      if (event.product) saveCollectedProduct(metadata.groupId || '', event.product, options);
       const status = store.read().jobs.find((item) => item.id === jobId)?.status;
       if (['cancelled', 'paused'].includes(status)) return false;
       if (event.key) completedKeys.add(event.key);
       if (event.error) failures.push({ source: event.key, url: event.url, error: userFacingError(new Error(event.error)) });
       store.patchJob(jobId, { progress: completedKeys.size, total: event.total || job.total || 0,
+        collectionStage: event.stage, discovered: event.found || options.checkpoint?.products.length || event.total || 0,
         metadata: { ...metadata, completedKeys: [...completedKeys], failures },
         message: event.stage === 'listing' ? `正在读取结果第 ${event.page} 页，已发现 ${event.found} 件`
           : `已处理 ${event.current}/${event.total} 件，失败 ${failures.length} 件`,
@@ -558,10 +584,22 @@ async function startLinkCollectJob(jobId) {
     if (options.shouldStop()) throw Object.assign(new Error('已暂停采集'), { code: 'COLLECT_PAUSED' });
     store.patchJob(jobId, { status: failures.length === completedKeys.size ? 'failed' : 'completed', progress: completedKeys.size, total: completedKeys.size,
       message: `采集完成，成功 ${completedKeys.size - failures.length} 件，失败 ${failures.length} 件${failures.length ? `：${failures[0].error}` : ''}` });
+    if (metadata.collectionMethod === 'shop-products') new CollectionCheckpoint(dataDir, jobId).clear();
   } catch (error) {
     if (store.read().jobs.find((item) => item.id === jobId)?.status === 'cancelled') return;
     store.patchJob(jobId, { status: options.shouldStop() || error.code === 'COLLECT_PAUSED' ? 'paused' : 'failed', message: userFacingError(error) });
-  } finally { activeCollectJobs.delete(jobId); }
+  } finally {
+    if (metadata.groupId) store.update(state => {
+      const group = state.groups.find(item => item.id === metadata.groupId);
+      const current = state.jobs.find(item => item.id === jobId);
+      if (group && (!group.activeJobId || group.activeJobId === jobId)) Object.assign(group, {
+        status: current?.status === 'completed' ? 'done' : current?.status === 'failed' ? 'failed' : 'ready',
+        activeJobId: '', collectedCount: Math.max(group.collectedCount || 0, completedKeys.size - failures.length),
+        ...(current?.status === 'completed' ? { lastCollectedAt: new Date().toISOString() } : {}),
+      });
+    });
+    activeCollectJobs.delete(jobId);
+  }
 }
 
 app.post('/api/collect/links', (request, response, next) => {

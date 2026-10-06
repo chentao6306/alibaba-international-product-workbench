@@ -20,7 +20,7 @@ import { readSellerGroups, applySellerGroup } from './seller-groups.js';
 import { ImageDownloadQueue } from './image-download-queue.js';
 import { ORIGIN_COUNTRIES, originCountry, isOriginRegionAttribute, productOrigin, synchronizeProductOrigin } from './origin-country.js';
 import { uploadEditorDetailImages } from './description-image-upload.js';
-import { fillReferencedSkuRows } from './sku-reference.js';
+import { fillReferencedSkuRows, selectSkuPricing, usesSkuPricing } from './sku-reference.js';
 import { findNormalDescriptionControl, findPostingTitle, requirePostingPageAvailable, revealDescriptionSection, waitForDescriptionEditor, waitForPostingTitle } from './posting-readiness.js';
 import { readSourceDescriptionFrame } from './source-description-frame.js';
 import { collectSourceAttributeSections } from './source-attributes.js';
@@ -1275,13 +1275,14 @@ export function preparePublishProduct(product, options = {}) {
   if (groups.length && Array.isArray(product.skus)) {
     next.skus = product.skus.map((sku, index) => ({
       ...sku,
-      price: numericValue(sku.price) > 0 ? Number(sku.price).toFixed(2) : fallbackPrice.toFixed(2),
+      price: numericValue(sku.price) > 0 ? numericValue(sku.price).toFixed(2) : usesSkuPricing(product) ? '' : fallbackPrice.toFixed(2),
       stock: product.categoryReference && sku.stock != null && sku.stock !== '' ? Number(sku.stock)
         : sku.stock != null && sku.stock !== '' ? Number(sku.stock) : fallbackStock,
       code: String(sku.code || sku.skuCode || (product.categoryReference ? '' : `${product.sourceId || product.id || 'SKU'}-${index + 1}`)).trim()
     }));
   }
   next.priceTiers = canonicalizePriceTiers(product.priceTiers || []);
+  if (usesSkuPricing(product)) next.priceMode = 'sku';
   return next;
 }
 
@@ -4021,6 +4022,7 @@ async function dismissPostingNotice(page, protectedTarget) {
   const handle = protectedTarget ? await protectedTarget.elementHandle({ timeout: 1000 }).catch(() => null) : null;
   if (protectedTarget && !handle) return false;
   const harmlessActions = [
+    /^(?:暂不接受|Not now|Decline)$/i,
     /^(?:我知道了|知道了|关闭|取消|稍后再说|暂不|以后再说|Got it|Close|Cancel)$/i,
     /^(?:继续返回旧版|确认返回旧版)$/i
   ];
@@ -4053,7 +4055,10 @@ export async function dismissPostingOverlays(page) {
   requireNoPolicyWarning(await visibleFeedback(page));
   await acknowledgePolicyWarning(page);
   await closePostingAttributeMenus(page);
-  for (let pass = 0; pass < 4; pass += 1) {
+  // Alibaba can open one optional image-service notice for each uploaded
+  // image. Drain the already visible stack while keeping retries bounded.
+  const passes = Math.min(16, Math.max(4, await page.locator(POSTING_BLOCKERS).count() + 2));
+  for (let pass = 0; pass < passes; pass += 1) {
     if (!await page.locator(POSTING_BLOCKERS).count()) return true;
     const acted = await dismissPostingNotice(page);
     if (!acted) {
@@ -5768,6 +5773,10 @@ export class SellerPublisher {
   }
 
   async fillPriceFields(page, product, { timeoutMs = browserResourcePolicy().constrained ? 20000 : 10000, onProgress = () => {} } = {}) {
+    if (usesSkuPricing(product)) {
+      onProgress('选择按规格定价，保留每个 SKU 的价格');
+      return selectSkuPricing(page, product, fillAndVerify, { timeoutMs });
+    }
     const fob = product.fobPrice && typeof product.fobPrice === 'object' ? product.fobPrice : {};
     const sourceTiers = product.priceMode === 'fob-tier' && Array.isArray(fob.tiers) ? fob.tiers : (product.priceTiers || []);
     const validTiers = sourceTiers
@@ -6479,7 +6488,8 @@ export class SellerPublisher {
     reportStage('填写并复核商品关键词');
     await fillProductKeywords(page, product);
 
-    await this.fillPriceFields(page, product, { onProgress: reportStage });
+    // Per-SKU controls are created only after the specification matrix.
+    if (!usesSkuPricing(product)) await this.fillPriceFields(page, product, { onProgress: reportStage });
     await fillFirst(page, [
       'input[placeholder="输入数量"]',
       'input[placeholder*="库存"]', 'input[placeholder*="stock" i]', 'input[placeholder*="quantity" i]', 'input[name*="stock" i]',
@@ -6570,7 +6580,7 @@ export class SellerPublisher {
     reportStage('复核物流和必填资料');
     await fillDeliveryFields(page, product.deliveryTime);
     await applyPostingLogistics(page, product, options);
-    reportStage('复核价格阶梯');
+    reportStage(usesSkuPricing(product) ? '复核各规格价格' : '复核价格阶梯');
     await this.fillPriceFields(page, product, { onProgress: reportStage });
     await fillReferencedSkuRows(page, product, fillAndVerify, reportStage, { appliedGroups: finalVariantResult.groups, normalizeValue: englishSpecText });
 
@@ -6700,6 +6710,10 @@ export class SellerPublisher {
         // Recheck after all repairs: specification changes can reset main
         // images even if the preceding image repair itself succeeded.
         await this.reconcileMainImages(page, product, reportStage);
+        if (usesSkuPricing(product)) {
+          await this.fillPriceFields(page, product, { onProgress: reportStage });
+          await fillReferencedSkuRows(page, product, fillAndVerify, reportStage, { appliedGroups: finalVariantResult.groups, normalizeValue: englishSpecText });
+        }
         for (const text of buttonTexts) {
           const candidate = page.getByRole('button', { name: text, exact: false }).last();
           if (await candidate.isVisible().catch(() => false) && !await candidate.isDisabled().catch(() => false)) {

@@ -35,10 +35,11 @@ export function publishRepairPlan(error) {
   const overlay = isPostingOverlayError(error);
   return [
     overlay && 'overlay',
-    mainImages && 'mainImages',
     specifications && 'specifications',
     attributes && 'attributes',
     logistics && 'logistics',
+    // Repair the final image model after specifications can rebuild it.
+    mainImages && 'mainImages',
   ].filter(Boolean);
 }
 

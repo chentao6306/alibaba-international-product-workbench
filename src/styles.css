@@ -544,3 +544,5 @@ input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--orange); }
 .recovery-row small { margin-top: 5px; color: #866336; }
 .reference-ready { display: inline-block; margin-top: 6px; color: #18744a; font-size: 12px; }
 @media (max-width: 600px) { .reference-diff { grid-template-columns: 1fr; } }
+
+.collection-mode-tabs { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 24px; }

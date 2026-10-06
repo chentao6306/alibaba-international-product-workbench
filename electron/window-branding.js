@@ -34,6 +34,13 @@ export function initializeWindowBranding() {
   if (initialized) return;
   initialized = true;
   if (process.platform === 'win32') app.setAppUserModelId(APP_ID);
+  // Includes verification WebContentsViews, iframe media, and popup windows.
+  // The Chromium switch also covers audio started before navigation events.
+  app.commandLine.appendSwitch('mute-audio');
+  app.on('web-contents-created', (_event, contents) => {
+    contents.setAudioMuted(true);
+    contents.on('did-start-navigation', () => { if (!contents.isDestroyed()) contents.setAudioMuted(true); });
+  });
   // Covers web-created seller windows as well as our explicitly constructed
   // windows. Verification can initialize this independently of main.js.
   app.on('browser-window-created', (_event, window) => brandWindow(window));

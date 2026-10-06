@@ -45,9 +45,8 @@ const COLLECTION_VIEWS = {
   madeinchina: { title: '中国制造网采集', platform: 'made-in-china', method: 'product', placeholder: 'https://供应商.en.made-in-china.com/product/商品编号/China-商品名称.html', note: '支持单件、多链接及店铺采集。明确匹配的国际站类目会自动带入；也可引用从1688或国际站采集后已成功上架的同类商品。发布前请核对售价、属性和规格；询价商品需填写售价。' },
 };
 
-function LinkCollectionView({ entry, state, refresh, notify, onMenu, navigate, folderId }) {
-  const [micMethod, setMicMethod] = useState('product');
-  const config = { ...COLLECTION_VIEWS[entry], ...(entry === 'madeinchina' ? { method: micMethod } : {}) };
+function LinkCollectionView({ entry, state, refresh, notify, onMenu, navigate, folderId, onModeChange }) {
+  const config = COLLECTION_VIEWS[entry];
   const shop = config.method === 'shop-products';
   const [urls, setUrls] = useState('');
   const [busy, setBusy] = useState(false);
@@ -70,12 +69,12 @@ function LinkCollectionView({ entry, state, refresh, notify, onMenu, navigate, f
   }
   return <>
     <Header title={config.title} subtitle={`${sourcePlatformLabel({ sourcePlatform: config.platform })} → 阿里巴巴国际站`} onMenu={onMenu} />
+    {onModeChange && <MadeInChinaModes mode="product" onChange={onModeChange} />}
     <CollectionFolders {...{ state, folderId, refresh, notify }} />
     <section className="collection-entry">
       <div className="section-title"><h2>{shop ? '店铺链接' : config.method === 'image-search' ? '搜索结果链接' : '商品链接'}</h2>{config.platform !== 'alibaba.com' && <button className="secondary-button" onClick={login} disabled={busy || running}><ExternalLink size={16} />平台登录</button>}</div>
       {config.note && <p className="collection-entry-note">{config.note}</p>}
       <form onSubmit={submit} className="link-collection-form">
-        {entry === 'madeinchina' && <label><span>采集方式</span><select aria-label="中国制造网采集方式" disabled={busy || running} value={micMethod} onChange={(event) => { setMicMethod(event.target.value); setUrls(''); }}><option value="product">单个商品 / 多链接批量采集</option><option value="shop-products">店铺 / 店铺商品分组采集</option></select></label>}
         <label><span>{shop ? '店铺首页、商品列表或商品分组链接（一个）' : config.method === 'image-search' ? '国际站以图搜品结果页' : '商品详情页（每行一个）'}</span><textarea aria-label="采集链接" rows={shop || config.method === 'image-search' ? 4 : 7} value={urls} onChange={(event) => setUrls(event.target.value)} placeholder={shop ? 'https://供应商.en.made-in-china.com/' : config.placeholder} required /></label>
         <div className="link-collection-options">
           {(shop || config.method === 'image-search') && [['startPage', '起始页'], ['endPage', '结束页'], ['maxProducts', '商品上限']].map(([key, label]) => <label key={key}><span>{label}</span><input type="number" min="1" max={key === 'maxProducts' ? 1000 : 100} value={options[key]} onChange={(event) => setOptions({ ...options, [key]: Number(event.target.value) })} /></label>)}
@@ -153,10 +152,28 @@ function Metric({ icon: Icon, label, value, detail, tone }) {
   return <div className={`metric ${tone || ''}`}><Icon size={18} /><div><span>{label}</span><strong>{value}</strong><small>{detail}</small></div></div>;
 }
 
-function SourceView({ state, refresh, notify, onMenu, folderId }) {
+function MadeInChinaModes({ mode, onChange }) {
+  return <div className="collection-mode-tabs" role="group" aria-label="中国制造网采集方式">
+    <button className={mode === 'shop' ? 'primary-button' : 'secondary-button'} aria-pressed={mode === 'shop'} onClick={() => onChange('shop')}><Store size={17} />店铺分组采集</button>
+    <button className={mode === 'product' ? 'primary-button' : 'secondary-button'} aria-pressed={mode === 'product'} onClick={() => onChange('product')}><Link2 size={17} />单个商品 / 多链接采集</button>
+  </div>;
+}
+
+function MadeInChinaView(props) {
+  const [mode, setMode] = useState('shop');
+  return mode === 'shop' ? <SourceView {...props} platform="made-in-china" onModeChange={setMode} />
+    : <LinkCollectionView {...props} entry="madeinchina" onModeChange={setMode} />;
+}
+
+function SourceView({ state: workspace, refresh, notify, onMenu, folderId, platform = 'alibaba.com', onModeChange }) {
+  const mic = platform === 'made-in-china';
+  const shops = workspace.shops.filter(shop => sourcePlatform({ ...shop, sourceUrl: shop.url }) === platform);
+  const shopIds = new Set(shops.map(shop => shop.id));
+  const state = { ...workspace, shops, groups: workspace.groups.filter(group => shopIds.has(group.shopId)) };
+  const platformName = mic ? '中国制造网' : '国际站';
   const [url, setUrl] = useState('');
   const [reading, setReading] = useState(false);
-  const [collectConfig, setCollectConfig] = useState({ allPages: true, startPage: 1, endPage: 10, delaySeconds: 3, destinationCountry: 'United States', sort: 'default' });
+  const [collectConfig, setCollectConfig] = useState({ allPages: true, startPage: 1, endPage: 10, delaySeconds: 3, destinationCountry: 'United States', sort: 'default', maxProducts: '' });
   const [shopPage, setShopPage] = useState(1);
   const [expandedShops, setExpandedShops] = useState({});
   const [groupPages, setGroupPages] = useState({});
@@ -166,7 +183,7 @@ function SourceView({ state, refresh, notify, onMenu, folderId }) {
   const groupPageSize = 8;
   const shopPageCount = Math.max(1, Math.ceil(state.shops.length / shopPageSize));
   const visibleShops = state.shops.slice((shopPage - 1) * shopPageSize, shopPage * shopPageSize);
-  const collectJobs = state.jobs.filter((job) => job.type === 'collect' && job.metadata?.collectionFolderId === folderId && ['queued', 'running', 'pause_requested', 'paused'].includes(job.status));
+  const collectJobs = state.jobs.filter((job) => job.type === 'collect' && job.metadata?.collectionFolderId === folderId && (job.metadata?.sourcePlatform || 'alibaba.com') === platform && ['queued', 'running', 'pause_requested', 'paused'].includes(job.status));
 
   useEffect(() => { if (shopPage > shopPageCount) setShopPage(shopPageCount); }, [shopPage, shopPageCount]);
 
@@ -175,7 +192,9 @@ function SourceView({ state, refresh, notify, onMenu, folderId }) {
     if (!url.trim()) return;
     setReading(true);
     try {
-      await api('/api/shops/read-groups', { method: 'POST', body: JSON.stringify({ url }) });
+      const result = await api('/api/shops/read-groups', { method: 'POST', body: JSON.stringify({ url, platform }) });
+      setExpandedShops(current => ({ ...current, [result.shop.id]: true }));
+      setShopPage(1);
       await refresh(); notify('店铺分组读取完成');
     } catch (error) { notify(error.message, 'error'); }
     finally { setReading(false); }
@@ -248,17 +267,18 @@ function SourceView({ state, refresh, notify, onMenu, folderId }) {
   }
 
   return <>
-    <Header title="店铺采集" subtitle="读取阿里巴巴国际站同行店铺与商品分组" onMenu={onMenu} />
+    <Header title={mic ? '中国制造网采集' : '店铺采集'} subtitle={`读取${platformName}同行店铺与商品分组`} onMenu={onMenu} />
+    {onModeChange && <MadeInChinaModes mode="shop" onChange={onModeChange} />}
     <CollectionFolders {...{ state, folderId, refresh, notify }} />
     <div className="metrics">
       <Metric icon={Store} label="同行店铺" value={state.shops.length} detail="已读取" />
       <Metric icon={FolderTree} label="商品分组" value={state.groups.length} detail="可采集" tone="orange" />
-      <Metric icon={Boxes} label="当前采集分组" value={state.products.filter((product) => product.collectionFolderId === folderId).length} detail="已入库" tone="teal" />
+      <Metric icon={Boxes} label="当前采集分组" value={state.products.filter((product) => product.collectionFolderId === folderId && sourcePlatform(product) === platform).length} detail="已入库" tone="teal" />
     </div>
     <section className="panel source-entry">
-      <div className="section-title"><div><h2>读取国际站同行店铺</h2><p>支持 *.en.alibaba.com 店铺首页、商品列表和分组链接</p></div></div>
+      <div className="section-title"><div><h2>读取{platformName}同行店铺</h2><p>支持 {mic ? '*.en.made-in-china.com' : '*.en.alibaba.com'} 店铺首页、商品列表和分组链接</p></div>{mic && <button className="secondary-button" onClick={async () => { try { await api('/api/collect/login', { method: 'POST', body: JSON.stringify({ platform }) }); notify('平台登录页已打开'); } catch (error) { notify(error.message, 'error'); } }}><ExternalLink size={16} />平台登录</button>}</div>
       <form className="url-form" onSubmit={readGroups}>
-        <div className="input-with-icon"><Link2 size={18} /><input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="粘贴阿里巴巴国际站同行店铺链接" aria-label="国际站同行店铺链接" /></div>
+        <div className="input-with-icon"><Link2 size={18} /><input value={url} onChange={(event) => setUrl(event.target.value)} placeholder={`粘贴${platformName}同行店铺链接`} aria-label={`${platformName}同行店铺链接`} /></div>
         <button className="primary-button" disabled={reading}>{reading ? <LoaderCircle className="spin" size={17} /> : <Search size={17} />}读取分组</button>
       </form>
       <div className="collection-options">
@@ -266,8 +286,9 @@ function SourceView({ state, refresh, notify, onMenu, folderId }) {
         <label><span>起始页</span><input type="number" min="1" disabled={collectConfig.allPages} value={collectConfig.startPage} onChange={(event) => setCollectConfig((v) => ({ ...v, startPage: event.target.value }))} /></label>
         <label><span>结束页</span><input type="number" min="1" disabled={collectConfig.allPages} value={collectConfig.allPages ? '' : collectConfig.endPage} placeholder={collectConfig.allPages ? '最后一页' : ''} onChange={(event) => setCollectConfig((v) => ({ ...v, endPage: event.target.value }))} /></label>
         <label><span>采集间隔（秒/条）</span><input type="number" min="0" step="0.5" value={collectConfig.delaySeconds} onChange={(event) => setCollectConfig((v) => ({ ...v, delaySeconds: event.target.value }))} /></label>
-        <label><span>交货地国家</span><select value={collectConfig.destinationCountry} onChange={(event) => setCollectConfig((v) => ({ ...v, destinationCountry: event.target.value }))}><option>United States</option><option>United Kingdom</option><option>Germany</option><option>Canada</option><option>Australia</option><option>Saudi Arabia</option><option>United Arab Emirates</option><option>全部国家</option></select></label>
-        <label><span>排序</span><select value={collectConfig.sort} onChange={(event) => setCollectConfig((v) => ({ ...v, sort: event.target.value }))}><option value="default">默认排序</option><option value="priceAsc">价格从低到高</option><option value="priceDesc">价格从高到低</option><option value="newest">最新商品</option></select></label>
+        {!mic && <><label><span>交货地国家</span><select value={collectConfig.destinationCountry} onChange={(event) => setCollectConfig((v) => ({ ...v, destinationCountry: event.target.value }))}><option>United States</option><option>United Kingdom</option><option>Germany</option><option>Canada</option><option>Australia</option><option>Saudi Arabia</option><option>United Arab Emirates</option><option>全部国家</option></select></label>
+        <label><span>排序</span><select value={collectConfig.sort} onChange={(event) => setCollectConfig((v) => ({ ...v, sort: event.target.value }))}><option value="default">默认排序</option><option value="priceAsc">价格从低到高</option><option value="priceDesc">价格从高到低</option><option value="newest">最新商品</option></select></label></>}
+        {mic && <label><span>商品上限（每组）</span><input type="number" min="1" placeholder="不限" value={collectConfig.maxProducts} onChange={event => setCollectConfig(v => ({ ...v, maxProducts: event.target.value }))} /></label>}
       </div>
     </section>
     <CollectionTasks key={folderId} jobs={collectJobs} onControl={controlCollect} />
@@ -282,7 +303,7 @@ function SourceView({ state, refresh, notify, onMenu, folderId }) {
         return <div className="shop-block" key={shop.id}>
           <div className="shop-heading"><input type="checkbox" checked={selectedShops.includes(shop.id)} onChange={(event) => toggleSelected(setSelectedShops, shop.id, event.target.checked)} aria-label={`选择店铺 ${shop.name}`} /><div className="store-mark"><Store size={18} /></div><div className="shop-info"><strong>{shop.name}</strong><a href={shop.url} target="_blank" rel="noreferrer">{new URL(shop.url).hostname}<ExternalLink size={13} /></a></div><span>{groups.length} 个分组 · {state.products.filter((product) => product.shopId === shop.id).length} 件商品</span><button className="icon-button danger" onClick={() => deleteShop(shop)} title="删除店铺"><Trash2 size={16} /></button><button className="icon-button shop-toggle" onClick={() => setExpandedShops((current) => ({ ...current, [shop.id]: !expanded }))} title={expanded ? '收起分组' : '展开分组'}>{expanded ? <ChevronDown size={18} /> : <ChevronRight size={18} />}</button></div>
           {expanded && <div className="group-list">{visibleGroups.map((group) => <div className="group-row" key={group.id}>
-            <input type="checkbox" checked={selectedGroups.includes(group.id)} onChange={(event) => toggleSelected(setSelectedGroups, group.id, event.target.checked)} aria-label={`选择分组 ${group.name}`} />{group.externalId === 'featured' ? <Store className="featured-group-icon" size={18} /> : <FolderTree size={18} />}<div><strong>{group.name}</strong><small>{group.productCount != null ? `店铺显示 ${group.productCount} 件` : group.collectedCount ? `已读取 ${group.collectedCount} 件` : '等待读取'}</small></div>
+            <input type="checkbox" checked={selectedGroups.includes(group.id)} onChange={(event) => toggleSelected(setSelectedGroups, group.id, event.target.checked)} aria-label={`选择分组 ${group.name}`} />{group.externalId === 'featured' ? <Store className="featured-group-icon" size={18} /> : <FolderTree size={18} />}<div><strong>{group.parentName ? `${group.parentName} / ${group.name}` : group.name}</strong><small>{group.productCount != null ? `店铺显示 ${group.productCount} 件` : group.collectedCount ? `已读取 ${group.collectedCount} 件` : '等待读取'}</small></div>
             <span className={`group-state ${group.status}`}>{group.status === 'collecting' ? '读取中' : group.status === 'done' ? '已完成' : group.status === 'failed' ? '失败' : group.collectedCount > 0 ? '已读取部分' : '未读取'}</span>
             <button className="secondary-button" disabled={group.status === 'collecting'} onClick={() => collect(group)}>{group.status === 'collecting' ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{group.collectedCount ? '重新采集' : '采集商品'}</button>
             <button className="icon-button danger" disabled={group.status === 'collecting'} onClick={() => deleteGroup(group)} title="删除分组"><Trash2 size={16} /></button>
@@ -862,7 +883,7 @@ export default function App() {
   return <div className="app-shell">
     <aside className={`sidebar ${menuOpen ? 'open' : ''}`}><div className="brand"><img className="brand-logo" src="/brand.png" alt="抄得快" /><span><strong>抄得快</strong><small>国际站商品工作台</small></span><button className="icon-button close-nav" onClick={() => setMenuOpen(false)}><X size={18} /></button></div><nav>{NAV.map(({ id, label, icon: Icon }) => <button key={id} className={view === id ? 'active' : ''} onClick={() => navigate(id)}><Icon size={19} /><span>{label}</span>{id === 'products' && state.products.length > 0 && <b>{state.products.length}</b>}{id === 'publish' && state.products.some((item) => item.selected) && <b>{state.products.filter((item) => item.selected).length}</b>}{id === 'announcements' && inbox.unread > 0 && <i className="unread-dot" aria-label="有未读公告" />}<ChevronRight size={15} /></button>)}</nav><div className="sidebar-foot"><span className={`system-dot ${state.browser.browserOpen ? 'online' : ''}`} /><div><strong>本地服务</strong><small>运行正常</small></div></div></aside>
     {menuOpen && <button className="nav-backdrop" onClick={() => setMenuOpen(false)} />}
-    <main><AuthorizationConnection />{view === 'source' && <SourceView {...props} />}{COLLECTION_VIEWS[view] && <LinkCollectionView key={view} entry={view} {...props} />}{view === 'products' && <ProductsView {...props} />}{view === 'publish' && <PublishView {...props} />}{view === 'settings' && <SettingsView {...props} />}{view === 'announcements' && <><Header title="公告" onMenu={() => setMenuOpen(true)} /><AnnouncementsView inbox={inbox} /></>}</main><AnnouncementPopup inbox={inbox} />
+    <main><AuthorizationConnection />{view === 'source' && <SourceView {...props} />}{view === 'madeinchina' && <MadeInChinaView {...props} />}{COLLECTION_VIEWS[view] && view !== 'madeinchina' && <LinkCollectionView key={view} entry={view} {...props} />}{view === 'products' && <ProductsView {...props} />}{view === 'publish' && <PublishView {...props} />}{view === 'settings' && <SettingsView {...props} />}{view === 'announcements' && <><Header title="公告" onMenu={() => setMenuOpen(true)} /><AnnouncementsView inbox={inbox} /></>}</main><AnnouncementPopup inbox={inbox} />
     <Notice notice={notice} onClose={() => setNotice(null)} />
   </div>;
 }

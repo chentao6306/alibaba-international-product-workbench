@@ -7,7 +7,7 @@ const clone = (value) => structuredClone(value);
 export const attributeKey = requiredAttributeKey;
 export const valuesOf = (value) => (Array.isArray(value) ? value : [value]).filter((item) => item != null && String(item).trim() !== '').map(String);
 export const attributeLabels = { '品牌名称': '品牌名称', '产地': '产地', '原产地': '产地', '省份': '省份', '适用品牌': '适用品牌', '材质': '材质', '私模': '私模', '颜色': '颜色', '型号': '型号', '适用型号': '适用型号', '类型': '类型' };
-export const labelOf = (name) => attributeLabels[attributeKey(name)] || name;
+export const labelOf = (name) => attributeLabels[attributeKey(name)] || (/[\u3400-\u9fff]/.test(attributeKey(name)) ? attributeKey(name) : name);
 const aliases = { '品牌名称': 'brand', '产地': 'origin', '原产地': 'origin', '省份': 'province', '型号': 'model', '材质': 'material', '私模': 'privateMold', '类型': 'productType', '颜色': 'color' };
 
 export function createEditorForm(product) {
@@ -59,7 +59,7 @@ export function editorAttributeRows(form, requirements = []) {
     const id = idOf(descriptor);
     let index = id ? form.attributes.findIndex((item, i) => !used.has(i) && idOf(item) === id) : -1;
     if (index < 0) index = form.attributes.findIndex((item, i) => !used.has(i)
-      && !(id && idOf(item) && id !== idOf(item)) && attributeKey(item.name) === attributeKey(descriptor.label));
+      && !(id && idOf(item) && id !== idOf(item)) && (descriptor.labels || [descriptor.label]).some(label => attributeKey(item.name) === attributeKey(label)));
     if (index >= 0) used.add(index);
     return { key: `field-${at}`, index: index < 0 ? form.attributes.length : index, descriptor,
       item: index < 0 ? { id: descriptor.id, name: descriptor.label, value: '' } : form.attributes[index] };

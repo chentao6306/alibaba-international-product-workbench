@@ -13,6 +13,17 @@ test('English logistics validation receives the same complete-section repair as 
   assert.deepEqual(publishRepairPlan(new Error('Logistics attribute: Please fill in completely, or please remove all the weight, volume and logistics attributes')), ['logistics']);
 });
 
+test('dismisses optional image protection agreements without accepting them', { skip: !findChromium() }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(Array.from({ length: 6 }, () => '<div class="next-dialog" style="position:fixed;inset:0;background:white"><h2>图片守护服务协议</h2><button onclick="window.accepted=true">已阅读并接受协议</button><button onclick="this.parentNode.remove()">暂不接受</button><a role="button" aria-label="关闭" onclick="void(0)">×</a></div>').join(''));
+    assert.equal(await dismissPostingOverlays(page), true);
+    assert.equal(await page.evaluate(() => Boolean(window.accepted)), false);
+    assert.equal(await page.locator('.next-dialog').count(), 0);
+  } finally { await browser.close(); }
+});
+
 test('reports platform policy warnings before stale logistics errors and never confirms or retries them', { skip: !findChromium() }, async () => {
   const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
   try {

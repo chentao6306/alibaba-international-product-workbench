@@ -182,7 +182,7 @@ export default function ProductEditor({ product, onClose, onSaved, notify, Categ
       <div {...pane('attributes')}>
         <div className="pe-right-toolbar"><button type="button" onClick={() => openReference('attributes')}>引用商品属性</button></div>
         {editorAttributeRows(form, requirements).map(({ item, index, key: rowKey, descriptor }) => {
-          const key = attributeKey(item.name), label = labelOf(item.name), values = valuesOf(item.value);
+          const key = attributeKey(item.name), label = descriptor?.label || labelOf(item.name), values = valuesOf(item.value);
           const options = (item.options?.length ? item.options : descriptor?.options || []).map((option) => typeof option === 'object' ? option.label || option.name || option.text || option.value : option).filter(Boolean);
           let control;
           if (key === attributeKey('Place of Origin')) control = <OriginCountrySelect value={textValue(item.value)} onChange={(value) => updateAttribute(index, value, item)} />;

@@ -34,6 +34,7 @@ await page.route('**/api/announcements**', (route) => route.fulfill({ json: [] }
 try {
   await page.goto(endpoint);
   await page.locator('.sidebar nav button').filter({ hasText: '中国制造网采集' }).click();
+  await page.getByRole('button', { name: '单个商品 / 多链接采集', exact: true }).click();
   await page.getByLabel('采集分组', { exact: true }).selectOption('mic');
   await page.getByLabel('采集链接').fill(urls.join('\n'));
   await page.getByText('采集间隔（秒）', { exact: true }).locator('..').locator('input').fill('0');
@@ -73,13 +74,20 @@ try {
   assert.match(plan.groups[0].url, /catId=127678021/);
   await page.screenshot({ path: path.join(root, 'workbench.png'), fullPage: true });
   await page.locator('.sidebar nav button').filter({ hasText: '中国制造网采集' }).click();
-  await page.getByLabel('中国制造网采集方式').selectOption('shop-products');
-  await page.getByLabel('采集链接').fill('https://zsliangjian.en.made-in-china.com/');
-  await page.getByText('商品上限', { exact: true }).locator('..').locator('input').fill('1');
-  await page.getByText('采集间隔（秒）', { exact: true }).locator('..').locator('input').fill('0');
-  await page.getByRole('button', { name: '开始采集', exact: true }).click();
-  await page.getByText('采集完成，成功 1 件，失败 0 件', { exact: true }).first().waitFor({ timeout: 150000 });
+  await page.getByRole('button', { name: '店铺分组采集', exact: true }).click();
+  await page.getByLabel('中国制造网同行店铺链接').fill('https://mxfastener.en.made-in-china.com/');
+  await page.getByRole('button', { name: '读取分组', exact: true }).click();
+  await page.getByText('Ningbo Mianxuan Import &Export Co., Ltd.', { exact: true }).waitFor({ timeout: 90000 });
+  const groups = store.read().groups;
+  assert.ok(groups.some(group => group.parentName === 'Nuts'));
+  assert.ok(groups.some(group => group.name === 'Hex Head Bolts'));
+  await page.getByText('商品上限（每组）', { exact: true }).locator('..').locator('input').fill('1');
+  await page.getByText('采集间隔（秒/条）', { exact: true }).locator('..').locator('input').fill('0');
+  await page.screenshot({ path: path.join(root, 'groups.png'), fullPage: true });
+  await page.locator('.group-row').filter({ has: page.getByText('Hex Head Bolts', { exact: true }) }).getByRole('button', { name: '采集商品', exact: true }).click();
+  await page.locator('.group-row').filter({ has: page.getByText('Hex Head Bolts', { exact: true }) }).getByText('已完成', { exact: true }).waitFor({ timeout: 150000 });
   assert.equal(store.read().products.filter((product) => product.collectionMethod === 'shop-products').length, 1);
+  assert.equal(store.read().groups.find(group => group.name === 'Hex Head Bolts').status, 'done');
   await page.screenshot({ path: path.join(root, 'shop.png'), fullPage: true });
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ ok: true, root, collected: collected.map((product) => ({ sourceId: product.sourceId, title: product.title, mainImages: product.mainImages.length, detailImages: product.detailImages.length, attributes: product.attributes.length })), verified: ['real-link-batch-collection', 'real-shop-collection', 'local-image-rendering', 'source-snapshot', 'automatic-category-mapping', '1688-and-alibaba-reference-ui', 'platform-filter', 'editor-save', 'alibaba-publish-plan', 'saved-publish-payload'] }));

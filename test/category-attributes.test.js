@@ -2,9 +2,32 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright-core';
 import { findChromium } from '../server/browser-runtime.js';
-import { extractAlibabaAttributes, mergeSourceAttributes, needsSourceAttributeRefresh, packagingFromAttributes, readAlibabaAttributeRows, readPostingAttributeSchema, sourceAttributeForField, SOURCE_ATTRIBUTE_SCHEMA_VERSION } from '../server/category-attributes.js';
+import { bindSourceAttributesToPostingSchema, extractAlibabaAttributes, mergeSourceAttributes, needsSourceAttributeRefresh, packagingFromAttributes, readAlibabaAttributeRows, readPostingAttributeSchema, sourceAttributeForField, SOURCE_ATTRIBUTE_SCHEMA_VERSION } from '../server/category-attributes.js';
 import { auditProduct, mergeSourceDataForPublish } from '../server/product-model.js';
 import { attributeOptionMatchScore, emptyRequiredSpecificationLabels, fillCategoryAttributes, fillChoice, preparePublishProduct, recoverRequiredAttributes, requiredAttributeFailure, requireCategoryAttributes, validateProductData } from '../server/publisher.js';
+
+test('reads attribute-key properties and stable IDs across categories without merging custom values into platform fields', () => {
+  const data = { nodeMap: { module_sorted_attribute: { privateData: { productSortedProperties: [{ attributeList: [
+    { attribute: 'Estimated Battery Life', id: 400013808, value: '3-5 hours' },
+    { attribute: 'Waterproof Standard', id: 210188460, value: 'IPX-3' },
+    { attribute: 'Waterproof Standard', value: 'ipx-6' },
+    { attribute: 'Unknown New Material Property', id: 8765, value: 'Original value' },
+    { attribute: 'battery capacity(mah)', id: 200001063, value: '200-500mah' },
+    { attribute: 'Battery capacity', value: '35mAh * 2' },
+  ] }] } } } };
+  const attributes = mergeSourceAttributes(extractAlibabaAttributes(data), [
+    { name: 'Waterproof Standard', value: 'ipx-6', source: 'detailData.attributes', section: 'Product Attributes' },
+    { name: 'Waterproof Standard', value: 'IPX-3', source: 'dom' },
+    { name: 'Waterproof Standard', value: 'ipx-6', source: 'dom' },
+  ]);
+  assert.equal(sourceAttributeForField({ attributes }, { id: '210188460', label: '防水标准' }).value, 'IPX-3');
+  assert.equal(sourceAttributeForField({ attributes }, { id: '8765', label: '未见过的新类目字段' }).value, 'Original value');
+  assert.equal(sourceAttributeForField({ attributes }, { id: '200001063', label: '电池容量 (mAh)' }).value, '200-500mah');
+  assert.equal(attributes.find(item => item.name === 'Waterproof Standard' && item.isCustom).value, 'ipx-6');
+  const bound = bindSourceAttributesToPostingSchema({ attributes }, [{ id: '210188460', label: 'Waterproof Standard' }]);
+  assert.equal(bound.attributes.find(item => item.isCustom && item.name === 'Waterproof Standard').id, undefined);
+  assert.equal(sourceAttributeForField(bound, { id: '210188460', label: '防水标准' }).value, 'IPX-3');
+});
 
 test('commits a battery range when its virtualized popup, search results and selected chip load slowly', { skip: !findChromium() }, async () => {
   const browser = await chromium.launch({ executablePath: findChromium(), headless: true });

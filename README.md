@@ -1,8 +1,8 @@
 # 抄得快 · 阿里巴巴国际站商品工作台
 
-当前版本：**1.4.61**，更新日期：**2026-10-06**。最新完整源码以默认 **main** 分支为准。
+当前版本：**1.4.62**，更新日期：**2026-10-06**。最新完整源码以默认 **main** 分支为准。
 
-1.4.61 统一登录、主界面、卖家页面、验证码及软件弹窗的窗口图标和任务栏身份，安装、卸载图标使用当前抄得快标志；保留 1.4.60 中国制造网采集与类目匹配功能。见 [图标与安装包验证记录](docs/verification-1.4.61.md)。
+1.4.62 新增中国制造网店铺分组采集界面，软件及采集浏览器全局静音；不同 SKU 价格按实际规格组合逐行填写。修复国际站属性结构漏读和中英文对应，保留稳定属性 ID，避免同名自定义属性混入平台属性。见 [本次验证记录](docs/verification-1.4.62.md)。窗口、验证码和安装包继续使用抄得快图标。
 
 ## 常用命令速查
 
@@ -22,8 +22,8 @@ npm run prepare:chromium
 | 启动浏览器版 | `npm start` | 先构建前端，打开 `http://127.0.0.1:8787` |
 | 运行全部测试 | `npm test` | 部分用例会启动内置 Chromium |
 | 减少测试并发 | `npm test -- --test-concurrency=2` | 减少浏览器同时运行数量 |
-| 生成安装版 EXE | `npm run dist:win:installer` | `release-installer/chaodekuai-1.4.61-setup.exe` |
-| 生成便携版 EXE | `npm run dist:win:portable` | `release/chaodekuai-1.4.61-win-x64.exe` |
+| 生成安装版 EXE | `npm run dist:win:installer` | `release-installer/chaodekuai-1.4.62-setup.exe` |
+| 生成便携版 EXE | `npm run dist:win:portable` | `release/chaodekuai-1.4.62-win-x64.exe` |
 | 启动官网开发预览 | `npm run website:dev` | `http://127.0.0.1:5175/website/` |
 | 构建官网 | `npm run website:build` | 独立输出 `dist-website/` |
 | 预览官网成品 | `npm run website:preview` | `http://127.0.0.1:4175/website/` |
@@ -48,6 +48,10 @@ npm run prepare:chromium
 
 ## 当前功能与验证
 
+1.4.62 采集结构修复适用于各品类共用的国际站详情属性模块。已有英文属性可通过 ID 或别名对应中文字段，编辑界面优先显示中文字段名；原始键和值保留。旧版漏存属性 ID 或合并了同名字段的商品，应在商品工作台重新采集该件恢复来源资料，再核对已有人工修改。无须清空整个商品库。
+
+软件自身的 Electron 窗口、验证码窗口、网页弹窗及自带 Chromium 全部静音，不修改 Windows 或其他应用音量。不同 SKU 的价格会在规格矩阵形成后逐行填写并回读校验，不以统一售价覆盖；价格或组合不完整时记录该件错误。
+
 - 中国制造网（Made-in-China）单件、多链接批量及店铺/店铺商品分组采集；店铺可设置页码与数量上限，暂停或重启后继续。保存标题、主图、详情、属性、售价/阶梯价、起订量和明确公开的包装资料，图片下载到本地以避免防盗链影响显示和上传。
 - 根据中国制造网来源类目对照国际站目录：唯一匹配的描述性名称自动转换为国际站末级类目 ID，无法确定时提供候选；编辑窗口同时展示来源和目标路径。两站类目编号不能混用，自动匹配后仍应核对具体商品。
 - 中国制造网商品可引用从1688、国际站等平台采集后在国际站成功上架的同类商品。引用窗口支持按来源平台筛选、预览和保存，继承目标类目、属性及规格，保留本商品标题、售价、图片和详情。
@@ -65,13 +69,13 @@ npm run prepare:chromium
 
 1.4.55 修复主图仅部分接收后直接停止的问题：最多尝试三次，保留已接收图片，只补传缺失部分并复核顺序。运行中的批量上架遇到单件图片、控件、类目、表单或登录错误，记录该件失败后继续下一件，不再自动暂停整批。提交结果不明确时标记“待核对”，本轮不重复提交；用户手动暂停继续保留位置。验证码仍由用户完成，软件授权失效及程序退出/重启的保护机制保留。详见 [1.4.55 验证记录](docs/verification-1.4.55.md)。
 
-已有商品无需删除或重新采集，修改保存后再重试发布。登录修复见 [1.4.54 验证记录](docs/verification-1.4.54.md)，在线更新验证见 [1.4.53 验证记录](docs/verification-1.4.53.md)；历史功能见 [1.4.52 验证记录](docs/verification-1.4.52.md)。
+上述历史修复不要求删除商品库，修改保存后可重试发布；本次属性结构修复的重新采集条件见本节开头。登录修复见 [1.4.54 验证记录](docs/verification-1.4.54.md)，在线更新验证见 [1.4.53 验证记录](docs/verification-1.4.53.md)；历史功能见 [1.4.52 验证记录](docs/verification-1.4.52.md)。
 
 采集列表中途暂停后，点击“采集已发现的 N 件商品”即可停止继续翻页、转为读取这些商品的详情；点击原来的继续按钮则接着翻页。详情采集仍支持断点继续。上架时类目失效、控件重试失败等错误会显示在对应商品上，剩余商品继续处理；结束后可修正失败商品再重试。上架只使用已保存资料，不再自动访问来源商品页；需要更新来源资料时，在商品工作台主动重新采集。
 
 Windows 桌面客户端，提供国际站、1688、速卖通、中国制造网商品采集、资料编辑、引用成功商品、批量保存草稿与提交上架。授权管理后台部署在 Linux 服务器。下载、开发和构建均使用 `main` 分支。
 
-中国制造网使用侧栏“中国制造网采集”，选择采集分组和采集方式。单件/多链接模式填写英文商品详情页；店铺模式填写供应商的 `https://供应商.en.made-in-china.com/` 首页、`product-list-N.html` 商品列表或 `product-group/...` 分类链接。询价商品没有公开价格时会保留为空，需在工作台填写美元售价；公司产能不会当作库存，普通型号/尺码描述不会被编造成可售 SKU。采集后核对目标类目及必填属性，可通过“引用成功商品资料”补充同类商品模板，再保存草稿或提交上架。引用后需核对规格是否适用于本商品。
+中国制造网使用侧栏“中国制造网采集”，选择采集分组和采集方式。店铺模式点击“读取分组”，展开店铺后勾选需要采集的分组，支持父子分组、全部页或指定页码、每组数量上限及断点继续。单件/多链接模式填写英文商品详情页；店铺模式填写供应商的 `https://供应商.en.made-in-china.com/` 首页、`product-list-N.html` 商品列表或 `product-group/...` 分类链接。询价商品没有公开价格时会保留为空，需在工作台填写美元售价；公司产能不会当作库存，普通型号/尺码描述不会被编造成可售 SKU。采集后核对目标类目及必填属性，可通过“引用成功商品资料”补充同类商品模板，再保存草稿或提交上架。引用后需核对规格是否适用于本商品。
 
 定向测试：`node --test test/made-in-china.test.js test/reference-workflow.test.js`。构建界面后可运行 `node tools/made-in-china-qa.mjs --live`，在独立临时工作区读取公开服装、车灯页面与店铺列表，检查图片、类目、引用、保存及发布计划；该工具不会向国际站提交商品。验证范围和命令见 [1.4.60 采集验证记录](docs/verification-1.4.60.md)。
 
@@ -79,7 +83,7 @@ Windows 桌面客户端，提供国际站、1688、速卖通、中国制造网�
 
 ## 源码与备份范围
 
-- [当前 1.4.61 完整源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/main)
+- [当前 1.4.62 完整源码](https://github.com/chentao6306/alibaba-international-product-workbench/tree/main)
 - [1.4.52 修复和验证记录](docs/verification-1.4.52.md)
 - [备份范围、解密和恢复说明](docs/stable-backup.md)
 
@@ -167,10 +171,10 @@ npm test -- --test-concurrency=2
 npm run dist:win:installer
 ```
 
-输出：`release-installer/chaodekuai-1.4.61-setup.exe`。脚本依次构建前端、准备 Chromium，再执行 Electron Builder NSIS x64 打包。安装包支持选择安装目录、桌面和开始菜单快捷方式。
+输出：`release-installer/chaodekuai-1.4.62-setup.exe`。脚本依次构建前端、准备 Chromium，再执行 Electron Builder NSIS x64 打包。安装包支持选择安装目录、桌面和开始菜单快捷方式。
 
 ```powershell
-npm run dist:win:portable   # release/chaodekuai-1.4.61-win-x64.exe
+npm run dist:win:portable   # release/chaodekuai-1.4.62-win-x64.exe
 npm run dist:win            # 按 package.json 构建 Windows 目标
 ```
 
@@ -197,8 +201,8 @@ node tools/verify-update-package.mjs release-installer
 ```powershell
 node tools/desktop-package-qa.mjs release-installer
 npx --no-install electron tools/verification-window-qa.mjs .packaged/electron/human-verification.js
-Get-Item .\release-installer\chaodekuai-1.4.61-setup.exe
-Get-FileHash .\release-installer\chaodekuai-1.4.61-setup.exe -Algorithm SHA256
+Get-Item .\release-installer\chaodekuai-1.4.62-setup.exe
+Get-FileHash .\release-installer\chaodekuai-1.4.62-setup.exe -Algorithm SHA256
 ```
 
 包检查核对版本、打包源码、浏览器、安全开关、登录窗口和未登录 API 鉴权，使用隔离用户目录。当前 EXE 未配置 Authenticode 签名；有证书后按 Electron Builder 签名配置构建。软件在线更新使用本项目的签名与授权后台分发服务；不要把 Electron Builder 的 `publish` 占位地址当作线上更新源。正式打包请运行 `npm run dist:win:installer`，以生成完整的外层安装包和配套更新签名。
@@ -220,7 +224,7 @@ sudo systemctl restart kua-yipu-auth
 
 正式客户端授权入口由 `server/auth-endpoint.js` 固定。源码桌面可用 `KUA_YIPU_AUTH_URL` 指向本机开发后台；**正式打包客户端忽略此环境变量**。迁移生产地址需要修改该模块默认地址、配置对应有效证书并重新打包。仅设置打包终端环境变量不能改变正式入口。
 
-授权服务 `/health` 中的版本为 `1.4.53`，是独立服务标识；当前桌面版本为 `1.4.61`。后台可配置 1/3/15 天等断线保持时间，不延长付费授权到期日，在线停用仍立即生效。2026-10-03 的后台菜单、版本记录和上传修复已部署，本次中国制造网采集需要更新客户端，不需要再次部署授权服务。
+授权服务 `/health` 中的版本为 `1.4.53`，是独立服务标识；当前桌面版本为 `1.4.62`。后台可配置 1/3/15 天等断线保持时间，不延长付费授权到期日，在线停用仍立即生效。2026-10-03 的后台菜单、版本记录和上传修复已部署，本次中国制造网采集需要更新客户端，不需要再次部署授权服务。
 
 ## 项目原理
 

@@ -11,6 +11,17 @@ import { attributeFieldMatchesValue, fillCategoryAttributes, SellerPublisher, re
 const field = (id, label, controlType = 'combobox') => ({ id, label, labels: [label], required: true, controlType });
 const resolve = (attributes, label) => sourceAttributeForField({ attributes }, field('', label));
 
+test('maps already collected English earbud fields to Chinese labels without confusing unit-qualified battery capacity', () => {
+  const attributes = [
+    { name: 'Estimated Battery Life', value: '3-5 hours' }, { name: 'touch screen', value: 'No' },
+    { name: 'battery capacity(mah)', value: '200-500mah' }, { name: 'Battery capacity', value: '35mAh * 2' },
+    { name: 'headphone form factor', value: 'Ear-clip' }, { name: 'Waterproof Standard', value: 'IPX-3' },
+  ];
+  for (const [label, value] of [['预计电池续航时间', '3-5 hours'], ['触摸屏', 'No'], ['电池容量 (mAh)', '200-500mah'], ['耳机佩戴方式', 'Ear-clip'], ['防水标准', 'IPX-3']]) {
+    assert.equal(resolve(attributes, label).value, value);
+  }
+});
+
 test('category passes and field repairs preserve SKU colors instead of adding descriptive colors without images', { skip: !findChromium() }, async () => {
   const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
   try {

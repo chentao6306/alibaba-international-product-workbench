@@ -5,7 +5,7 @@ import { parseCollectionUrl, sourcePlatform, sourcePlatformLabel } from './sourc
 import { extractMarketplaceProduct, marketplaceDescriptionHtml } from './marketplace-source-data.js';
 import { readMadeInChinaProduct, fetchMadeInChinaHtml } from './made-in-china-source-data.js';
 import { cacheMadeInChinaImages } from './made-in-china-media.js';
-import { extractMadeInChinaListing, collectMadeInChinaShop } from './made-in-china-shop.js';
+import { extractMadeInChinaGroups, extractMadeInChinaListing, collectMadeInChinaShop } from './made-in-china-shop.js';
 
 function mergeMarketplaceDetail(base, parsed) {
   // Preserve an explicitly chosen target category and previously converted prices.
@@ -248,6 +248,12 @@ export class ShopCollector {
   }
 
   async listGroups(shopUrl) {
+    if (sourcePlatform({ sourceUrl: /^https?:\/\//i.test(shopUrl) ? shopUrl : `https://${shopUrl}` }) === 'made-in-china') {
+      const link = parseCollectionUrl(shopUrl, 'shop-products', 'made-in-china');
+      // Always read the full shop navigation, even when given a nested group.
+      const url = `${new URL(link.url).origin}/product-list-1.html`;
+      return this.readMadeInChinaListing(url, extractMadeInChinaGroups);
+    }
     const normalized = normalizeShopUrl(shopUrl);
     // Group reading is automatic and hidden. The verification helper reveals
     // the page only when Alibaba requires a human action.
@@ -474,20 +480,24 @@ export class ShopCollector {
 
   async collectMadeInChinaShop(link, onProgress = () => {}, options = {}) {
     return collectMadeInChinaShop(link, onProgress, options, {
-      readListing: async (url) => {
-        const html = await fetchMadeInChinaHtml(url, 'shop-products');
-        const listing = html && extractMadeInChinaListing(html, url);
-        if (listing?.readable) return listing;
-        return this.withPage(async (page) => {
-          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-          await settlePage(page);
-          await waitForHumanVerification(page);
-          const landed = parseCollectionUrl(page.url(), 'shop-products', 'made-in-china');
-          if (landed.url !== url) throw new Error('店铺商品列表已跳转，请检查店铺链接和页码');
-          return extractMadeInChinaListing(await page.content(), url);
-        });
-      },
+      readListing: (url) => this.readMadeInChinaListing(url, extractMadeInChinaListing),
       collectLinks: (...args) => this.collectLinks(...args),
+    });
+  }
+
+  async readMadeInChinaListing(url, extract) {
+    const html = await fetchMadeInChinaHtml(url, 'shop-products');
+    const listing = html && extract(html, url);
+    if (listing?.readable) return listing;
+    return this.withPage(async (page) => {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await settlePage(page);
+      await waitForHumanVerification(page);
+      const landed = parseCollectionUrl(page.url(), 'shop-products', 'made-in-china');
+      if (landed.url !== url) throw new Error('店铺商品列表已跳转，请检查店铺链接和页码');
+      const result = extract(await page.content(), url);
+      if (!result.readable) throw new Error('未读取到中国制造网店铺分组或商品列表，请确认店铺链接后重试');
+      return result;
     });
   }
 

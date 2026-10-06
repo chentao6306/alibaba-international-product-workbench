@@ -55,6 +55,8 @@ async function main() {
       onCreated: (value) => { stalled = value; } });
     const stoppedStalled = assert.rejects(stalledOperation, (error) => error.code === 'COLLECT_PAUSED');
     await until(() => stalled?.window.isVisible());
+    assert.equal(stalled.window.webContents.isAudioMuted(), true);
+    assert.equal(stalled.contents.isAudioMuted(), true);
     if (process.platform === 'win32') {
       const windows = await readWindowIcons(process.pid);
       assert.ok(windows.length > 0);
@@ -149,6 +151,8 @@ async function main() {
       await popupParent.loadURL('https://www.alibaba.com/window-branding-qa');
       await popupParent.webContents.executeJavaScript('window.open("https://www.alibaba.com/window-branding-popup"); void 0');
       await opened;
+      assert.equal(popupParent.webContents.isAudioMuted(), true);
+      assert.equal(popup.webContents.isAudioMuted(), true);
       if (process.platform === 'win32') {
         const windows = await readWindowIcons(process.pid);
         assert.ok(windows.length >= 2);
@@ -156,7 +160,11 @@ async function main() {
       }
     } finally { popup?.destroy(); popupParent.destroy(); }
     console.log(JSON.stringify({ passed: true, loads, screenshot: path.join(root, 'verification-window.png') }));
-  } catch (error) { console.error(error); process.exitCode = 1; }
+  } catch (error) {
+    console.error(error);
+    console.error('Owned QA windows', BrowserWindow.getAllWindows().map(window => ({ visible: window.isVisible(), minimized: window.isMinimized(), bounds: window.getBounds(), contentSize: window.getContentSize() })));
+    process.exitCode = 1;
+  }
   finally { clearTimeout(watchdog); app.exit(process.exitCode || 0); }
 }
 main().catch((error) => { console.error(error); app.exit(1); });

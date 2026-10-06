@@ -4,7 +4,7 @@ import { attributeValueKey, attributeValueList, cpuValueKind, hasMeasurementUnit
 const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
 const attributeNameKey = (name) => clean(name).normalize('NFKC').toLowerCase();
 export const attributeId = (item) => clean(item?.attributeId ?? item?.propertyId ?? item?.attrId ?? item?.propId ?? item?.id).replace(/^(?:struct-)?p-/, '');
-export const SOURCE_ATTRIBUTE_SCHEMA_VERSION = 6;
+export const SOURCE_ATTRIBUTE_SCHEMA_VERSION = 7;
 export const isDescriptionAttribute = (item) => /^description-(?:dom|iframe)$/.test(item?.source || '');
 
 export function needsSourceAttributeRefresh(product) {
@@ -27,6 +27,7 @@ export function mergeSourceAttributes(...sources) {
     const id = attributeId(item);
     const key = requiredAttributeKey(item.name);
     const candidates = result.filter((row) => {
+      if (Boolean(row.isCustom) !== Boolean(item.isCustom) && (row.source === 'detailData.attributes' || item.source === 'detailData.attributes')) return false;
       if (isDescriptionAttribute(row) !== isDescriptionAttribute(item)) return false;
       if (id && attributeId(row)) return id === attributeId(row);
       if (key !== requiredAttributeKey(row.name)) return false;
@@ -76,7 +77,7 @@ export function extractAlibabaAttributes(detailData) {
           value: `${value}${node[`${key}Unit`] ? ` ${node[`${key}Unit`]}` : ''}`, section, source: 'detailData.attributes' });
       }
     }
-    const name = clean(node.attributeName ?? node.attrName ?? node.propertyName ?? node.propName ?? node.name ?? node.key);
+    const name = clean(node.attributeName ?? node.attrName ?? node.propertyName ?? node.propName ?? node.attribute ?? node.name ?? node.key);
     const raw = node.attributeValue ?? node.attrValue ?? node.propertyValue ?? node.propValue ?? node.value ?? node.values
       ?? node.attributeValues ?? node.propertyValues ?? node.valueList;
     const entries = [raw].flat().filter((value) => value != null).map((value) => typeof value === 'object'
@@ -89,6 +90,7 @@ export function extractAlibabaAttributes(detailData) {
       const values = entries.map((entry) => unit && /^-?\d+(?:\.\d+)?$/.test(entry.value) ? `${entry.value} ${unit}` : entry.value);
       const valueIds = Object.fromEntries(values.flatMap((value, i) => ids[i] ? [[value, ids[i]]] : []));
       result.push({ name, value: values.length === 1 ? values[0] : values,
+        ...(Object.hasOwn(node, 'attribute') && !id ? { isCustom: true } : {}),
         ...(unit ? { unit, rawValue: entries.length === 1 ? entries[0].value : entries.map((entry) => entry.value) } : {}),
         ...(id ? { id } : {}), ...(Object.keys(valueIds).length ? { valueIds } : {}),
         section, source: 'detailData.attributes' });
@@ -103,7 +105,7 @@ export function extractAlibabaAttributes(detailData) {
     if (/attribute|specification|packaging|productPropert|productPackInfo/i.test(name) && !/recommend|related|similar|sku/i.test(name)) walk(module?.privateData || module, name);
   }
   const product = detailData?.globalData?.product || {};
-  for (const field of ['attributes', 'attributeList', 'productAttributes', 'properties', 'propertyList']) walk(product[field], 'Product Attributes');
+  for (const field of ['attributes', 'attributeList', 'productAttributes', 'properties', 'propertyList', 'productKeyIndustryProperties', 'productOtherProperties']) walk(product[field], 'Product Attributes');
   walk(product.packaging, 'Packaging');
   return mergeSourceAttributes(result);
 }
@@ -305,7 +307,7 @@ export function sourceAttributeForField(product, field) {
   const names = new Set((field.labels || [field.label]).map(requiredAttributeKey));
   // Resolve category properties before supplier detail text, including when
   // only the latter has an exact translated label or a previously bound ID.
-  for (const candidates of [items.filter((item) => !isDescriptionAttribute(item)), items.filter(isDescriptionAttribute)]) {
+  for (const candidates of [items.filter((item) => !isDescriptionAttribute(item) && !item.isCustom), items.filter(item => item.isCustom && !isDescriptionAttribute(item)), items.filter(isDescriptionAttribute)]) {
     if (field.id) {
       const exact = candidates.filter((item) => attributeId(item) === field.id);
       if (exact.length) return consistentAttribute(exact, true, field);
@@ -367,16 +369,20 @@ export function bindSourceAttributesToPostingSchema(product, schema) {
     .filter((item) => item?.name && item.value != null && clean(item.value));
   const exactName = (item, field) => (field.labels || [field.label]).some((label) => attributeNameKey(label) === attributeNameKey(item.name));
   const bind = (items = []) => items.map((item) => {
-    if (attributeId(item)) return item;
+    if (attributeId(item) || item.isCustom) return item;
     const key = requiredAttributeKey(item.name);
     const matches = schema.filter((field) => field.id && !field.saleSpecification
       && (field.labels || [field.label]).some((label) => requiredAttributeKey(label) === key));
     const exact = matches.filter((field) => exactName(item, field));
     // A broad alias must not acquire the same ID as a distinct, precisely
     // named source property. Keep it unbound for its own field or description.
-    const eligible = exact.length ? exact : matches.filter((field) => !all.some((other) => other !== item
+    const eligible = (exact.length ? exact : matches.filter((field) => !all.some((other) => other !== item
       && isDescriptionAttribute(other) === isDescriptionAttribute(item)
-      && (attributeId(other) === field.id || (!attributeId(other) && exactName(other, field)))));
+      && (attributeId(other) === field.id || (!attributeId(other) && exactName(other, field))))))
+      // Anonymous DOM rows may include a supplier's same-name custom value.
+      // They cannot acquire an ID already supplied by the structured record.
+      .filter((field) => !all.some((other) => other !== item && !other.isCustom && !isDescriptionAttribute(other)
+        && attributeId(other) === field.id));
     const ids = [...new Set(eligible.map((field) => field.id))];
     if (ids.length !== 1) return item;
     changed = true;

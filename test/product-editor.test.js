@@ -1,6 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { changeEditorCategory, createEditorForm, editorPayload, editAttribute, editorAttributeRows, rebuildEditorSkus, updateDeliveryCell } from '../src/product-editor-model.js';
+import { changeEditorCategory, createEditorForm, editorPayload, editAttribute, editorAttributeRows, rebuildEditorSkus, updateDeliveryCell, labelOf } from '../src/product-editor-model.js';
+
+test('shows collected values in Chinese requirement rows without creating empty translated duplicates', () => {
+  const form = createEditorForm({ attributes: [{ name: 'Estimated Battery Life', value: '3-5 hours' }, { name: 'Novel Widget Feature', value: 'Original' }] });
+  const rows = editorAttributeRows(form, [{ id: '400013808', label: '预计电池续航时间', required: true }, { id: '900', label: '新类目属性', labels: ['新类目属性', 'Novel Widget Feature'], required: true }]);
+  assert.equal(rows.length, 2);
+  assert.equal(rows.find(row => row.descriptor?.id === '400013808').item.value, '3-5 hours');
+  assert.equal(rows.find(row => row.descriptor?.id === '900').item.value, 'Original');
+  assert.equal(labelOf('noise cancelling'), '降噪');
+  assert.equal(labelOf('touch screen'), '触摸屏');
+  assert.equal(form.attributes[0].name, 'Estimated Battery Life');
+});
 import { previewProductReference, applyReferencePreview } from '../server/reference-workflow.js';
 import { productEditPatch } from '../server/product-edit.js';
 

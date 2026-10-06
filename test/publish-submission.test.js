@@ -22,7 +22,7 @@ test('repairs images, specifications and logistics from the same validation resp
     repairs,
   });
   assert.equal(result, receipt);
-  assert.deepEqual(calls, ['submit', 'mainImages', 'specifications', 'attributes', 'logistics', 'submit', 'attributes', 'submit']);
+  assert.deepEqual(calls, ['submit', 'specifications', 'attributes', 'logistics', 'mainImages', 'submit', 'attributes', 'submit']);
 });
 
 test('image-only validation includes a real image repair instead of only filling specification text', () => {
