@@ -1,0 +1,14 @@
+.publish-page-view { width: min(1360px, calc(100% - 32px)); max-width: none; max-height: calc(100dvh - 32px); padding: 0; border: 1px solid #dce2e4; border-radius: 6px; color: #162e3b; background: #fff; }
+.publish-page-view::backdrop { background: #0008; }
+.publish-page-view header { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 14px 20px; border-bottom: 1px solid #dce2e4; }
+.publish-page-view h2 { font-size: 18px; margin: 0 0 4px; }
+.publish-page-view small { color: #536d7d; }
+.publish-page-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.publish-page-actions .icon-button { width: 36px; height: 36px; }
+.publish-page-reason { padding: 12px 20px; margin: 0; font-size: 14px; overflow-wrap: anywhere; border-bottom: 1px solid #dce2e4; }
+.publish-page-image { min-height: 160px; max-height: calc(100dvh - 230px); overflow: auto; background: #f2f5f5; }
+.publish-page-image img { display: block; width: 100%; height: auto; }
+.publish-page-image.actual-size img { width: auto; max-width: none; }
+.publish-page-image > p { padding: 20px; color: #a93627; }
+.publish-page-image > .spin { margin: 32px; }
+.history-action { flex-wrap: wrap; gap: 4px; }

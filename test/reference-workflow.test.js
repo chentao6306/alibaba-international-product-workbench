@@ -1,0 +1,175 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { buildReferencePatch, previewProductReference, applyReferencePreview, failedPublishProducts, referenceCandidates } from '../server/reference-workflow.js';
+import { syncProductModel, verifySourceIntegrity } from '../server/product-model.js';
+import { postingPageProblem } from '../server/posting-readiness.js';
+import { preparePublishProduct } from '../server/publisher.js';
+import { sourceAttributeForField } from '../server/category-attributes.js';
+
+test('previews and saves a complete phone reference without resurrecting old province, feature or 64-SKU values', () => {
+  const group = (name, options) => ({ name, options });
+  const colors = ['Black', 'Green', 'Pink', 'White'], plugs = ['AU', 'EU', 'UK', 'US'];
+  const target = syncProductModel({ id: 'phone', status: 'publish_failed', categoryId: '201896803',
+    title: 'Source phone', model: 'CN0144', origin: 'China', province: 'Invalid province', price: 99,
+    attributes: [{ name: '省份', value: 'Invalid province', valueIds: { 'Invalid province': 'old-value-id' } },
+      { name: 'Model Number', value: 'CN0144' }, { name: 'feature', value: ['Old feature', 'Conflicting feature'] }],
+    customAttributes: [{ name: 'Province', value: 'Stale custom province' }],
+    variantGroups: [group('color', colors), group('plug', plugs), group('ram', ['4 G', '16g']), group('storage capacity', ['128 GB', '1TB'])],
+    skus: colors.flatMap((color) => plugs.flatMap((plug) => ['4 G', '16g'].flatMap((ram) => ['128 GB', '1TB'].map((storage) => ({
+      attributes: { color, plug, ram, 'storage capacity': storage }, price: 99, stock: 1,
+    }))))),
+    description: 'Keep original seller description', detailImages: ['https://example.test/source.jpg'],
+    publishResult: { status: 'failed', requiredFields: ['省份', '功能/特性'], message: '属性值错误' },
+  }, { captureSource: true });
+  const reference = { id: 'accepted-phone', status: 'published', categoryId: '201896803', model: 'DAK-23A', origin: 'China', province: 'Guangdong',
+    attributes: [{ name: 'Model Number', value: 'DAK-23A' }, { name: 'Province', value: 'Guangdong', valueIds: { Guangdong: 'accepted-id' } },
+      { name: 'feature', value: ['Beauty Camera', 'Dual SIM Card'] }],
+    variantGroups: [group('color', colors), group('plug', plugs), group('ram', ['12g', '16g']), group('storage capacity', ['1TB', '256 GB', '512 GB'])],
+  };
+  const state = { products: [target, reference], jobs: [] }, before = structuredClone(target);
+  const request = { ids: ['phone'], referenceId: 'accepted-phone', options: { scope: 'full' } };
+  const preview = previewProductReference(state, request);
+  assert.deepEqual(target, before, 'Preview is read-only');
+  assert.equal(target.skus.length, 64);
+  assert.equal(preview.items[0].patch.skus.length, 96);
+  assert.equal(preview.items[0].patch.province, 'Guangdong');
+  applyReferencePreview(state, { ...request, previewToken: preview.token });
+  const saved = JSON.parse(JSON.stringify(target));
+  const payload = preparePublishProduct(saved);
+  assert.equal(saved.status, 'ready'); assert.equal(saved.publishResult, undefined);
+  assert.equal(saved.referenceRecovery.failure.requiredFields[0], '省份');
+  assert.equal(payload.model, 'DAK-23A'); assert.equal(payload.province, 'Guangdong'); assert.equal(payload.origin, 'China');
+  assert.equal(sourceAttributeForField(payload, { label: '型号' }).value, 'DAK-23A');
+  assert.deepEqual(sourceAttributeForField(payload, { label: '功能/特性', multiple: true }).value, ['Beauty Camera', 'Dual SIM Card']);
+  assert.equal(payload.skus.length, 96);
+  assert.equal(new Set(payload.skus.map((sku) => JSON.stringify(sku.attributes))).size, 96);
+  assert.deepEqual([...new Set(payload.skus.map((sku) => sku.attributes.ram))], ['12g', '16g']);
+  assert.ok(payload.skus.every((sku) => sku.price === '99.00' && sku.attributes['storage capacity'] !== '128 GB'));
+  assert.doesNotMatch(JSON.stringify([...payload.attributes, ...payload.customAttributes]), /Invalid province|old-value-id|Stale custom province|CN0144|Old feature/);
+  for (const key of ['title', 'description', 'detailImages', 'source']) assert.deepEqual(saved[key], before[key], key);
+  assert.equal(verifySourceIntegrity(saved).valid, true);
+});
+
+function fixture() {
+  const target = syncProductModel({ id: 'target', status: 'publish_failed', title: 'Early learning book', price: 12, stock: 0,
+    categoryId: '201776003', categoryPath: ['Toys', 'Books'], attributes: [{ name: 'Type', value: 'Audio Books' }],
+    variantGroups: [{ name: '颜色', options: ['Yellow'] }], skus: [{ attributes: { 颜色: 'Yellow' }, stock: 0, code: 'BOOK', enabled: false }],
+    publishResult: { status: 'failed', message: '属性[Type] 必须填写', requiredFields: ['Type'] },
+  }, { captureSource: true });
+  const reference = { id: 'ref', status: 'published', title: 'Drone part', categoryId: '201346401', categoryPath: ['Drones Accessories'],
+    attributes: [{ name: 'Type', value: 'FPV VTX' }, { name: 'Logo printing', value: 'No' }], model: '5.8G 3W',
+    variantGroups: [{ name: 'Color', options: ['Yellow'] }], skus: [{ attributes: { Color: 'Yellow' }, stock: 99, code: 'REF', price: 90 }], packaging: { weight: 5 } };
+  return { products: [target, reference], jobs: [] };
+}
+
+test('previews category and model changes, preserves source and target commercial data, and freezes reference', () => {
+  const state = fixture(), source = structuredClone(state.products[0].source);
+  const request = { ids: ['target', 'ref'], referenceId: 'ref' };
+  const preview = previewProductReference(state, request);
+  assert.equal(preview.items[0].categoryChanged, true);
+  assert.ok(preview.items[0].changes.some((item) => item.field === 'model' && item.after === '5.8G 3W'));
+  assert.ok(preview.items[1].skipped);
+  assert.equal(state.products[0].categoryId, '201776003', 'Preview does not mutate');
+  assert.equal(applyReferencePreview(state, { ...request, previewToken: preview.token }).changed.length, 1);
+  const target = state.products[0];
+  assert.equal(target.title, 'Early learning book'); assert.equal(target.price, 12);
+  assert.deepEqual(target.skus.map(({ stock, code, enabled, price }) => ({ stock, code, enabled, price })), [{ stock: 0, code: 'BOOK', enabled: false, price: 12 }]);
+  assert.equal(target.packaging, undefined);
+  assert.equal(target.referenceRecovery.failure.requiredFields[0], 'Type');
+  assert.equal(target.publishResult, undefined); assert.equal(target.status, 'ready');
+  assert.deepEqual(target.source, source); assert.equal(verifySourceIntegrity(target).valid, true);
+  state.products[1].attributes[0].value = 'Changed later';
+  assert.equal(target.categoryReference.template.attributes[0].value, 'FPV VTX');
+  assert.deepEqual(failedPublishProducts(state.products).map((item) => item.id), ['target']);
+});
+
+test('rejects stale previews, active jobs, missing products and cross-category partial references', () => {
+  const state = fixture(), request = { ids: ['target'], referenceId: 'ref' };
+  const preview = previewProductReference(state, request);
+  state.products[0].price = 15;
+  assert.throws(() => applyReferencePreview(state, { ...request, previewToken: preview.token }), { status: 409 });
+  assert.throws(() => previewProductReference(state, { ...request, ids: ['missing'] }), { status: 409 });
+  assert.throws(() => previewProductReference(state, { ...request, options: { scope: 'attributes' } }), /相同类目/);
+  state.jobs = [{ type: 'publish', status: 'running', metadata: { productIds: ['target'] } }];
+  assert.throws(() => previewProductReference(state, request), { status: 409 });
+});
+
+test('limits attribute and specification references to the selected sections and repairs false values', () => {
+  const state = fixture(), [target, reference] = state.products;
+  target.categoryId = reference.categoryId; reference.attributes[1].value = false;
+  const attrs = buildReferencePatch(target, reference, { scope: 'attributes' });
+  assert.equal(attrs.variantGroups, undefined); assert.equal(attrs.categoryId, undefined);
+  assert.equal(attrs.attributes.find((item) => item.name === 'Logo printing').value, false);
+  const specs = buildReferencePatch(target, reference, { scope: 'specifications' });
+  assert.equal(specs.attributes, undefined); assert.equal(specs.origin, undefined); assert.equal(specs.categoryId, undefined);
+  target.publishResult.requiredFields = ['Logo印刷'];
+  const repair = buildReferencePatch(target, reference, { scope: 'failed-fields' });
+  assert.equal(repair.attributes.find((item) => item.name === 'Logo印刷').value, false);
+  assert.equal(repair.attributes[0].value, 'Audio Books'); assert.equal(repair.variantGroups, undefined);
+});
+
+test('uses successful snapshots and distinguishes saved seller templates from successful listings', () => {
+  const state = fixture();
+  state.products[1].publishHistory = [{ result: { status: 'published' }, categoryId: '201346401', data: { attributes: [{ name: 'Type', value: 'Accepted' }] } }];
+  state.referenceTemplates = [{ id: 'seller-1', title: 'Seller form', referenceTemplate: { id: 'seller-1', categoryId: '201776003' } }];
+  const candidates = referenceCandidates(state);
+  assert.equal(candidates[0].template.attributes[0].value, 'Accepted');
+  assert.equal(candidates[1].source, 'seller');
+  assert.equal(postingPageProblem('https://post.alibaba.com/product/publish.htm', '当前商品类目不在线上经营类目范围内，无法发品').code, 'PUBLISH_CATEGORY_NOT_AUTHORIZED');
+});
+
+test('repairs a rejected single specification consistently while refusing to collapse multiple SKUs', () => {
+  const [target, reference] = fixture().products;
+  target.categoryId = reference.categoryId;
+  target.variantGroups = [{ name: 'Type', options: ['Old'], optionIds: { Old: '1' } }];
+  target.skus = [{ attributes: { Type: 'Old' }, price: 12, stock: 3, code: 'BOOK' }];
+  const patch = buildReferencePatch(target, reference, { scope: 'failed-fields' });
+  assert.deepEqual(patch.variantGroups[0].options, ['FPV VTX']);
+  assert.deepEqual(patch.skus[0], { attributes: { Type: 'FPV VTX' }, price: 12, stock: 3, code: 'BOOK' });
+  target.variantGroups[0].options.push('Another');
+  assert.deepEqual(buildReferencePatch(target, reference, { scope: 'failed-fields' }), {});
+});
+
+test('replaces an entire same-category template including removed color and new model image while retaining commercial content', () => {
+  // User-provided before/after example: a GWRC propeller references a PUSD VTX.
+  const target = syncProductModel({ id: 'propeller', status: 'ready', categoryId: '201346401',
+    title: 'Gwrc 10-Inch Plastic Three-Blade Propeller', brand: 'GWRC', model: '', color: 'Black',
+    compatibleBrand: 'For FPV', material: 'Plastic', privateMold: 'No', productType: 'Propellers',
+    attributes: [{ name: 'brand name', value: 'GWRC' }, { name: 'compatible brand', value: 'For FPV' },
+      { name: 'Material', value: 'Plastic' }, { name: 'private mold', value: 'No' }], customAttributes: [],
+    variantGroups: [{ name: 'color', options: ['Black'], optionImages: { Black: 'https://example.test/propeller.jpg' } },
+      { name: 'compatible model', options: ['10-Inch 1050'] }, { name: 'type', options: ['Propellers'] }],
+    colorImages: { Black: 'https://example.test/propeller.jpg' },
+    skus: [{ attributes: { color: 'Black', 'compatible model': '10-Inch 1050', type: 'Propellers' }, price: 3.5 }],
+    price: 3.5, minOrder: 2, priceTiers: [{ min: 2, price: 3.5 }, { min: 500, price: 2.9 }, { min: 2000, price: 2.7 }],
+    salesUnit: 'Piece', deliveryTime: [{ quantity: 500, days: 7 }], packaging: { weight: '0.010', length: '7', width: '7', height: '3.5' },
+    mainImages: ['https://example.test/propeller.jpg'], description: 'Plastic three-blade propeller',
+    detailImages: ['https://example.test/propeller-detail.jpg'],
+  }, { captureSource: true });
+  const template = { id: 'vtx', status: 'published', categoryId: '201346401', categoryPath: ['消费电子', '无人机配件'],
+    brand: 'PUSD', model: '5.8G 3W', compatibleBrand: ['DJI', 'Others'], material: ['Metal', 'Rubber'], privateMold: 'Yes',
+    productType: 'FPV VTX', attributes: [{ name: '品牌名称', value: 'PUSD' }, { name: '适用品牌', value: ['DJI', 'Others'] },
+      { name: '材质', value: ['Metal', 'Rubber'] }, { name: '私模', value: 'Yes' }],
+    variantGroups: [{ name: '适用型号', options: ['Other'] },
+      { name: '型号', options: ['5.8G 3W'], optionImages: { '5.8G 3W': 'https://example.test/vtx.jpg' } },
+      { name: '类型', options: ['FPV VTX'] }],
+    modelImages: { '5.8G 3W': 'https://example.test/vtx.jpg' },
+  };
+  const before = structuredClone(target), state = { products: [target, template], jobs: [] };
+  const request = { ids: ['propeller'], referenceId: 'vtx', options: { scope: 'full' } };
+  const preview = previewProductReference(state, request);
+  assert.equal(preview.items[0].categoryChanged, false);
+  assert.ok(preview.items[0].changes.some((change) => change.field === 'brand' && change.before === 'GWRC' && change.after === 'PUSD'));
+  applyReferencePreview(state, { ...request, previewToken: preview.token });
+  assert.equal(target.brand, 'PUSD'); assert.equal(target.model, '5.8G 3W'); assert.equal(target.color, '');
+  assert.deepEqual(target.colorImages, {}); assert.deepEqual(target.modelImages, template.modelImages);
+  assert.deepEqual(target.variantGroups, template.variantGroups);
+  assert.equal(target.attributes.some((item) => item.value === 'Plastic' || item.value === 'For FPV'), false);
+  assert.equal(target.privateMold, 'Yes'); assert.deepEqual(target.material, ['Metal', 'Rubber']);
+  assert.deepEqual(target.skus[0].attributes, { 适用型号: 'Other', 型号: '5.8G 3W', 类型: 'FPV VTX' });
+  assert.equal(target.skus[0].image, 'https://example.test/vtx.jpg'); assert.equal(target.skus[0].price, 3.5);
+  for (const field of ['title', 'mainImages', 'detailImages', 'description', 'price', 'priceTiers', 'minOrder', 'salesUnit', 'deliveryTime', 'packaging', 'source']) {
+    assert.deepEqual(target[field], before[field], field);
+  }
+  assert.equal(verifySourceIntegrity(target).valid, true);
+});

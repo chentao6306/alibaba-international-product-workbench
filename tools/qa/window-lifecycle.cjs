@@ -1,0 +1,28 @@
+const { app, BrowserWindow } = require('electron');
+const http = require('node:http');
+const assert = require('node:assert/strict');
+const { pathToFileURL } = require('node:url');
+const path = require('node:path');
+app.whenReady().then(async () => {
+  const { installWorkbenchRequestGate } = await import(pathToFileURL(path.resolve(__dirname, '../../electron/window-lifecycle.js')));
+  const headers = [];
+  const server = http.createServer((req, res) => { headers.push(req.headers['x-kua-yipu-gate'] || ''); res.end('ready'); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  const old = new BrowserWindow({ show: false });
+  installWorkbenchRequestGate(old, { port, gate: 'old-fixture-gate' });
+  await old.loadURL(`http://127.0.0.1:${port}/api/first`);
+  assert.equal(headers.at(-1), 'old-fixture-gate');
+  const closed = new Promise(resolve => old.once('closed', resolve)); old.destroy(); await closed;
+  const next = new BrowserWindow({ show: false });
+  await next.loadURL(`http://127.0.0.1:${port}/api/late`);
+  assert.equal(headers.at(-1), '');
+  installWorkbenchRequestGate(next, { port, gate: 'next-fixture-gate' });
+  await next.loadURL(`http://127.0.0.1:${port}/api/replacement`);
+  assert.equal(headers.at(-1), 'next-fixture-gate');
+  next.destroy();
+  await new Promise(resolve => server.close(resolve));
+  console.log(JSON.stringify({ ok: true, nativeDestroyedWindow: true, lateRequestCompleted: true, replacementGate: true }));
+  app.exit(0);
+}).catch(error => { console.error(error); app.exit(1); });
+app.on('window-all-closed', () => {});
