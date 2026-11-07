@@ -1,0 +1,145 @@
+{
+  "name": "alibaba-international-product-workbench",
+  "version": "1.4.98",
+  "main": "electron/main.js",
+  "description": "抄得快 Alibaba.com 国际站商品采集与发布工作台",
+  "author": "抄得快",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "node --watch server/index.js",
+    "dev:web": "vite --host 127.0.0.1",
+    "build": "node tools/prepare-brand.mjs && vite build",
+    "website:dev": "vite --config website/vite.config.js --host 127.0.0.1",
+    "website:build": "vite build --config website/vite.config.js",
+    "website:preview": "vite preview --config website/vite.config.js --host 127.0.0.1",
+    "start": "node server/index.js",
+    "desktop": "electron electron/main.js",
+    "desktop:dev": "concurrently -k \"npm:dev:server\" \"npm:dev:web\" \"npm:desktop\"",
+    "prepare:chromium": "node tools/prepare-chromium.mjs",
+    "dist:win": "npm run dist:win:installer",
+    "dist:win:installer": "npm run build && npm run prepare:chromium && node tools/package-windows.mjs",
+    "dist:win:portable": "npm run build && npm run prepare:chromium && electron-builder --win portable --x64 --publish never",
+    "test": "node --test",
+    "update:sign": "node tools/sign-update.mjs"
+  },
+  "dependencies": {
+    "bytenode": "1.7.0",
+    "cheerio": "^1.1.2",
+    "express": "^5.1.0",
+    "json5": "2.2.3",
+    "lucide-react": "^0.468.0",
+    "pg": "^8.13.1",
+    "playwright-core": "1.62.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "sharp": "0.35.4",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.4.1",
+    "concurrently": "^9.1.2",
+    "electron": "44.3.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "0.25.12",
+    "javascript-obfuscator": "5.9.0",
+    "vite": "^6.2.2"
+  },
+  "build": {
+    "appId": "com.kua-yipu.workbench",
+    "productName": "抄得快",
+    "artifactName": "chaodekuai-${version}-${os}-${arch}.${ext}",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      {
+        "from": ".packaged/dist",
+        "to": "dist",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": ".packaged/server",
+        "to": "server",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": ".packaged/electron",
+        "to": "electron",
+        "filter": [
+          "**/*"
+        ]
+      },
+      "node_modules/**/*",
+      "package.json",
+      "auth-server/update-protocol.js",
+      "auth-server/announcement-content.js",
+      "auth-server/diagnostic-schema.js",
+      "auth-server/diagnostic-evidence.js"
+    ],
+    "asarUnpack": [
+      "**/*.node",
+      "**/*.dll"
+    ],
+    "beforePack": "tools/prepare-package.mjs",
+    "electronFuses": {
+      "runAsNode": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableCookieEncryption": true,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true
+    },
+    "extraResources": [
+      {
+        "from": "assets/brand.ico",
+        "to": "brand.ico"
+      },
+      {
+        "from": "vendor/chromium",
+        "to": "chromium",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "asar": true,
+    "win": {
+      "icon": "assets/brand.ico",
+      "signAndEditExecutable": true,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "verifyUpdateCodeSignature": true
+    },
+    "nsis": {
+      "installerIcon": "assets/brand.ico",
+      "uninstallerIcon": "assets/brand.ico",
+      "installerHeaderIcon": "assets/brand.ico",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "include": "build/installer.nsh",
+      "runAfterFinish": false,
+      "deleteAppDataOnUninstall": false
+    },
+    "publish": []
+  }
+}

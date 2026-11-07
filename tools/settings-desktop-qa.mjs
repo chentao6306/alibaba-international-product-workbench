@@ -1,0 +1,98 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+if (process.versions.electron) {
+  const { app, BrowserWindow, safeStorage } = await import('electron');
+  app.setPath('userData', path.join(process.env.QA_SETTINGS_ROOT, 'profile'));
+  app.whenReady().then(async () => {
+  assert.ok(safeStorage.isEncryptionAvailable());
+  globalThis.__KUA_YIPU_SECURE_STORAGE = { encrypt: (value) => safeStorage.encryptString(value), decrypt: (value) => safeStorage.decryptString(value) };
+  process.env.DATA_DIR = path.join(process.env.QA_SETTINGS_ROOT, 'data');
+  process.env.PORT = '0';
+  delete process.env.KUA_YIPU_DESKTOP;
+  const server = await import('../server/index.js');
+  const { SecureSettings } = await import('../server/secure-settings.js');
+  globalThis.__QA_KEY_PERSISTED = () => new SecureSettings(process.env.DATA_DIR).key() === 'sk-desktop-qa-placeholder';
+  const listener = await server.serverReady;
+  const window = new BrowserWindow({ width: 1440, height: 1000, webPreferences: { contextIsolation: true, nodeIntegration: false } });
+  await window.loadURL(`http://127.0.0.1:${listener.address().port}/`);
+  app.on('window-all-closed', () => app.quit());
+  }).catch((error) => { console.error(error); app.exit(1); });
+} else {
+  const { _electron } = await import('playwright-core');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'settings-desktop-qa-'));
+  const errors = [];
+  const launch = () => _electron.launch({ args: [fileURLToPath(import.meta.url)], env: { ...process.env, QA_SETTINGS_ROOT: root, KUA_YIPU_AUTH_URL: 'http://127.0.0.1:1' } });
+  let app;
+  try {
+    app = await launch();
+    let page = await app.firstWindow();
+    page.on('pageerror', (error) => errors.push(error.message));
+    await page.locator('.sidebar nav button').filter({ hasText: '设置' }).click();
+    const video = page.getByRole('switch', { name: '上传商品视频（主图视频、详情视频）' });
+    assert.equal(await video.isChecked(), true);
+    await page.route('**/api/settings', async route => {
+      if (route.request().method() !== 'PATCH') return route.continue();
+      await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'QA 保存失败' }) });
+    });
+    await video.click();
+    await page.getByText('QA 保存失败', { exact: true }).waitFor();
+    assert.equal(await video.isChecked(), true);
+    await page.unroute('**/api/settings');
+    await video.click();
+    await page.getByText('已关闭上传商品视频，后续商品将跳过视频', { exact: true }).waitFor();
+    assert.equal(await video.isChecked(), false);
+    await page.locator('.sidebar nav button').filter({ hasText: '商品工作台' }).click();
+    await page.locator('.sidebar nav button').filter({ hasText: '设置' }).click();
+    assert.equal(await video.isChecked(), false);
+    const cleanup = page.getByRole('switch', { name: '成功发布后自动删除工作台商品' });
+    assert.equal(await cleanup.isChecked(), false);
+    await cleanup.check();
+    await page.getByText('已开启成功发布后自动删除', { exact: true }).waitFor();
+    await page.getByLabel('DeepSeek API 密钥').fill('sk-desktop-qa-placeholder');
+    await page.getByLabel('采集时将中文标题翻译为英文').check();
+    await page.getByLabel('采集时将来源价格换算为美元').check();
+    await page.getByLabel('1 人民币兑美元').fill('0.14');
+    await page.getByRole('button', { name: '保存设置', exact: true }).click();
+    await page.getByText('DeepSeek 与加工规则已保存', { exact: true }).waitFor();
+    assert.equal(await page.getByLabel('DeepSeek API 密钥').inputValue(), '');
+    assert.equal(fs.readFileSync(path.join(root, 'data', 'integrations.bin')).includes('sk-desktop-qa-placeholder'), false);
+    await app.close(); app = await launch();
+    page = await app.firstWindow();
+    page.on('pageerror', (error) => errors.push(error.message));
+    await page.locator('.sidebar nav button').filter({ hasText: '设置' }).click();
+    await page.getByRole('button', { name: '测试已保存的连接', exact: true }).waitFor();
+    assert.equal(await page.getByRole('button', { name: '测试已保存的连接', exact: true }).isEnabled(), true);
+    assert.equal(await page.getByLabel('采集时将中文标题翻译为英文').isChecked(), true);
+    assert.equal(await page.getByLabel('1 人民币兑美元').inputValue(), '0.14');
+    assert.equal(await page.getByRole('switch', { name: '成功发布后自动删除工作台商品' }).isChecked(), true);
+    await page.getByRole('switch', { name: '成功发布后自动删除工作台商品' }).uncheck();
+    await page.getByText('已关闭成功发布后自动删除', { exact: true }).waitFor();
+    assert.equal(await page.getByRole('switch', { name: '上传商品视频（主图视频、详情视频）' }).isChecked(), false);
+    await page.getByRole('switch', { name: '上传商品视频（主图视频、详情视频）' }).click();
+    await page.getByText('已开启上传商品视频', { exact: true }).waitFor();
+    await page.getByRole('heading', { name: '商品视频', exact: true }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: path.join(root, 'video-setting-desktop.png') });
+    assert.equal(await app.evaluate(() => globalThis.__QA_KEY_PERSISTED()), true);
+    await page.locator('.processing-settings').filter({ has: page.getByRole('heading', { name: 'DeepSeek 与跨平台商品加工' }) }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: path.join(root, 'settings-desktop.png') });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.locator('.sidebar').evaluate((node) => Promise.all(node.getAnimations().map((animation) => animation.finished)));
+    await page.locator('.processing-settings').filter({ has: page.getByRole('heading', { name: 'DeepSeek 与跨平台商品加工' }) }).scrollIntoViewIfNeeded();
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.screenshot({ path: path.join(root, 'settings-mobile.png') });
+    await page.getByRole('button', { name: '移除密钥', exact: true }).click();
+    await page.getByText('已移除 API 密钥', { exact: true }).waitFor();
+    assert.equal(fs.existsSync(path.join(root, 'data', 'integrations.bin')), false);
+    await app.close(); app = await launch();
+    page = await app.firstWindow();
+    await page.locator('.sidebar nav button').filter({ hasText: '设置' }).click();
+    assert.equal(await page.getByRole('switch', { name: '成功发布后自动删除工作台商品' }).isChecked(), false);
+    assert.equal(await page.getByRole('switch', { name: '上传商品视频（主图视频、详情视频）' }).isChecked(), true);
+    assert.deepEqual(errors, []);
+    console.log(JSON.stringify({ ok: true, root, verified: ['windows-dpapi', 'restart-persistence', 'published-cleanup-enabled-restart', 'published-cleanup-disabled-restart', 'key-redaction', 'responsive-settings', 'video-failed-save-keeps-setting', 'video-navigation-persistence', 'video-disabled-restart', 'video-enabled-restart'] }));
+  } finally { await app?.close(); }
+}

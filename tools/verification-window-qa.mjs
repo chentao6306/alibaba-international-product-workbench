@@ -1,0 +1,170 @@
+import { app, BrowserWindow, session } from 'electron';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import sharp from 'sharp';
+import { createRequire } from 'node:module';
+import { assertBrandIcon, readWindowIcons } from './window-icon-qa.mjs';
+
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'verification-window-qa-'));
+app.setPath('userData', path.join(root, 'profile'));
+app.on('window-all-closed', () => {});
+async function main() {
+  await app.whenReady();
+  if (process.argv[2] && fs.existsSync(path.resolve(process.argv[2]) + '.bin')) {
+    await import('bytenode');
+    const directory = path.dirname(path.resolve(process.argv[2]));
+    createRequire(import.meta.url)(path.join(directory, 'protected-loader.jsc'))(path.dirname(directory));
+  }
+  const { showHumanVerification } = await import(process.argv[2]
+    ? pathToFileURL(path.resolve(process.argv[2])).href : '../electron/human-verification.js');
+  const watchdog = setTimeout(() => { console.error('Verification window QA timed out'); app.exit(1); }, 60000);
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const partition = `verification-qa-${Date.now()}`;
+  let phase = 'challenge';
+  let loads = 0;
+  await session.fromPartition(partition).protocol.handle('https', (request) => {
+    if (new URL(request.url).pathname === '/slow.png') return new Promise(() => {});
+    loads++;
+    return new Response(phase === 'challenge' ? '<div class="nc-container">请拖动下方滑块完成验证</div>'
+      : phase === 'expired' ? '<div class="nc-container">请点我重试(error:FrgxUe)</div>'
+        : phase === 'blank' ? '<body></body>'
+          : phase === 'stalled-challenge' ? '<div class="nc-container">请拖动下方滑块完成验证</div><img src="/slow.png">'
+          : phase === 'stalled-ready' ? '<main data-module-name="module_description">Phone loaded</main><img src="/slow.png">'
+          : phase === 'delayed' ? '<body><script>setTimeout(() => { document.body.innerHTML = \'<main data-module-name="module_description">Phone loaded</main>\'; }, 1500)</script></body>'
+            : phase === 'late-challenge' ? '<body><script>setTimeout(() => { document.body.innerHTML = \'<div class="nc-container">请拖动下方滑块完成验证</div>\'; }, 1500)</script></body>'
+            : '<main data-module-name="module_description">Real product page after verification</main><div class="baxia-container" style="height:300px"></div><div style="opacity:0"><div class="nc-container">请点我重试(error:FrgxUe)</div></div>',
+    { headers: { 'content-type': 'text/html; charset=utf-8' } });
+  });
+  const until = async (check) => {
+    for (let i = 0; i < 100; i++) { if (await check()) return; await pause(100); }
+    throw new Error('QA state did not arrive');
+  };
+  let saved = 0;
+  try {
+    phase = 'ready';
+    await showHumanVerification({ url: 'https://supplier.en.made-in-china.com/product/TestId123/China-Product.html', partition,
+      requestCookies: [{ name: 'mic-qa-session', value: 'synthetic', domain: '.made-in-china.com', path: '/', secure: true, httpOnly: true }],
+      saveSession: async ({ webContents }) => { assert.equal((await webContents.session.cookies.get({ domain: 'made-in-china.com', name: 'mic-qa-session' }))[0]?.value, 'synthetic'); },
+    });
+    phase = 'stalled-challenge';
+    let stalled;
+    const stalledOperation = showHumanVerification({ url: 'https://www.alibaba.com/product-detail/qa.html', partition,
+      onCreated: (value) => { stalled = value; } });
+    const stoppedStalled = assert.rejects(stalledOperation, (error) => error.code === 'COLLECT_PAUSED');
+    await until(() => stalled?.window.isVisible());
+    assert.equal(stalled.window.webContents.isAudioMuted(), true);
+    assert.equal(stalled.contents.isAudioMuted(), true);
+    if (process.platform === 'win32') {
+      const windows = await readWindowIcons(process.pid);
+      assert.ok(windows.length > 0);
+      fs.writeFileSync(path.join(root, 'native-icons.json'), JSON.stringify(windows));
+      console.log(`Native icon evidence: ${root}`);
+      for (const window of windows) { await assertBrandIcon(window.small); await assertBrandIcon(window.big); }
+    }
+    assert.equal(stalled.contents.isLoadingMainFrame(), true, 'CAPTCHA must appear even while a secondary resource is still loading');
+    await stalled.window.webContents.executeJavaScript('document.querySelector("#pause").click()');
+    await stoppedStalled;
+    for (const normalPhase of ['ready', 'delayed', 'stalled-ready']) {
+      phase = normalPhase;
+      let shows = 0;
+      await showHumanVerification({ url: 'https://www.alibaba.com/product-detail/qa.html', partition,
+        saveSession: async ({ readStorage }) => { assert.equal(typeof await readStorage(), 'object'); saved++; }, onCreated: ({ window }) => {
+          assert.equal(window.isVisible(), false, 'Normal product must start hidden');
+          window.on('show', () => { shows++; });
+        } });
+      assert.equal(shows, 0, 'Normal product must never show even briefly');
+    }
+    assert.equal(saved, 3);
+    saved = 0;
+    phase = 'blank';
+    let hiddenShows = 0;
+    const stoppedProbe = showHumanVerification({ url: 'https://www.alibaba.com/product-detail/qa.html', partition,
+      saveSession: async () => { saved++; }, onCreated: ({ window }) => {
+        window.on('show', () => { hiddenShows++; });
+        window.close();
+      } });
+    await assert.rejects(stoppedProbe, (error) => error.code === 'COLLECT_PAUSED');
+    assert.equal(hiddenShows, 0, 'Stopping a hidden probe must not reveal a normal page');
+    assert.equal(saved, 0);
+    phase = 'late-challenge';
+    let active;
+    let completed = false;
+    const operation = showHumanVerification({ url: 'https://www.alibaba.com/product-detail/qa.html', partition,
+      saveSession: async () => { saved++; }, onCreated: (value) => { active = value; } }).then(() => { completed = true; });
+    await until(() => active && loads > 0);
+    assert.equal(active.window.isVisible(), false, 'Loading a challenge URL alone must not show a window');
+    await until(() => active.contents.executeJavaScript('Boolean(document.querySelector(".nc-container"))').catch(() => false));
+    await until(() => active.window.isVisible());
+    assert.equal(active.window.isVisible(), true);
+    if (process.platform === 'win32') {
+      for (const window of await readWindowIcons(process.pid)) { await assertBrandIcon(window.small); await assertBrandIcon(window.big); }
+    }
+    assert.equal(await active.contents.executeJavaScript('typeof window.verification'), 'undefined');
+    assert.equal(await active.contents.executeJavaScript('typeof require'), 'undefined');
+    active.window.close();
+    assert.equal(active.window.isDestroyed(), false);
+    const realNow = Date.now;
+    Date.now = () => realNow() + 86400000;
+    await pause(2200);
+    assert.equal(completed, false);
+    assert.equal(active.window.isVisible(), true);
+    Date.now = realNow;
+    phase = 'expired';
+    await active.window.webContents.executeJavaScript('document.querySelector("#refresh").click()');
+    await until(() => active.contents.executeJavaScript('document.body.innerText.includes("FrgxUe")').catch(() => false));
+    await pause(2200);
+    assert.equal(completed, false);
+    assert.equal(saved, 0);
+    await active.window.webContents.capturePage().then((image) => fs.writeFileSync(path.join(root, 'verification-toolbar.png'), image.toPNG()));
+    const shell = await active.window.webContents.capturePage();
+    const remote = await active.contents.capturePage();
+    const [width] = active.window.getContentSize();
+    const offset = Math.round(64 * shell.getSize().width / width);
+    await sharp(shell.toPNG()).composite([{ input: remote.toPNG(), top: offset, left: 0 }]).toFile(path.join(root, 'verification-window.png'));
+    active.window.setSize(640, 480);
+    await pause(300);
+    assert.equal(await active.window.webContents.executeJavaScript('document.documentElement.scrollWidth <= innerWidth'), true);
+    phase = 'blank'; active.refresh();
+    await pause(2300);
+    assert.equal(completed, false);
+    phase = 'ready'; active.refresh();
+    await operation;
+    assert.equal(saved, 1);
+    phase = 'challenge'; active = null;
+    const cancelled = showHumanVerification({ url: 'https://www.alibaba.com/product-detail/qa.html', partition,
+      saveSession: async () => { saved++; }, onCreated: (value) => { active = value; } });
+    const rejection = assert.rejects(cancelled, (error) => error.code === 'COLLECT_PAUSED');
+    await until(() => active?.window.isVisible());
+    await active.window.webContents.executeJavaScript('document.querySelector("#pause").click()');
+    await rejection;
+    assert.equal(saved, 1);
+    // Seller/login pages may create their own windows via window.open().
+    // These bypass createAppWindow and must receive the same native icon.
+    const popupParent = new BrowserWindow({ show: false, webPreferences: { partition } });
+    let popup;
+    try {
+      popupParent.webContents.setWindowOpenHandler(() => ({ action: 'allow', overrideBrowserWindowOptions: { show: false } }));
+      const opened = new Promise(resolve => popupParent.webContents.once('did-create-window', child => { popup = child; resolve(); }));
+      await popupParent.loadURL('https://www.alibaba.com/window-branding-qa');
+      await popupParent.webContents.executeJavaScript('window.open("https://www.alibaba.com/window-branding-popup"); void 0');
+      await opened;
+      assert.equal(popupParent.webContents.isAudioMuted(), true);
+      assert.equal(popup.webContents.isAudioMuted(), true);
+      if (process.platform === 'win32') {
+        const windows = await readWindowIcons(process.pid);
+        assert.ok(windows.length >= 2);
+        for (const window of windows) { await assertBrandIcon(window.small); await assertBrandIcon(window.big); }
+      }
+    } finally { popup?.destroy(); popupParent.destroy(); }
+    console.log(JSON.stringify({ passed: true, loads, screenshot: path.join(root, 'verification-window.png') }));
+  } catch (error) {
+    console.error(error);
+    console.error('Owned QA windows', BrowserWindow.getAllWindows().map(window => ({ visible: window.isVisible(), minimized: window.isMinimized(), bounds: window.getBounds(), contentSize: window.getContentSize() })));
+    process.exitCode = 1;
+  }
+  finally { clearTimeout(watchdog); app.exit(process.exitCode || 0); }
+}
+main().catch((error) => { console.error(error); app.exit(1); });

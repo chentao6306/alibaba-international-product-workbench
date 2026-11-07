@@ -1,0 +1,109 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { createHash } from 'node:crypto';
+import net from 'node:net';
+import { spawn, execFileSync } from 'node:child_process';
+import { chromium } from 'playwright-core';
+import { extractFile, listPackage } from '@electron/asar';
+import { getCurrentFuseWire, FuseV1Options } from '@electron/fuses';
+import { assertBrandIcon, readExecutableIcon, readWindowIcons } from './window-icon-qa.mjs';
+
+const release = path.resolve(process.argv[2]);
+const applicationDirectory = process.argv[3] ? path.resolve(process.argv[3]) : path.join(release, 'win-unpacked');
+const asar = path.join(applicationDirectory, 'resources/app.asar');
+const metadata = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+assert.equal(JSON.parse(extractFile(asar, 'package.json')).version, metadata.version);
+const entries = listPackage(asar);
+assert.equal(entries.some((entry) => /(?:^|\/)(?:\.data|\.env|credentials\.bin|alibaba-cookies\.json)(?:\/|$)/.test(entry)), false);
+for (const folder of ['server', 'electron']) {
+  const packagedFolder = path.join('.packaged', folder);
+  for (const name of fs.readdirSync(packagedFolder)) {
+    const file = `${folder}/${name}`;
+    if (fs.statSync(path.join(packagedFolder, name)).isFile()) {
+      assert.ok(extractFile(asar, file).equals(fs.readFileSync(path.join(packagedFolder, name))), `Packaged source differs: ${file}`);
+    }
+  }
+}
+assert.ok(fs.statSync(path.join(applicationDirectory, 'resources/chromium/chrome.exe')).size > 1000000);
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-package-qa-'));
+const fixture = process.env.QA_WORKSPACE_FIXTURE;
+if (fixture) {
+  fs.mkdirSync(path.join(root, 'profile', '.data'), { recursive: true });
+  fs.copyFileSync(fixture, path.join(root, 'profile', '.data', 'workspace.json'));
+}
+const executable = fs.readdirSync(applicationDirectory).find((name) => name.endsWith('.exe'));
+const executablePath = path.join(applicationDirectory, executable);
+const fuses = await getCurrentFuseWire(executablePath);
+for (const name of ['RunAsNode', 'EnableNodeOptionsEnvironmentVariable', 'EnableNodeCliInspectArguments']) assert.equal(fuses[FuseV1Options[name]], 48, name);
+for (const name of ['EnableEmbeddedAsarIntegrityValidation', 'OnlyLoadAppFromAsar', 'EnableCookieEncryption']) assert.equal(fuses[FuseV1Options[name]], 49, name);
+async function freePort() {
+  const listener = net.createServer();
+  await new Promise((resolve) => listener.listen(0, '127.0.0.1', resolve));
+  const port = listener.address().port;
+  await new Promise((resolve) => listener.close(resolve));
+  return port;
+}
+const debugPort = await freePort();
+const apiPort = await freePort();
+// Renderer CDP does not require the main-process Node inspector disabled by fuses.
+const child = spawn(executablePath, [`--user-data-dir=${path.join(root, 'profile')}`, `--remote-debugging-port=${debugPort}`, '--remote-debugging-address=127.0.0.1'], { windowsHide: true, stdio: 'ignore', env: { ...process.env, APPDATA: root, LOCALAPPDATA: root, KUA_YIPU_PORT: String(apiPort) } });
+let browser;
+try {
+  for (let attempt = 0; attempt < 80; attempt++) {
+    if (child.exitCode !== null) throw new Error(`Packaged app exited: ${child.exitCode}`);
+    const response = await fetch(`http://127.0.0.1:${debugPort}/json/version`).catch(() => null);
+    if (response?.ok) { browser = await chromium.connectOverCDP(`http://127.0.0.1:${debugPort}`); break; }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  assert.ok(browser, 'Packaged renderer did not start');
+  let window;
+  for (let attempt = 0; attempt < 40; attempt++) {
+    window = browser.contexts().flatMap((context) => context.pages()).find((page) => page.url().endsWith('/login.html'));
+    if (window) break;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  assert.ok(window, 'Login window did not load');
+  await window.locator('#login').waitFor();
+  assert.equal(await window.locator('#login').isEnabled(), true);
+  if (process.platform === 'win32') {
+    // This harness starts the EXE with windowsHide; still inspect its real
+    // native window icons without requiring it to steal the user's focus.
+    const windows = await readWindowIcons(child.pid);
+    assert.ok(windows.length > 0, 'Packaged login native window must exist');
+    for (const native of windows) { await assertBrandIcon(native.small); await assertBrandIcon(native.big); }
+  }
+  await window.evaluate(() => window.kuaYipu.loadCredentials());
+  assert.equal(await window.locator('#error').textContent(), '');
+  // The login window is now responsive before the background service finishes
+  // startup. Wait for readiness independently instead of assuming UI == API.
+  let health;
+  const deadline = Date.now() + (fixture ? 120000 : 30000);
+  while (Date.now() < deadline) {
+    health = await fetch(`http://127.0.0.1:${apiPort}/health`, { signal: AbortSignal.timeout(2000) }).catch(() => null);
+    if (health?.ok) break;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  assert.equal(health?.status, 200);
+  const serviceStatus = await window.evaluate(() => window.kuaYipu.serviceStatus());
+  assert.equal(serviceStatus.status, 'running');
+  assert.ok(serviceStatus.freeBytes > 0);
+  if (fixture) {
+    const loaded = path.join(root, 'profile', '.data', 'workspace.json');
+    assert.ok(fs.statSync(loaded).size >= fs.statSync(fixture).size * 0.99, 'Large workspace must not be replaced with an empty one');
+  }
+  assert.equal((await fetch(`http://127.0.0.1:${apiPort}/api/state`)).status, 401);
+  await window.screenshot({ path: path.join(root, 'packaged-login.png') });
+} finally {
+  await browser?.close();
+  if (child.exitCode === null) { try { execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }); } catch {} }
+}
+const installer = path.join(release, `chaodekuai-${metadata.version}-setup.exe`);
+if (process.platform === 'win32') {
+  for (const file of [executablePath, installer, path.join(release, `chaodekuai-${metadata.version}-inner.exe`)]) {
+    await assertBrandIcon(await readExecutableIcon(file));
+  }
+  assert.ok(fs.readFileSync(path.join(applicationDirectory, 'resources', 'brand.ico')).equals(fs.readFileSync('assets/brand.ico')));
+}
+console.log(JSON.stringify({ version: metadata.version, installer, applicationDirectory, workspaceFixture: fixture || null, bytes: fs.statSync(installer).size, sha256: createHash('sha256').update(fs.readFileSync(installer)).digest('hex'), screenshot: path.join(root, 'packaged-login.png') }));
