@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { setImmediate as yieldToRequests, setTimeout as retryDelay } from 'node:timers/promises';
 import { storageError } from './storage-error.js';
 import { readWorkspace } from './workspace-reader.js';
 import { cloneWorkspaceValue } from './workspace-clone.js';
@@ -161,6 +162,81 @@ export class JsonStore {
     const state = { ...snapshot, products: snapshot.products.map(product => updates.get(product.id) || product) };
     this.#commit(state, true);
     return detachedResult;
+  }
+
+  async updateProductsAsync(ids, mutator) {
+    const selected = new Set(ids);
+    const snapshot = this.snapshot();
+    const products = [];
+    let resumedAt = performance.now();
+    for (const product of snapshot.products) {
+      if (selected.has(product.id)) products.push(cloneWorkspaceValue(product));
+      if (performance.now() - resumedAt >= 8) { await yieldToRequests(); resumedAt = performance.now(); }
+    }
+    const result = await mutator(products, snapshot);
+    const detachedResult = cloneWorkspaceValue(result);
+    const updates = new Map();
+    for (const product of products) {
+      updates.set(product.id, cloneWorkspaceValue(product));
+      if (performance.now() - resumedAt >= 8) { await yieldToRequests(); resumedAt = performance.now(); }
+    }
+    const state = { ...snapshot, products: snapshot.products.map(product => updates.get(product.id) || product) };
+    await this.#commitAsync(state, snapshot);
+    return detachedResult;
+  }
+
+  #requireSnapshot(snapshot) {
+    // Reads keep seeing the last committed snapshot. Any concurrent edit,
+    // task progress or external file replacement invalidates this transaction.
+    if (this.snapshot() !== snapshot) throw Object.assign(new Error('商品或任务进度已变化，请重新预览后保存'), {
+      code: 'WORKSPACE_CHANGED', status: 409,
+    });
+  }
+
+  async #commitAsync(state, snapshot) {
+    this.#requireSnapshot(snapshot);
+    const temporary = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
+    let file;
+    try {
+      const disk = await fs.promises.statfs(path.dirname(this.filePath));
+      const available = disk.bavail * disk.bsize, reserve = 64 * 1024 * 1024;
+      if (available < reserve) throw Object.assign(new Error('Insufficient workspace storage'), { code: 'ENOSPC' });
+      file = await fs.promises.open(temporary, 'wx');
+      let bytes = 0, pendingBytes = 0, pending = [];
+      for (const chunk of stateChunks(state)) {
+        const chunkBytes = Buffer.byteLength(chunk);
+        bytes += chunkBytes;
+        if (available < bytes * 2 + reserve) throw Object.assign(new Error('Insufficient workspace storage'), { code: 'ENOSPC' });
+        pending.push(chunk); pendingBytes += chunkBytes;
+        if (pendingBytes >= 256 * 1024) {
+          await file.writeFile(pending.join(''), 'utf8');
+          pending = []; pendingBytes = 0;
+        }
+      }
+      if (pending.length) await file.writeFile(pending.join(''), 'utf8');
+      await file.sync();
+      await file.close();
+      file = undefined;
+      for (let attempt = 0; ; attempt++) {
+        this.#requireSnapshot(snapshot);
+        try {
+          // No await between revision check, replacement and cache publication:
+          // another request must never be overwritten by a delayed rename.
+          fs.renameSync(temporary, this.filePath);
+          break;
+        } catch (error) {
+          if (attempt >= 19 || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code)) throw error;
+          await retryDelay(50);
+        }
+      }
+      this.cachedState = state;
+      this.cachedRevision = this.revision();
+    } catch (error) {
+      if (file) await file.close().catch(() => {});
+      await fs.promises.rm(temporary, { force: true }).catch(() => {});
+      if (error.code === 'WORKSPACE_CHANGED') throw error;
+      throw storageError(error, this.filePath);
+    }
   }
 
   createJob(type, metadata = {}) {

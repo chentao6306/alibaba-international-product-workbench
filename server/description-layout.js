@@ -19,7 +19,7 @@ export function descriptionImageSlots(html, urls) {
 // Image uploads finish in source order. Rebuild from the prepared HTML rather
 // than the editor's live selection, which may move during asynchronous uploads.
 export async function restoreDescriptionImages(page, html, count) {
-  if (!count) return;
+  if (!count) return html;
   const restored = await page.evaluate(({ html, count }) => {
     const editor = [...(window.tinymce?.editors || []), ...(window.tinyMCE?.editors || [])].find(item => item && !item.hidden);
     const body = editor?.getBody?.();
@@ -38,8 +38,9 @@ export async function restoreDescriptionImages(page, html, count) {
       slot.replaceWith(copy);
     }
     if (expected.length < count) return false;
-    editor.setContent(container.innerHTML); editor.save(); editor.fire('input'); editor.fire('change');
-    return JSON.stringify([...body.querySelectorAll('img')].map(node => node.getAttribute('src'))) === JSON.stringify(expected);
+    editor.setContent(container.innerHTML); editor.save(); editor.fire('input'); editor.fire('change'); editor.fire('blur');
+    return JSON.stringify([...body.querySelectorAll('img')].map(node => node.getAttribute('src'))) === JSON.stringify(expected)
+      ? { html: container.innerHTML } : false;
   }, { html, count });
   if (restored === null) {
     // The existing publisher also supports an editable iframe without an
@@ -75,11 +76,12 @@ export async function restoreDescriptionImages(page, html, count) {
         }, content);
       }
       const actual = await body.locator('img').evaluateAll(nodes => nodes.map(node => node.getAttribute('src')));
-      if (JSON.stringify(actual) === JSON.stringify(expected)) return;
+      if (JSON.stringify(actual) === JSON.stringify(expected)) return content;
       break;
     }
   }
   if (!restored) throw Object.assign(new Error('详情图片上传后未能确认图文顺序，已保留商品，请重试'), { code: 'DETAIL_IMAGE_LAYOUT_FAILED' });
+  return restored.html;
 }
 
 export function descriptionContainsText(html, text) {

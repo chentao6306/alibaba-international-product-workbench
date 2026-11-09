@@ -1,5 +1,5 @@
 import { confirmAction } from './confirm-action.js';
-import { localFetch, localConnectionMessage } from './local-api.js';
+import { localFetch, localConnectionFailure, localConnectionLabel } from './local-api.js';
 import SoftwareUpdate from './SoftwareUpdate.jsx';
 import DiagnosticUploadSetting from './DiagnosticUploadSetting.jsx';
 import ReferenceDialog from './ReferenceDialog.jsx';
@@ -119,7 +119,7 @@ async function api(url, options = {}) {
   });
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
-    throw new Error(displayError(data.error, response.status));
+    throw Object.assign(new Error(displayError(data.error, response.status)), { code: data.code, status: response.status });
   }
   if (response.status === 204) return null;
   return response.json();
@@ -903,8 +903,9 @@ export default function App() {
     const request = api(`/api/state?view=summary&revision=${encodeURIComponent(stateRevision.current)}`, { signal: AbortSignal.timeout(30000) })
       .then((nextState) => {
         if (mounted.current) {
-          const nextConnection = nextState.service || { status: 'running', message: '' };
-          setConnection(previous => previous.status === nextConnection.status && previous.message === nextConnection.message ? previous : nextConnection);
+          const nextConnection = nextState.service ? { ...nextState.service, kind: 'task' } : { status: 'running', message: '' };
+          setConnection(previous => previous.status === nextConnection.status && previous.message === nextConnection.message
+            && previous.kind === nextConnection.kind && previous.code === nextConnection.code ? previous : nextConnection);
           stateRevision.current = nextState.revision;
           const activity = JSON.stringify([nextState.jobs, nextState.browser, nextState.collectorBrowser]);
           if (nextState.unchanged && activity === activityRevision.current) return nextState;
@@ -916,12 +917,8 @@ export default function App() {
         return nextState;
       })
       .catch(async (error) => {
-        let message = error.message;
-        if (['LOCAL_API_UNREACHABLE', 'LOCAL_API_TIMEOUT'].includes(error.code)) {
-          const status = await window.kuaYipu?.serviceStatus?.().catch(() => null);
-          message = localConnectionMessage(status || {}, error.code === 'LOCAL_API_TIMEOUT');
-        }
-        if (mounted.current) setConnection({ status: 'error', message });
+        const failedConnection = await localConnectionFailure(error, () => window.kuaYipu?.serviceStatus?.());
+        if (mounted.current) setConnection(failedConnection);
         throw error;
       });
     return request;
@@ -942,7 +939,7 @@ export default function App() {
   // never change the platform assigned to a collection menu entry.
   const productFilter = { platform: productPlatform, setPlatform: setProductPlatform };
   return <FolderOperationContext.Provider value={setFolderBusy}><div className="app-shell" inert={folderBusy || undefined} aria-busy={folderBusy}>
-    <aside className={`sidebar ${menuOpen ? 'open' : ''}`}><div className="brand"><img className="brand-logo" src="/brand.png" alt="抄得快" /><span><strong>抄得快</strong><small>国际站商品工作台</small></span><button className="icon-button close-nav" onClick={() => setMenuOpen(false)}><X size={18} /></button></div><nav>{NAV.map(({ id, label, icon: Icon }) => <button key={id} className={view === id ? 'active' : ''} onClick={() => navigate(id)}><Icon size={19} /><span>{label}</span>{id === 'products' && state.products.length > 0 && <b>{state.products.length}</b>}{id === 'publish' && state.products.some((item) => item.selected) && <b>{state.products.filter((item) => item.selected).length}</b>}{id === 'announcements' && inbox.unread > 0 && <i className="unread-dot" aria-label="有未读公告" />}<ChevronRight size={15} /></button>)}</nav><div className="sidebar-foot"><span className={`system-dot ${connection.status === 'running' ? 'online' : ''}`} /><div><strong>本地服务</strong><small>{connection.status === 'running' ? '运行正常' : connection.status === 'checking' ? '正在连接' : '连接或任务异常'}</small></div></div></aside>
+    <aside className={`sidebar ${menuOpen ? 'open' : ''}`}><div className="brand"><img className="brand-logo" src="/brand.png" alt="抄得快" /><span><strong>抄得快</strong><small>国际站商品工作台</small></span><button className="icon-button close-nav" onClick={() => setMenuOpen(false)}><X size={18} /></button></div><nav>{NAV.map(({ id, label, icon: Icon }) => <button key={id} className={view === id ? 'active' : ''} onClick={() => navigate(id)}><Icon size={19} /><span>{label}</span>{id === 'products' && state.products.length > 0 && <b>{state.products.length}</b>}{id === 'publish' && state.products.some((item) => item.selected) && <b>{state.products.filter((item) => item.selected).length}</b>}{id === 'announcements' && inbox.unread > 0 && <i className="unread-dot" aria-label="有未读公告" />}<ChevronRight size={15} /></button>)}</nav><div className="sidebar-foot"><span className={`system-dot ${connection.status === 'running' ? 'online' : ''}`} /><div><strong>本地服务</strong><small>{localConnectionLabel(connection)}</small></div></div></aside>
     {menuOpen && <button className="nav-backdrop" onClick={() => setMenuOpen(false)} />}
     <main><AuthorizationConnection />{connection.status === 'error' && <div className="local-service-error" role="alert"><CircleAlert size={20} /><span>{connection.message}</span></div>}{view === 'source' && <SourceView {...props} collectionPlatform="alibaba.com" />}{view === 'madeinchina' && <MadeInChinaView {...props} />}{COLLECTION_VIEWS[view] && view !== 'madeinchina' && <LinkCollectionView key={view} entry={view} {...props} />}{view === 'products' && <ProductsView {...props} {...productFilter} />}{view === 'publish' && <PublishView {...props} {...productFilter} />}{view === 'settings' && <SettingsView {...props} />}{view === 'announcements' && <><Header title="公告" onMenu={() => setMenuOpen(true)} /><AnnouncementsView inbox={inbox} /></>}</main><AnnouncementPopup inbox={inbox} />
     <Notice notice={notice} onClose={() => setNotice(null)} />

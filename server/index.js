@@ -23,7 +23,7 @@ import { attachCategoryRequirements, rememberCategoryRequirements } from './cate
 import { publishEnvironmentBlockCode } from './publish-recovery.js';
 import { buildAlibabaPublishUrl, createPublishPlan, normalizeCategoryId, productCategory, publishBindings, rememberPublishBinding, resolvePublishRoute } from './category-routing.js';
 import { findPublishedReferenceRepair } from './publish-reference.js';
-import { applyReferencePreview, failedPublishProducts, previewProductReference, referenceCandidates } from './reference-workflow.js';
+import { applyReferencePreview, applyReferencePreviewAsync, failedPublishProducts, previewProductReferenceAsync, referenceCandidates } from './reference-workflow.js';
 import { userFacingError } from './browser-error.js';
 import { runWithProgressTimeout } from './progress-timeout.js';
 import { withVerificationContext } from './human-verification.js';
@@ -271,12 +271,14 @@ app.use((_request, response, next) => {
 });
 app.get('/health', (_request, response) => response.json({ ok: true }));
 if (process.env.KUA_YIPU_DESKTOP === '1') {
-  app.use('/api', (request, response, next) => {
+  app.use('/api', async (request, response, next) => {
     if (!process.env.KUA_YIPU_LOCAL_GATE || request.headers['x-kua-yipu-gate'] !== process.env.KUA_YIPU_LOCAL_GATE) {
       return response.status(401).json({ error: '请从抄得快登录后进入工作台' });
     }
-    if (!globalThis.__KUA_YIPU_AUTHORIZATION?.valid()
-      && !(request.method === 'GET' && request.path === '/state' && globalThis.__KUA_YIPU_AUTHORIZATION?.canRead?.())) {
+    const authorization = globalThis.__KUA_YIPU_AUTHORIZATION;
+    const access = authorization?.check ? await authorization.check()
+      : { valid: authorization?.valid(), canRead: authorization?.canRead?.() };
+    if (!access.valid && !(request.method === 'GET' && request.path === '/state' && access.canRead)) {
       return response.status(401).json({ error: '授权连接中断，任务已保留，请等待重新连接' });
     }
     next();
@@ -310,14 +312,21 @@ function publicState() {
 }
 
 const readWorkbenchState = createWorkbenchStateReader(store);
-app.get('/api/state', (request, response) => {
+app.get('/api/state', async (request, response) => {
+  // Idle polling must not block the API worker waiting for Electron. An
+  // unresponsive desktop bridge is bounded and never grants cached access.
+  const browser = globalThis.__KUA_YIPU_SELLER_BRIDGE?.readStatus
+    ? await globalThis.__KUA_YIPU_SELLER_BRIDGE.readStatus() : publisher.status();
+  const collectorBrowser = collector.status();
   if (request.query.view === 'summary') {
-    return response.json(backgroundTasks.state({ ...readWorkbenchState(request.query.revision), browser: publisher.status(), collectorBrowser: collector.status() }));
+    return response.json(backgroundTasks.state({ ...readWorkbenchState(request.query.revision), browser, collectorBrowser }));
   }
   const revision = store.revision();
-  response.json(backgroundTasks.state(request.query.revision === revision
-    ? { unchanged: true, revision, jobs: store.read((state) => state.jobs), browser: publisher.status(), collectorBrowser: collector.status() }
-    : { ...publicState(), revision }));
+  if (request.query.revision === revision) {
+    return response.json(backgroundTasks.state({ unchanged: true, revision, jobs: store.read((state) => state.jobs), browser, collectorBrowser }));
+  }
+  const state = store.read();
+  response.json(backgroundTasks.state({ ...state, products: workbenchProducts(state.products), browser, collectorBrowser, revision }));
 });
 
 function deleteEntities(selection) {
@@ -1521,16 +1530,15 @@ app.post('/api/publish/plan', publishPlanResponse);
 app.get('/api/references', (_request, response) => {
   response.json({ references: store.read(state => referenceCandidates(state)) });
 });
-app.post('/api/products/reference/preview', (request, response, next) => {
-  try { response.json(previewProductReference(store.snapshot(), request.body)); }
+app.post('/api/products/reference/preview', async (request, response, next) => {
+  try { response.json(await previewProductReferenceAsync(store.snapshot(), request.body)); }
   catch (error) { next(error); }
 });
-app.post('/api/products/reference', (request, response, next) => {
+app.post('/api/products/reference', async (request, response, next) => {
   try {
-    const snapshot = store.snapshot();
-    response.json(store.updateProducts(Array.isArray(request.body.ids) ? request.body.ids : [], products => {
+    response.json(await store.updateProductsAsync(Array.isArray(request.body.ids) ? request.body.ids : [], (products, snapshot) => {
       const selected = new Map(products.map(product => [product.id, product]));
-      return applyReferencePreview({ ...snapshot, products: snapshot.products.map(product => selected.get(product.id) || product) }, request.body);
+      return applyReferencePreviewAsync({ ...snapshot, products: snapshot.products.map(product => selected.get(product.id) || product) }, request.body);
     }));
   }
   catch (error) { next(error); }
@@ -1624,7 +1632,7 @@ app.use((error, request, response, _next) => {
   const safeMessage = diagnostic.code === 'ERR_STRING_TOO_LONG'
     ? '本地数据处理失败：单次处理的数据超过字符串长度限制。已保存数据和任务进度保留；请上传日志，并先核对当前商品的发布结果，不要重复提交上架。'
     : userFacingError(error);
-  response.status(error.status || 500).json({ error: safeMessage });
+  response.status(error.status || 500).json({ error: safeMessage, code: diagnostic.code });
 });
 
 const port = Number(process.env.PORT || 8787);

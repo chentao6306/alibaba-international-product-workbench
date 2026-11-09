@@ -25,7 +25,8 @@ import { ORIGIN_COUNTRIES, originCountry, isOriginAttribute, isOriginRegionAttri
 import { uploadEditorDetailImages } from './description-image-upload.js';
 import { descriptionImageSlots, descriptionContainsText, restoreDescriptionImages } from './description-layout.js';
 import { fillStructuredDescription, structuredHighlightText, acceptedStructuredHighlights, requireAcceptedNativeDescription, requireStructuredDescriptionReady } from './structured-description.js';
-import { ensureSourceDescriptionMode, requireSourceDescriptionMode } from './description-mode.js';
+import { ensureSourceDescriptionMode, requireSourceDescriptionMode, descriptionCompatibility } from './description-mode.js';
+import { compatibleLegacyDescriptionHtml, acceptCompatibleLegacyDescription, requireCompatibleLegacyDescription } from './description-compatibility.js';
 import { currentDescriptionStructure, extractDescriptionStructure, descriptionSourceHash, nativeDescriptionImageUrls } from './description-structure.js';
 import { alibabaKeywordText } from './product-keywords.js';
 import { fillCustomAttributes, requireCustomAttributes } from './custom-attributes.js';
@@ -5767,7 +5768,7 @@ export class SellerPublisher {
     const downloadOne = async (url, index) => {
       try {
         const safeId = String(product.sourceId || product.id || 'product').replace(/[^A-Za-z0-9]/g, '').slice(-16);
-        const safePrefix = `${String(prefix || 'image').replace(/[^A-Za-z0-9]/g, '')}${prefix === 'detail' ? '-tall2' : ''}-${crypto.createHash('sha256').update(url).digest('hex').slice(0, 16)}`;
+        const safePrefix = `${String(prefix || 'image').replace(/[^A-Za-z0-9]/g, '')}${prefix === 'detail' ? '-tall2' : ''}-white1-${crypto.createHash('sha256').update(url).digest('hex').slice(0, 16)}`;
         const cached = ['jpg', 'png'].map((extension) => path.join(this.imageDir, `${safeId}${safePrefix}${index}.${extension}`))
           .find((candidate) => {
             try { return fs.statSync(candidate).size > 1024; } catch { return false; }
@@ -5826,6 +5827,15 @@ export class SellerPublisher {
         // of silently discarding valid bytes based only on a response header.
         const metadata = await sharp(buffer, { animated: false, limitInputPixels: 40000000 }).metadata();
         let extension = metadata.format === 'png' ? 'png' : 'jpg';
+        // The platform may convert even a small PNG to JPEG with a black alpha
+        // background. Preserve its appearance on the white product page before
+        // upload, leaving the source/media bytes untouched. Version the cache
+        // above so older opaque conversions cannot bypass this preparation.
+        if (metadata.hasAlpha) {
+          buffer = await sharp(buffer, { animated: false, limitInputPixels: 40000000 })
+            .rotate().flatten({ background: '#fff' }).png().toBuffer();
+          extension = 'png';
+        }
         if (!['jpeg', 'png'].includes(metadata.format) || buffer.length > 5 * 1024 * 1024) {
           let pipeline = sharp(buffer, { animated: false, limitInputPixels: 40000000 }).rotate();
           if (buffer.length > 5 * 1024 * 1024 && prefix !== 'structured-detail') pipeline = pipeline.resize({ width: prefix === 'detail' ? 960 : 2560, height: prefix === 'detail' ? 16000 : 2560, fit: 'inside', withoutEnlargement: true });
@@ -6182,13 +6192,14 @@ export class SellerPublisher {
     if (!main) return 0;
     product = { ...product, videoUrl: main.url };
     const initialState = await page.evaluate(readPostingVideoState);
-    if (initialState.available === false) throw videoUnavailableError(initialState);
     // The bank returns a stable video identity and supports exact role readback
-    // after publication. Prefer it even when a local upload placeholder exists.
+    // after publication. A hidden inline uploader does not disable the bank:
+    // follow the form's advertised entry and verify the actual bank response.
     if (initialState.config?.url) {
       const videoPath = await this.downloadProductVideo(product, page);
       return { bank: await prepareBankVideo(page, videoPath, path.join(this.dataDir, 'video-bank-receipts'), initialState.config.url) };
     }
+    if (initialState.available === false) throw videoUnavailableError(initialState);
     const placeholder = await firstVisible(page, ['.video-upload-placeholder']);
     if (!placeholder) throw videoUnavailableError(initialState);
     const videoPath = await this.downloadProductVideo(product, page);
@@ -6671,7 +6682,8 @@ export class SellerPublisher {
       switchMode: () => prepareDescriptionEditor(page),
       verify: () => waitForHumanVerification(page), onProgress
     });
-    const html = buildLegacyDescriptionHtml(product);
+    const compatible = descriptionCompatibility(page, product);
+    const html = compatible ? compatibleLegacyDescriptionHtml(product, buildLegacyDescriptionHtml(product)) : buildLegacyDescriptionHtml(product);
     await body.evaluate((node, value) => {
       node.innerHTML = value;
       node.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
@@ -6703,7 +6715,10 @@ export class SellerPublisher {
     }
     await this.uploadLegacyDetailImages(page, product, onProgress);
     if (product.descriptionTemplate) await placeTemplateImages(page, product);
-    else await restoreDescriptionImages(page, html, distinctAlibabaImageUrls(product.detailImages || []).length);
+    else {
+      const restored = await restoreDescriptionImages(page, html, distinctAlibabaImageUrls(product.detailImages || []).length);
+      if (compatible) await acceptCompatibleLegacyDescription(page, product, restored);
+    }
     return true;
   }
 
@@ -7262,6 +7277,7 @@ export class SellerPublisher {
     const postingText = compactText(await page.locator('body').innerText().catch(() => ''), 5000);
     const descriptionFormat = await ensureSourceDescriptionMode(page, product, { onProgress: reportStage,
       beforeInteraction: () => requireClearPostingOverlays(page) });
+    const descriptionConversion = descriptionCompatibility(page, product);
     if (descriptionFormat === 'structured') {
       await requireStructuredDescriptionReady(page, { html: buildLegacyDescriptionHtml(product),
         structure: currentDescriptionStructure(product), imageUrls: product.detailImages || [], highlights: structuredHighlightText(product) });
@@ -7553,7 +7569,8 @@ export class SellerPublisher {
         const subtitleAccepted = await fillProductSubtitle(page, product);
         const keywordsAccepted = await fillProductKeywords(page, product);
         await requireSourceDescriptionMode(page, product);
-        await requireAcceptedNativeDescription(page, product);
+        if (descriptionCompatibility(page, product)) await requireCompatibleLegacyDescription(page, product);
+        else await requireAcceptedNativeDescription(page, product);
         const structuredHighlights = await acceptedStructuredHighlights(page, product);
         basicFields = {
           subtitle: { status: !product.subtitle ? 'not-supplied' : subtitleAccepted ? 'committed' : 'unavailable', value: product.subtitle || '', destination: structuredHighlights ? 'product-highlights' : 'subtitle' },
@@ -7656,12 +7673,17 @@ export class SellerPublisher {
       ...(options.logisticsDecision ? { logisticsDecision: options.logisticsDecision } : {}),
       stockProvenance: product.stockProvenance,
       fieldMapping,
+      ...(descriptionConversion ? { descriptionCompatibility: {
+        sourceFormat: descriptionConversion.sourceFormat, targetFormat: descriptionConversion.targetFormat,
+        reason: descriptionConversion.reason,
+      } } : {}),
       additionalFields,
       basicFields,
       videoAssociation,
       ...(videoResult?.inline ? { inlineVideo: { ...videoResult.inline, role: 'main', verifiedBy: 'form-model', displayVerified: false } } : {}),
       videoUploadEnabled: options.uploadProductVideos !== false,
       warnings: [
+        descriptionConversion?.warning || '',
         videoWarning,
         ...(options.logisticsWarnings || []),
         basicFields?.subtitle.status === 'unavailable' ? '当前发布页未提供副标题输入项，副标题保留在本地商品中' : '',

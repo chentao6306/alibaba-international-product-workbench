@@ -128,11 +128,27 @@ test('first bank upload submits the confirmed Chinese tag selection and reuses t
       await route.fulfill({ contentType: 'text/html; charset=utf-8', body });
     });
     const page = await context.newPage();
-    const first = await prepareBankVideo(page, file, directory, 'https://hz-productposting.alibaba.com/product/videobank/popSelect.htm');
+    await page.setContent('<div id="imageMedia"></div>');
+    await page.evaluate(() => {
+      document.querySelector('#imageMedia').__reactFiberTest = { memoizedProps: { id: 'imageMedia', value: [],
+        mediaConfig: { video: { visible: false, url: 'https://hz-productposting.alibaba.com/product/videobank/popSelect.htm' } } } };
+    });
+    assert.equal((await page.evaluate(readPostingVideoState)).available, false);
+    const uploaded = await SellerPublisher.prototype.uploadMainVideo.call({ dataDir: directory, downloadProductVideo: async () => file },
+      page, { videoUrl: 'https://example.test/fixture-source.mp4' });
+    const first = uploaded.bank;
     assert.equal(first.id, '6001'); assert.equal(submitted, 1);
     assert.equal((await prepareBankVideo(page, file, directory, 'https://hz-productposting.alibaba.com/product/videobank/popSelect.htm')).id, first.id);
     assert.equal(submitted, 1, 'An existing matching upload must not submit again');
   } finally { await browser.close(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('a hidden inline video control without an advertised bank still stops before downloading or submitting', async () => {
+  let downloads = 0;
+  await assert.rejects(SellerPublisher.prototype.uploadMainVideo.call({ downloadProductVideo: async () => { downloads++; } },
+    { evaluate: async () => ({ available: false, config: { visible: false } }) },
+    { videoUrl: 'https://example.test/source.mp4' }), { code: 'PUBLISH_VIDEO_NOT_AVAILABLE' });
+  assert.equal(downloads, 0);
 });
 
 test('video association accepts link and button actions, preserves duration rejection and verifies exact idempotent readback', { skip: !findChromium() }, async t => {

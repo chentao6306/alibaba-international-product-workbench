@@ -43,6 +43,8 @@ available.push('custom-attribute-capacity', 'spec-token-commit', 'delivery-sheet
 available.push('attribute-table-layout', 'category-field-visibility');
 available.push('lighting-attributes', 'lighting-weight');
 available.push('description-mode');
+available.push('description-compatibility');
+available.push('image-upload-alpha', 'image-download-retry', 'publish-media-integrity');
 available.push('posting-navigation');
 available.push('authorization-task-pause', 'collection-stall-api');
 available.push('reference-scale', 'reference-workflow', 'spec-image-dimension', 'diagnostics', 'local-api');
@@ -51,6 +53,7 @@ available.push('faq-control-recovery');
 available.push('sku-dimensions');
 available.push('ai-service-availability', 'structured-upload-entry');
 available.push('publish-late-receipt');
+available.push('custom-attribute-name', 'reference-responsive', 'local-state-recovery', 'local-service-idle');
 const requested = process.argv.slice(3);
 assert.ok(requested.every(name => available.includes(name)), 'Unknown package regression selection');
 const selected = requested.length ? requested : available;

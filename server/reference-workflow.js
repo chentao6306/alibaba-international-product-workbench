@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { setImmediate as yieldToRequests } from 'node:timers/promises';
 import { applyPublishedProductReference, recordProductMutation, syncProductModel } from './product-model.js';
 import { createPublishedReferenceTemplate, createRequiredFieldRepair, requiredAttributeKey } from './publish-reference.js';
 import { productCategory } from './category-routing.js';
@@ -86,7 +87,7 @@ export function buildReferencePatch(target, template, options = {}) {
   return patch;
 }
 
-function prepareReferenceReview(state, request) {
+function* prepareReferenceReview(state, request) {
   const ids = [...new Set(Array.isArray(request.ids) ? request.ids : [])];
   if (!ids.length) fail('请选择需要引用的商品');
   const candidate = state.products.find(item => item.id === request.referenceId && publishedReference(item))
@@ -104,9 +105,12 @@ function prepareReferenceReview(state, request) {
   // Never stringify the whole selection: descriptions, captures and history
   // can exceed V8's single-string limit even when the machine has free RAM.
   // Bind every selected product, including off-page changes, in bounded units.
-  const storedHashes = storedProducts.map(product => hash(product));
+  const storedHashes = [];
+  for (const product of storedProducts) { storedHashes.push(hash(product)); yield; }
+  const productHashes = products === storedProducts ? storedHashes : [];
+  if (products !== storedProducts) for (const product of products) { productHashes.push(hash(product)); yield; }
   const token = hash({ schema: 2, ids, options, reference: hash(reference.template), storedProducts: storedHashes,
-    products: products === storedProducts ? storedHashes : products.map(product => hash(product)) });
+    products: productHashes });
   return { ids, products, reference, options, token };
 }
 
@@ -120,8 +124,8 @@ function referenceReviewItem(product, reference, options) {
     skipped: blocked ? '商品已发布或就是引用商品' : !changes.length ? '没有需要修改的字段' : '', patch };
 }
 
-export function previewProductReference(state, request) {
-  const { products, reference, options, token } = prepareReferenceReview(state, request);
+function* previewReferenceSteps(state, request) {
+  const { products, reference, options, token } = yield* prepareReferenceReview(state, request);
   const pageSize = Math.min(50, Math.max(1, Math.floor(Number(request.pageSize) || 30)));
   const page = Math.min(Math.ceil(products.length / pageSize), Math.max(1, Math.floor(Number(request.page) || 1)));
   const start = (page - 1) * pageSize;
@@ -131,13 +135,14 @@ export function previewProductReference(state, request) {
     const item = referenceReviewItem(products[index], reference, options);
     if (!item.skipped) totalChanged++;
     if (index >= start && index < start + pageSize) items.push(item);
+    yield;
   }
   return { referenceId: reference.id, referenceTitle: reference.title, token, items,
     page, pageSize, total: products.length, totalChanged };
 }
 
-export function applyReferencePreview(state, request) {
-  const { products, reference, options, token } = prepareReferenceReview(state, request);
+function* applyReferenceSteps(state, request) {
+  const { products, reference, options, token } = yield* prepareReferenceReview(state, request);
   if (!request.previewToken || request.previewToken !== token) fail('商品或引用内容已变化，请重新预览后保存', 409);
   const changed = [];
   const byId = new Map(state.products.map(product => [product.id, product]));
@@ -155,9 +160,35 @@ export function applyReferencePreview(state, request) {
     attachCategoryRequirements(product, state.postingSchemas);
     syncProductModel(product);
     changed.push({ id: product.id, title: product.title, fields: recovery.fields, categoryId: product.categoryId });
+    yield;
   }
   return { referenceId: reference.id, referenceTitle: reference.title, changed };
 }
+
+function completeReferenceSteps(steps) {
+  let step;
+  do { step = steps.next(); } while (!step.done);
+  return step.value;
+}
+
+async function completeReferenceStepsAsync(steps) {
+  let resumedAt = performance.now();
+  for (;;) {
+    const step = steps.next();
+    if (step.done) return step.value;
+    if (performance.now() - resumedAt >= 8) {
+      await yieldToRequests();
+      resumedAt = performance.now();
+    }
+  }
+}
+
+export const previewProductReference = (state, request) => completeReferenceSteps(previewReferenceSteps(state, request));
+export const applyReferencePreview = (state, request) => completeReferenceSteps(applyReferenceSteps(state, request));
+// HTTP callers yield between products. Applying must use detached products in
+// an optimistic store transaction, never mutate a live shared snapshot.
+export const previewProductReferenceAsync = (state, request) => completeReferenceStepsAsync(previewReferenceSteps(state, request));
+export const applyReferencePreviewAsync = (state, request) => completeReferenceStepsAsync(applyReferenceSteps(state, request));
 
 export function failedPublishProducts(products) {
   return products.filter((product) => product.status === 'publish_failed'

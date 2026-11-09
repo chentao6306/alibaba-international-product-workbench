@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright-core';
 import { findChromium } from '../server/browser-runtime.js';
-import { sourceDescriptionFormat, ensureSourceDescriptionMode, requireSourceDescriptionMode } from '../server/description-mode.js';
+import { sourceDescriptionFormat, ensureSourceDescriptionMode, requireSourceDescriptionMode, descriptionCompatibility } from '../server/description-mode.js';
 import { descriptionSourceHash } from '../server/description-structure.js';
 import { SellerPublisher } from '../server/publisher.js';
 
@@ -49,7 +49,7 @@ test('returns an old source to the legacy editor once, confirms the switch and p
   } finally { await browser.close(); }
 });
 
-test('keeps new source modules native and rejects unavailable or uncommitted format changes without editing the product', { skip: !findChromium() }, async () => {
+test('prefers native modules and uses legacy compatibility only for an unavailable structured entrance', { skip: !findChromium() }, async () => {
   const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
   try {
     const page = await browser.newPage();
@@ -60,8 +60,12 @@ test('keeps new source modules native and rejects unavailable or uncommitted for
     await assert.rejects(ensureSourceDescriptionMode(page, oldProduct, { timeoutMs: 200 }), error => error.diagnostics.stage === 'switch-not-committed');
     assert.equal(await page.locator('#textDesc').innerText(), 'Saved native content');
     await page.setContent('<div id="struct-superText">Old editor</div>');
-    await assert.rejects(ensureSourceDescriptionMode(page, newProduct, { timeoutMs: 200 }), error => error.diagnostics.stage === 'switch-entry');
+    assert.equal(await ensureSourceDescriptionMode(page, newProduct, { timeoutMs: 200 }), 'legacy');
+    assert.equal(descriptionCompatibility(page, newProduct).reason, 'structured-entry-unavailable');
+    await requireSourceDescriptionMode(page, newProduct);
     assert.equal(await page.locator('#struct-superText').innerText(), 'Old editor');
+    // A new form navigation must not reuse the previous form's decision.
+    await page.goto('about:blank#new-form');
     await page.setContent('<div id="struct-superText">Old editor</div><button onclick="document.querySelector(\'#struct-superText\').id=\'detailImage\';this.remove()">使用新版</button>');
     assert.equal(await ensureSourceDescriptionMode(page, newProduct, { timeoutMs: 1000 }), 'structured');
   } finally { await browser.close(); }

@@ -18,6 +18,9 @@ assert.equal(fs.existsSync(reportFile), false, 'Do not repeat draft creation fro
 const load = file => import(pathToFileURL(path.join(codeRoot, file)).href);
 const { JsonStore } = await load('server/store.js');
 const { SellerPublisher, mainImageFormState, captureCategoryAttributes, requireCategoryAttributes } = await load('server/publisher.js');
+const { descriptionCompatibility } = await load('server/description-mode.js');
+const { compatibleDescriptionFingerprint } = await load('server/description-compatibility.js');
+const { waitForDescriptionEditor, revealDescriptionSection } = await load('server/posting-readiness.js');
 const source = JSON.parse(fs.readFileSync(process.env.QA_WORKSPACE_FILE, 'utf8'));
 const ids = process.env.QA_SOURCE_IDS.split(','); assert.ok(ids.length && ids.length <= 10);
 const originals = ids.map(id => { const product = source.products.find(item => item.sourceId === id); assert.ok(product); return product; });
@@ -93,8 +96,16 @@ SellerPublisher.prototype.publishProduct = async function(...args) {
           assert.ok(matchesAlibabaSession(await value.context().cookies(), process.env.QA_EXPECTED_ACCOUNT, accountUrl), 'Expected seller account must be imported before navigation');
           if (!watchedPage) { watchedPage = value; value.on('response', onResponse); }
         }
+        if (name === 'fillLegacyDescription' && descriptionCompatibility(params[0], params[1])) {
+          const { body } = await waitForDescriptionEditor(params[0]);
+          row.compatibleDescriptionBeforeSave = await body.innerHTML();
+        }
         return value;
-      } catch (error) { call.errorCode = error.code || error.name; throw error; }
+      } catch (error) {
+        call.errorCode = error.code || error.name;
+        if (error.descriptionComparison) row.descriptionComparison = error.descriptionComparison;
+        throw error;
+      }
       finally { call.durationMs = Math.round(performance.now() - began - call.startMs); save(); }
     };
   }
@@ -130,6 +141,24 @@ SellerPublisher.prototype.publishProduct = async function(...args) {
       row.draftId = savedUrl.searchParams.get('itemId');
       row.savedDraftUrl = savedUrl.href;
       delete row.draftIdentityWarning;
+    }
+    if (process.env.QA_REOPEN_DRAFT === '1') {
+      assert.ok(row.savedDraftUrl, 'A confirmed draft identity is required before readback');
+      await this.page.goto(row.savedDraftUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await this.page.locator('input#productTitle:visible').waitFor({ timeout: 60000 });
+      assert.equal(await this.page.locator('input#productTitle:visible').inputValue(), product.title);
+      await requireCategoryAttributes(this.page, product);
+      row.reopenedAttributes = await captureCategoryAttributes(this.page);
+      row.reopenedMainImages = await mainImageFormState(this.page);
+      assert.equal(row.reopenedMainImages.occupied, product.mainImages.length);
+      if (row.compatibleDescriptionBeforeSave) {
+        await revealDescriptionSection(this.page);
+        const { body } = await waitForDescriptionEditor(this.page);
+        row.compatibleDescriptionAfterReopen = await body.innerHTML();
+        assert.deepEqual(compatibleDescriptionFingerprint(row.compatibleDescriptionAfterReopen),
+          compatibleDescriptionFingerprint(row.compatibleDescriptionBeforeSave), 'Saved compatible description must retain every text, table and image');
+      }
+      row.reopened = true;
     }
     save();
     return row.result;

@@ -29,7 +29,18 @@ const rowSelector = '.item:has(.attr-title input):has(.attr-value input)';
 const failure = (name, reason) => Object.assign(new Error(`自定义属性“${name}”${reason}；已保留商品资料`),
   { code: 'PUBLISH_CUSTOM_ATTRIBUTE_REJECTED', fieldName: name, requiredFields: [name] });
 
+// This source-exposed service label is longer than the custom form's 40-char
+// limit. Drop only the redundant verb in this exact known label, retaining
+// both services and the unchanged source value. Never truncate arbitrary
+// labels or units. postingAttributes retains sourceName for transfer receipts
+// and rejects collisions before the form is touched.
+const COMPACT_CUSTOM_NAMES = new Map([
+  ['provide mould making and sample making service', 'Mould making and sample making service'],
+]);
+
 export function customAttributePostingName(name) {
+  const compact = COMPACT_CUSTOM_NAMES.get(keyOf(name));
+  if (compact) return compact;
   if (!/[^\x00-\x7f]/.test(name)) return name;
   const aliases = REQUIRED_ATTRIBUTE_ALIASES.find(group => group.some(alias => keyOf(alias) === keyOf(name)));
   // Only known aliases are translated. Retain explicit unit suffixes such as

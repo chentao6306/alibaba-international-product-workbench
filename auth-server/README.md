@@ -1,6 +1,6 @@
-# 授权服务器 · 1.4.98 源码交接
+# 授权服务器 · 1.4.99 源码交接
 
-整理日期：2026-11-07，源码分支 `codex/1.4.98`。这是独立运行的 Linux/Express/PostgreSQL 服务，完整源码在本目录，依赖使用根目录 `package.json` 和 `package-lock.json`。`index.js` 是生产入口；`dev.js` 只用于本机 JSON 预览，不能用于正式部署。客户端候选版本为 1.4.98，健康接口保留的独立服务标识为 1.4.53，两者不能混作同一版本号。
+整理日期：2026-11-09，源码分支 `codex/1.4.99`。这是独立运行的 Linux/Express/PostgreSQL 服务，完整源码在本目录，依赖使用根目录 `package.json` 和 `package-lock.json`。`index.js` 是生产入口；`dev.js` 只用于本机 JSON 预览，不能用于正式部署。客户端候选版本为 1.4.99，健康接口保留的独立服务标识为 1.4.53，两者不能混作同一版本号。
 
 包含账号授权、管理员账号、批量续期/减期/停用、图文公告、签名更新包和客户诊断报告。后台代码提交不会自动部署服务或发布客户端。生产数据库、环境文件、私有管理员入口和存储内容不在源码中。
 
@@ -54,7 +54,7 @@ Nginx 为 `/api/admin/announcement-images` 单独配置 `client_max_body_size 8m
 sudo apt-get update
 sudo apt-get install -y git curl ca-certificates xz-utils postgresql postgresql-client nginx
 sudo useradd --system --home /opt/kua-yipu-auth --shell /usr/sbin/nologin kua-yipu
-sudo git clone --branch codex/1.4.98 --single-branch git@github.com:chentao6306/alibaba-international-product-workbench.git /opt/kua-yipu-auth
+sudo git clone --branch codex/1.4.99 --single-branch git@github.com:chentao6306/alibaba-international-product-workbench.git /opt/kua-yipu-auth
 cd /opt/kua-yipu-auth
 sudo bash auth-server/deploy/prepare-runtime.sh
 sudo env PATH=/opt/kua-yipu-runtime/node-v22.23.2-linux-x64/bin:$PATH npm ci --omit=dev
@@ -144,14 +144,14 @@ sudo pg_restore --list /var/backups/kua-yipu/database.dump
 从仓库根目录构建，使用根目录锁文件：
 
 ```bash
-docker build -f auth-server/Dockerfile -t kua-yipu-auth:1.4.98 .
+docker build -f auth-server/Dockerfile -t kua-yipu-auth:1.4.99 .
 docker run -d --name kua-yipu-auth --restart unless-stopped \
   --env-file /private/auth.env -e BIND_HOST=0.0.0.0 \
   -e KUA_YIPU_UPDATE_DIR=/var/lib/kua-yipu/updates \
   -e KUA_YIPU_ANNOUNCEMENT_DIR=/var/lib/kua-yipu/announcement-images \
   -e KUA_YIPU_DIAGNOSTIC_DIR=/var/lib/kua-yipu/diagnostics \
   -v /srv/kua-yipu:/var/lib/kua-yipu \
-  -p 127.0.0.1:8790:8790 kua-yipu-auth:1.4.98
+  -p 127.0.0.1:8790:8790 kua-yipu-auth:1.4.99
 ```
 
 容器内 `BIND_HOST=0.0.0.0`；数据库地址使用容器可达地址，不是容器自身 `127.0.0.1`。发布到宿主机端口仅绑定回环，Nginx 再代理 HTTPS。先准备宿主持久目录及权限，单独执行结构迁移和管理员初始化，镜像不会自动创建数据库。容器更换时保留数据卷，不将数据库备份或真实环境文件放进构建上下文。

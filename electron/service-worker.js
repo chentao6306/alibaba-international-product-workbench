@@ -20,7 +20,14 @@ const pending = new Map();
 function bridge(method, args = [], extra = {}) {
   const id = ++sequence;
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject, onProgress: extra.onProgress });
+    const timer = extra.timeoutMs && setTimeout(() => {
+      pending.delete(id);
+      reject(Object.assign(new Error('桌面状态暂未响应，正在重新读取；已保存进度保留，请勿重复提交'), {
+        code: 'LOCAL_SERVICE_DESKTOP_TIMEOUT', status: 503,
+      }));
+    }, extra.timeoutMs);
+    pending.set(id, { resolve: value => { clearTimeout(timer); resolve(value); },
+      reject: error => { clearTimeout(timer); reject(error); }, onProgress: extra.onProgress });
     parentPort.postMessage({ type: 'bridge', id, method, args, ...(extra.cancelled ? { cancelled: extra.cancelled } : {}) });
   });
 }
@@ -48,6 +55,11 @@ globalThis.__KUA_YIPU_SECURE_STORAGE = {
   decrypt: (value) => syncBridge('secure.decrypt', [value]),
 };
 globalThis.__KUA_YIPU_AUTHORIZATION = {
+  check: async () => {
+    const state = await bridge('authorization', [], { timeoutMs: 2000 });
+    process.env.KUA_YIPU_ACCOUNT = state.account || 'local';
+    return state;
+  },
   valid: () => {
     const state = syncBridge('authorization');
     process.env.KUA_YIPU_ACCOUNT = state.account || 'local';
@@ -59,6 +71,7 @@ globalThis.__KUA_YIPU_SELLER_BRIDGE = Object.fromEntries(
   ['open', 'openSource', 'sync', 'bind', 'captureReference'].map((name) => [name, (...args) => bridge(`seller.${name}`, args)])
 );
 globalThis.__KUA_YIPU_SELLER_BRIDGE.status = () => syncBridge('seller.status');
+globalThis.__KUA_YIPU_SELLER_BRIDGE.readStatus = () => bridge('seller.status', [], { timeoutMs: 2000 });
 globalThis.__KUA_YIPU_SELLER_BRIDGE.humanVerification = async (url, options = {}) => {
   const cancelled = new Int32Array(new SharedArrayBuffer(4));
   const update = () => Atomics.store(cancelled, 0, options.shouldStop?.() ? 1 : 0);

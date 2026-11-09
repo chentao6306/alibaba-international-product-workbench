@@ -1,6 +1,13 @@
 import { currentDescriptionStructure, extractDescriptionStructure } from './description-structure.js';
 import { revealDescriptionSection } from './posting-readiness.js';
 import { clickPostingControl } from './posting-interaction.js';
+import { descriptionCompatibilityKey } from './description-compatibility.js';
+
+const compatibility = new WeakMap();
+export function descriptionCompatibility(page, product) {
+  const selected = compatibility.get(page);
+  return selected?.url === page.url() && selected.key === descriptionCompatibilityKey(product) ? selected : null;
+}
 
 const legacyButton = /^(?:返回老版|返回旧版|Switch to (?:the )?(?:old|classic|legacy) (?:version|editor)|Back to (?:the )?(?:old|classic|legacy) (?:version|editor))$/i;
 const structuredButton = /^(?:使用新版|切换新版|切换到新版|体验新版|试用新版|升级新版|Switch to (?:the )?(?:new|structured) (?:version|editor))$/i;
@@ -31,18 +38,33 @@ function mismatch(format, stage) {
   });
 }
 
-// Select by source format before filling anything. A newer default form is
-// not a reason to convert an old table/image description into native modules.
+// Prefer the source format. Only an unavailable native entrance can select
+// the existing legacy editor; a rejected/ambiguous switch is never bypassed.
 export async function ensureSourceDescriptionMode(page, product, { timeoutMs = 12000, onProgress = () => {}, beforeInteraction = async () => {} } = {}) {
   const format = sourceDescriptionFormat(product);
   if (format === 'structured' && !currentDescriptionStructure(product)) throw mismatch(format, 'source-modules-unavailable');
   await revealDescriptionSection(page);
   const initial = await postingDescriptionMode(page);
-  if (initial === format || (initial === 'unknown' && format === 'legacy')) return format;
+  if (initial === format || (initial === 'unknown' && format === 'legacy')) {
+    compatibility.delete(page);
+    return format;
+  }
+  if (initial === 'legacy' && descriptionCompatibility(page, product)) return 'legacy';
   onProgress(`按原商品使用${format === 'legacy' ? '旧版图文' : '新版结构化'}详情`);
   const button = page.getByRole('button', { name: format === 'legacy' ? legacyButton : structuredButton }).filter({ visible: true });
   try { await button.first().waitFor({ state: 'visible', timeout: timeoutMs }); }
-  catch (error) { if (page.isClosed() || !/Timeout/i.test(error.message)) throw error; throw mismatch(format, 'switch-entry'); }
+  catch (error) {
+    if (page.isClosed() || !/Timeout/i.test(error.message)) throw error;
+    if (format === 'structured' && await postingDescriptionMode(page) === 'legacy'
+      && await page.locator('#struct-superText, #super-text-container, #productDescType, iframe[id$="_ifr"]').filter({ visible: true }).count()) {
+      const warning = '当前账号未开放新版详情入口，已兼容使用普通图文编辑器；正文、表格和图片仍逐项核验，视频仍单独上传关联';
+      compatibility.set(page, { url: page.url(), key: descriptionCompatibilityKey(product),
+        sourceFormat: format, targetFormat: 'legacy', reason: 'structured-entry-unavailable', warning });
+      onProgress(warning);
+      return 'legacy';
+    }
+    throw mismatch(format, 'switch-entry');
+  }
   if (await button.count() !== 1) throw mismatch(format, 'ambiguous-switch-entry');
   await beforeInteraction();
   await clickPostingControl(page, button);
@@ -60,7 +82,7 @@ export async function ensureSourceDescriptionMode(page, product, { timeoutMs = 1
 }
 
 export async function requireSourceDescriptionMode(page, product) {
-  const expected = sourceDescriptionFormat(product);
+  const expected = descriptionCompatibility(page, product)?.targetFormat || sourceDescriptionFormat(product);
   const actual = await postingDescriptionMode(page);
   if (actual !== expected && !(expected === 'legacy' && actual === 'unknown')) throw mismatch(expected, 'before-submit');
 }

@@ -15,6 +15,7 @@ import { usesSkuPricing, resolveReferencedSkuRows, requireSkuMinimumOrder, SKU_P
 import { revealDescriptionSection, waitForDescriptionEditor } from '../server/posting-readiness.js';
 import { currentDescriptionStructure } from '../server/description-structure.js';
 import { descriptionFingerprint } from '../server/structured-description.js';
+import { compatibleLegacyDescriptionHtml, compatibleDescriptionFingerprint } from '../server/description-compatibility.js';
 import { compileNativeDescription, nativeDescriptionSchemas, readNativeDescriptionFields,
   requireNativeDescriptionFields, requireNativeDescriptionAccepted } from '../server/native-description-fields.js';
 import { prepareStructuredDescriptionImages } from '../server/structured-description-images.js';
@@ -151,15 +152,23 @@ async function compareImage(page, sourceUrl, savedUrl, name, native) {
   let difference = 0;
   for (let index = 0; index < a.length; index++) difference += Math.abs(a[index] - b[index]);
   const meanAbsoluteDifference = difference / a.length;
+  if (meanAbsoluteDifference >= 8) {
+    fs.writeFileSync(path.join(root, `${name}-source-image`), expected);
+    fs.writeFileSync(path.join(root, `${name}-saved-image`), actual);
+    fs.writeFileSync(path.join(root, `${name}-image-difference.json`), JSON.stringify({
+      sourceUrl, savedUrl, before, after, meanAbsoluteDifference,
+    }, null, 2));
+  }
   assert.ok(meanAbsoluteDifference < 8, `${name}: saved image differs from source`);
   return { name, width: after.width, height: after.height, bytes: actual.length, meanAbsoluteDifference };
 }
 
-async function checkDescription(page, product) {
+async function checkDescription(page, product, compatibility) {
   await revealDescriptionSection(page);
   const structure = currentDescriptionStructure(product);
-  const result = { native: Boolean(structure), imageChecks: [] };
-  if (structure) {
+  const converted = compatibility?.sourceFormat === 'structured' && compatibility.targetFormat === 'legacy';
+  const result = { native: Boolean(structure) && !converted, compatibility, imageChecks: [] };
+  if (structure && !converted) {
     await page.locator('#detailImage:visible').waitFor({ timeout: 30000 });
     result.mode = await page.evaluate(() => window.GlobalStore?.engine?.getModels()?.formValues?.productDescType?.value);
     assert.equal(result.mode, 4, 'Native source details must remain native in the draft');
@@ -191,7 +200,7 @@ async function checkDescription(page, product) {
     const expectedUrls = distinctAlibabaImageUrls(product.detailImages || []);
     // The publisher already replaces source images with indexed slots.
     // Running that transform twice appends a second set of unused images.
-    const expectedHtml = buildLegacyDescriptionHtml(product);
+    const expectedHtml = converted ? compatibleLegacyDescriptionHtml(product, buildLegacyDescriptionHtml(product)) : buildLegacyDescriptionHtml(product);
     const expected = load(expectedHtml, null, false), saved = load(html, null, false);
     const actualImages = saved('img[src]').toArray().map(node => saved(node).attr('src'));
     const slots = expected('[data-workbench-source-image]').toArray();
@@ -203,7 +212,8 @@ async function checkDescription(page, product) {
     }
     fs.writeFileSync(path.join(root, `${product.sourceId}-expected-description.html`), expected.root().html());
     fs.writeFileSync(path.join(root, `${product.sourceId}-saved-description.html`), html);
-    assert.deepEqual(renderedDescriptionFingerprint(html), renderedDescriptionFingerprint(expected.root().html()), 'Draft text, tables, links and image order must survive a fresh load');
+    const fingerprint = converted ? compatibleDescriptionFingerprint : renderedDescriptionFingerprint;
+    assert.deepEqual(fingerprint(html), fingerprint(expected.root().html()), 'Draft text, tables, links and image order must survive a fresh load');
     result.imageCount = actualImages.length;
     result.textAndTablesVerified = true;
   }
@@ -263,7 +273,7 @@ try {
         assert.deepEqual(row.quantities, expected.map(tier => Number(tier.minQuantity)));
       }
       row.skus = await checkSkuRows(page, product);
-      row.description = await checkDescription(page, product);
+      row.description = await checkDescription(page, product, evidence.result.descriptionCompatibility);
       assert.deepEqual(report.blockedWrites, [], 'Readback unexpectedly attempted a save or submission');
       row.videoUploadEnabled = evidence.result.videoUploadEnabled;
       row.unverified = ['video playback and association', 'public listing visibility', 'main image pixels', 'logistics and optional services'];

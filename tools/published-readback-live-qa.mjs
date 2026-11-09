@@ -2,7 +2,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
-import { SellerPublisher, mainImageFormState, attributeFieldMatchesValue, distinctAlibabaImageUrls, requireCategoryAttributes } from '../server/publisher.js';
+import { load } from 'cheerio';
+import { SellerPublisher, mainImageFormState, attributeFieldMatchesValue, distinctAlibabaImageUrls, requireCategoryAttributes, buildLegacyDescriptionHtml, preparePublishProduct } from '../server/publisher.js';
+import { compatibleLegacyDescriptionHtml, compatibleDescriptionFingerprint } from '../server/description-compatibility.js';
 import { readPrivateSession, writePrivateSession } from '../server/private-session-storage.js';
 import { readPostingAttributeSchema } from '../server/category-attributes.js';
 import { revealDescriptionSection, waitForDescriptionEditor } from '../server/posting-readiness.js';
@@ -26,8 +28,9 @@ assert.ok(receipt, 'A confirmed publication receipt is required');
 const id = new URL(receipt.result.url).searchParams.get('primaryId');
 assert.match(id, /^\d+$/);
 const state = JSON.parse(fs.readFileSync(process.env.QA_WORKSPACE_FILE || path.join(directory, 'workspace/workspace.json')));
-const product = state.products.find((item) => item.sourceId === receipt.sourceId);
-assert.ok(product);
+const savedProduct = state.products.find((item) => item.sourceId === receipt.sourceId);
+assert.ok(savedProduct);
+const product = preparePublishProduct(savedProduct, { uploadProductVideos: receipt.result.videoUploadEnabled !== false });
 let isolatedSession;
 if (process.env.QA_DESKTOP_USER_DATA_DIR) {
   isolatedSession = path.join(directory, `readback-${receipt.sourceId}-cookies.json`);
@@ -164,7 +167,8 @@ try {
   }
   await revealDescriptionSection(page);
   const structure = currentDescriptionStructure(product);
-  if (structure) {
+  const converted = receipt.result.descriptionCompatibility?.targetFormat === 'legacy';
+  if (structure && !converted) {
     await page.locator('#detailImage').waitFor({ state: 'visible', timeout: 30000 });
     const mode = await page.evaluate(() => window.GlobalStore?.engine?.getModels()?.formValues?.productDescType?.value);
     assert.equal(mode, 4, 'Published native description must not fall back to a rich-text editor');
@@ -228,6 +232,18 @@ try {
   } else {
     const { body } = await waitForDescriptionEditor(page, { switchMode: () => revealDescriptionSection(page) });
     result.detailImages = await body.locator('img[src]').evaluateAll(nodes => nodes.map(node => node.src));
+    if (converted) {
+      const html = await body.innerHTML();
+      const expected = load(compatibleLegacyDescriptionHtml(product, buildLegacyDescriptionHtml(product)), null, false);
+      const saved = load(html, null, false);
+      const urls = saved('img').toArray().map(node => saved(node).attr('src'));
+      const slots = expected('[data-workbench-source-image]').toArray();
+      assert.equal(urls.length, slots.length);
+      slots.forEach((node, index) => expected(node).replaceWith(expected('<img>').attr('src', urls[index])));
+      assert.deepEqual(compatibleDescriptionFingerprint(html), compatibleDescriptionFingerprint(expected.root().html()));
+      result.compatibleDescription = { textAndTablesVerified: true, imageCount: urls.length,
+        sourceFormat: 'structured', targetFormat: 'legacy' };
+    }
   }
   result.expectedDetailImages = distinctAlibabaImageUrls(product.detailImages || []).length;
   assert.equal(result.detailImages.length, result.expectedDetailImages, 'Every uploaded detail image must survive a fresh page load');

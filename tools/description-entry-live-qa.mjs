@@ -47,6 +47,10 @@ try {
     ['new-phone', 'https://post.alibaba.com/product/publish.htm?catId=201905202&language=zh_CN'],
     ['new-parts', 'https://post.alibaba.com/product/publish.htm?catId=1355&language=zh_CN'],
   ];
+  if (process.env.QA_CATEGORY_ID) {
+    assert.match(process.env.QA_CATEGORY_ID, /^\d+$/);
+    cases.splice(0, cases.length, ['selected-category', `https://post.alibaba.com/product/publish.htm?catId=${process.env.QA_CATEGORY_ID}&language=zh_CN`]);
+  }
   for (const [name, url] of cases.filter(([name]) => !process.env.QA_EDITOR_CASE || name === process.env.QA_EDITOR_CASE)) {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.locator('input#productTitle').waitFor({ timeout: 45000 });
