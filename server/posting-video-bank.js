@@ -188,20 +188,33 @@ export async function bankVideoAssociation(page, video, productId, { signal } = 
     }, 15000);
     const frame = await iframe.elementHandle().then(node => node.contentFrame());
     if (!frame) throw failure('商品选择器未加载');
-    const advanced = frame.getByRole('button', { name: /^(?:Advanced Search|高级搜索)$/i });
-    await waitUntil(bank, async () => await frame.locator('input#productId').isVisible() || await advanced.isVisible(), 30000);
-    if (!await frame.locator('input#productId').isVisible()) {
-      try { await clickBankControl(bank, advanced); }
-      catch (error) { if (!await frame.locator('input#productId').isVisible()) throw error; }
+    const card = frame.locator(`a[href*="_${productId}.html"]`).locator('xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " popup-item ") or self::td][1]');
+    const exactCardVisible = async () => {
+      if (await card.count() > 1) throw failure('商品选择器无法唯一确认目标商品');
+      return card.isVisible();
+    };
+    // The picker can already display this exact listing while its advanced
+    // search controls are hidden or absent. Selection still requires the
+    // matching numeric checkbox below; never use the first/default product.
+    if (!await exactCardVisible()) {
+      const advanced = frame.getByRole('button', { name: /^(?:Advanced Search|高级搜索)$/i });
+      await waitUntil(bank, async () => await exactCardVisible()
+        || await frame.locator('input#productId').isVisible() || await advanced.isVisible(), 30000);
+      if (!await exactCardVisible()) {
+        if (!await frame.locator('input#productId').isVisible()) {
+          try { await clickBankControl(bank, advanced); }
+          catch (error) { if (!await frame.locator('input#productId').isVisible()) throw error; }
+        }
+        await frame.locator('input#productId').waitFor({ timeout: 20000 });
+        await frame.locator('input#productId').fill(String(productId));
+        const videoFilter = frame.locator('#isVideo').locator('xpath=ancestor::span[contains(@class,"next-select-single")][1]');
+        if (await videoFilter.count() && !/^(?:All|全部)$/.test((await videoFilter.locator('em').innerText()).trim())) {
+          await clickBankControl(bank, videoFilter);
+          await clickBankControl(bank, frame.locator('[role="option"]:visible, .next-menu-item:visible').filter({ hasText: /^(?:All|全部)$/ }));
+        }
+        await clickBankControl(bank, frame.locator('button').filter({ hasText: /^(?:Search|搜索)$/i }));
+      }
     }
-    await frame.locator('input#productId').waitFor({ timeout: 20000 });
-    await frame.locator('input#productId').fill(String(productId));
-    const videoFilter = frame.locator('#isVideo').locator('xpath=ancestor::span[contains(@class,"next-select-single")][1]');
-    if (await videoFilter.count() && !/^(?:All|全部)$/.test((await videoFilter.locator('em').innerText()).trim())) {
-      await clickBankControl(bank, videoFilter);
-      await clickBankControl(bank, frame.locator('[role="option"]:visible, .next-menu-item:visible').filter({ hasText: /^(?:All|全部)$/ }));
-    }
-    await clickBankControl(bank, frame.locator('button').filter({ hasText: /^(?:Search|搜索)$/i }));
     const input = frame.locator(`input[type="checkbox"][value="${productId}"]`);
     // Some bank pickers mount the checkbox only while the product image is
     // hovered. Locate the card through its exact public product link first;
@@ -209,7 +222,6 @@ export async function bankVideoAssociation(page, video, productId, { signal } = 
     if (!await input.count()) {
       // The current picker uses a div grid; earlier layouts used table cells.
       // Bind either layout to the exact product link, never the first image.
-      const card = frame.locator(`a[href*="_${productId}.html"]`).locator('xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " popup-item ") or self::td][1]');
       await card.waitFor({ state: 'visible', timeout: 20000 });
       if (await card.count() !== 1) throw failure('商品选择器无法唯一确认目标商品');
       const image = card.locator('.popup-item-img-wrapper');

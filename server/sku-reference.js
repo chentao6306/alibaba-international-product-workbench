@@ -5,7 +5,23 @@ import { clickPostingControl } from './posting-interaction.js';
 const valueKey = (value) => String(value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
 const nameKey = (name) => /^(?:socket standard|socket type|plug type|output plug|connector type|connector|插座标准|插头类型|输出插头|连接器类型)$/i.test(String(name || '').trim())
   ? requiredAttributeKey('plug type') : requiredAttributeKey(name);
-const skuKey = (attributes) => JSON.stringify(Object.entries(attributes || {}).map(([name, value]) => [nameKey(name), valueKey(value)]).sort());
+const dimensionKey = name => String(name ?? '').normalize('NFKC').trim().toLowerCase().replace(/\s+/g, ' ');
+const skuKey = (attributes) => JSON.stringify(Object.entries(attributes || {}).map(([name, value]) => [dimensionKey(name), valueKey(value)]).sort());
+
+// Aliases help locate a translated field; they do not prove that two source
+// properties are the same dimension. Exact names must win before alias lookup.
+export function findSkuAttributeEntry(attributes, name) {
+  const entries = Object.entries(attributes || {});
+  const exact = entries.filter(([key]) => key === name);
+  if (exact.length === 1) return exact[0];
+  const normalized = entries.filter(([key]) => dimensionKey(key) === dimensionKey(name));
+  if (normalized.length === 1) return normalized[0];
+  const aliases = entries.filter(([key]) => nameKey(key) === nameKey(name));
+  if (normalized.length > 1 || aliases.length > 1) throw Object.assign(new Error(`规格“${name}”存在多个同义来源字段，无法唯一核对组合；未写入价格、编码和库存`), {
+    code: 'PUBLISH_SKU_IDENTITY_UNRESOLVED', requiredFields: [name],
+  });
+  return aliases[0];
+}
 
 export function usesSkuPricing(product) {
   const skus = (product.skus || []).filter(sku => sku.enabled !== false);
@@ -174,31 +190,45 @@ export function resolveReferencedSkuRows(product, groups, { appliedGroups = [], 
   const mismatch = () => new Error('商品 SKU 与国际站规格组合不一致，请检查规格选项');
   const total = groups.reduce((count, group) => count * group.options.length, groups.length ? 1 : 0);
   if (!total || total > 5000) throw mismatch();
-  const targetNames = new Set(groups.map((group) => nameKey(group.name)));
+  const targetNames = new Set(groups.map(group => dimensionKey(group.name)));
+  if (targetNames.size !== groups.length) throw mismatch();
+  const targetFor = name => {
+    const exact = groups.filter(group => dimensionKey(group.name) === dimensionKey(name));
+    if (exact.length === 1) return exact[0];
+    const aliases = groups.filter(group => nameKey(group.name) === nameKey(name));
+    if (aliases.length > 1) throw mismatch();
+    return aliases[0];
+  };
   const expected = new Map();
   for (const sku of product.skus) {
-    const attributes = Object.fromEntries(Object.entries(sku.attributes || {}).map(([name, value]) => [nameKey(name), value]));
+    const attributes = {}, consumed = new Set();
+    const assign = (name, value) => {
+      if (Object.hasOwn(attributes, name) && valueKey(normalizeValue(attributes[name])) !== valueKey(normalizeValue(value))) throw mismatch();
+      attributes[name] = value;
+    };
     for (const group of appliedGroups) {
-      const sourceNames = (group.sourceGroups || [group.name]).map(nameKey);
-      if (sourceNames.some((name) => attributes[name] == null)) continue;
+      const sourceEntries = (group.sourceGroups || [group.name]).map(name => findSkuAttributeEntry(sku.attributes, name));
+      if (sourceEntries.some(entry => !entry || entry[1] == null)) continue;
       const rawValue = group.sourceGroups?.length
-        ? sourceNames.map((name) => normalizeValue(attributes[name])).join(' / ')
-        : attributes[sourceNames[0]];
+        ? sourceEntries.map(entry => normalizeValue(entry[1])).join(' / ')
+        : sourceEntries[0][1];
       // The field writer observed this label on the same selected attribute
       // ID. This also covers translations absent from the static alias list.
-      let targetName = nameKey(group.targetName || group.name);
-      if (group.sourceGroups?.length && groups.length === 1) targetName = nameKey(groups[0].name);
-      if (!targetNames.has(targetName)) continue;
+      const target = group.sourceGroups?.length && groups.length === 1 ? groups[0] : targetFor(group.targetName || group.name);
+      if (!target) continue;
       const actualValue = group.appliedValues?.[rawValue] ?? group.appliedValues?.[normalizeValue(rawValue)] ?? rawValue;
-      sourceNames.forEach((name) => delete attributes[name]);
-      attributes[targetName] = actualValue;
+      sourceEntries.forEach(entry => consumed.add(entry[0]));
+      assign(target.name, actualValue);
     }
     // A constant descriptive attribute may be absent from the target matrix.
     // Only omit it when every source SKU agrees; never collapse real variants.
-    for (const name of Object.keys(attributes)) {
-      if (targetNames.has(name)) continue;
-      const values = product.skus.map((item) => Object.entries(item.attributes || {}).find(([key]) => nameKey(key) === name)?.[1]);
-      if (values.every((value) => value != null && valueKey(normalizeValue(value)) === valueKey(normalizeValue(attributes[name])))) delete attributes[name];
+    for (const [name, value] of Object.entries(sku.attributes || {})) {
+      if (consumed.has(name)) continue;
+      const target = targetFor(name);
+      if (target) { assign(target.name, value); continue; }
+      const values = product.skus.map(item => findSkuAttributeEntry(item.attributes, name)?.[1]);
+      if (values.every(item => item != null && valueKey(normalizeValue(item)) === valueKey(normalizeValue(value)))) continue;
+      assign(name, value);
     }
     const key = skuKey(Object.fromEntries(Object.entries(attributes).map(([name, value]) => [name, normalizeValue(value)])));
     if (expected.has(key)) throw new Error('商品 SKU 转换后出现重复规格组合，未写入价格、编码和库存');

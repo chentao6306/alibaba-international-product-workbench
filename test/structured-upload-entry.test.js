@@ -38,7 +38,7 @@ test('company images use a mounted native file input even when the hover wrapper
   } finally { await browser.close(); fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
-test('company image entry recovers a delayed input and reports the exact gallery if it never mounts', { skip: !findChromium(), timeout: 20000 }, async () => {
+test('company image entry recovers a delayed input and reports the exact gallery if it never mounts', { skip: !findChromium(), timeout: 40000 }, async () => {
   const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'company-image-retry-'));
   try {

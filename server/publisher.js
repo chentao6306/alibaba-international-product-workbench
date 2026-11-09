@@ -32,9 +32,10 @@ import { alibabaKeywordText } from './product-keywords.js';
 import { fillCustomAttributes, requireCustomAttributes } from './custom-attributes.js';
 import { isPublicProductAttribute, planPublicAttributeTransfer, requirePublicAttributeValues } from './attribute-transfer.js';
 export { alibabaKeywordText } from './product-keywords.js';
-import { fillReferencedSkuRows, reconcileSkuMinimumOrder, selectSkuPricing, usesSkuPricing } from './sku-reference.js';
+import { fillReferencedSkuRows, findSkuAttributeEntry, reconcileSkuMinimumOrder, selectSkuPricing, usesSkuPricing } from './sku-reference.js';
 import { recoverDuplicateSkuDimensions } from './sku-dimensions.js';
 import { recoverDuplicateSkuOptions } from './sku-options.js';
+import { actionReceipt } from './posting-receipt.js';
 import { fillSalesUnit, requireSalesUnit } from './posting-sales-unit.js';
 import { findNormalDescriptionControl, findPostingTitle, requirePostingPageAvailable, revealDescriptionSection, waitForDescriptionEditor, waitForPostingTitle } from './posting-readiness.js';
 import { readSourceDescriptionFrame, waitForSourceDetailVideos } from './source-description-frame.js';
@@ -314,10 +315,18 @@ export async function gotoWithRetry(page, url, options = {}) {
       lastError = error;
       const message = String(error?.message || '');
       const navigationTimeout = /^page\.goto:\s*Timeout\s+\d+ms\s+exceeded/i.test(message);
+      const navigationInterrupted = /^page\.goto:.*(?:interrupted by another navigation|net::ERR_ABORTED)/i.test(message);
       const transient = /ERR_(?:CONNECTION_(?:CLOSED|RESET|ABORTED|TIMED_OUT)|TIMED_OUT|NETWORK_CHANGED|HTTP2_PROTOCOL_ERROR|SOCKET_NOT_CONNECTED)/i.test(message)
-        || (options.retryTimeout && navigationTimeout);
+        || (options.retryTimeout && navigationTimeout)
+        || (options.retryInterrupted && navigationInterrupted);
       if (options.signal?.aborted) throw Object.assign(new Error('已暂停当前商品操作'), { code: 'PUBLISH_PAUSED', cause: error });
       if (!transient || attempt === attempts - 1 || page.isClosed()) {
+        if (options.retryInterrupted && navigationInterrupted && !page.isClosed()) {
+          throw Object.assign(new Error('国际站打开新商品页面时发生跳转冲突，尚未填写或提交本商品；请重试该商品'), {
+            code: 'PUBLISH_NAVIGATION_INTERRUPTED', cause: error,
+            diagnostics: { navigationError: message, targetUrl: url, attempts: attempt + 1 },
+          });
+        }
         if (options.retryTimeout && navigationTimeout && !page.isClosed()) {
           throw Object.assign(new Error('国际站发布页加载超时，尚未填写或提交商品；请检查网络后重试'), {
             code: 'PUBLISH_NAVIGATION_TIMEOUT', cause: error,
@@ -326,12 +335,24 @@ export async function gotoWithRetry(page, url, options = {}) {
         }
         throw error;
       }
-      options.onRetry?.({ attempt: attempt + 2, attempts, timeout: navigationTimeout });
+      options.onRetry?.({ attempt: attempt + 2, attempts, timeout: navigationTimeout,
+        ...(navigationInterrupted ? { interrupted: true } : {}) });
       const backoff = [2000, 5000, 10000][attempt] || 10000;
       await page.waitForTimeout(backoff);
     }
   }
   throw lastError;
+}
+
+export function requireNewProductPage(url) {
+  const current = new URL(url);
+  // Only used before this attempt starts filling. Later auto-save may assign
+  // an itemId legitimately; an old item's edit page must never be a baseline.
+  if (['itemId', 'productId', 'primaryId'].some(key => current.searchParams.getAll(key).some(value => value.trim() && value !== '0'))) {
+    throw Object.assign(new Error('国际站打开的是已有商品编辑页，已停止填写，避免覆盖已有商品；请重新打开新商品发布页后重试'), {
+      code: 'PUBLISH_EXISTING_PRODUCT_PAGE', diagnostics: { currentUrl: url },
+    });
+  }
 }
 
 function isUsableImageUrl(value) {
@@ -777,6 +798,7 @@ function postingConfirmationError(message, code = 'PUBLISH_CONFIRMATION_PENDING'
 
 export async function waitForActionResult(page, action, mode, originalUrl, { timeoutMs = 15000, busyGraceMs = 45000 } = {}) {
   const responses = [];
+  const receipt = actionReceipt(page, mode === 'submit' ? SUBMIT_SUCCESS_TEXT : DRAFT_SUCCESS_TEXT);
   let actionDispatched = false;
   let qualityConfirmationAttempted = false;
   let qualityConfirmationFeedback = [];
@@ -795,6 +817,7 @@ export async function waitForActionResult(page, action, mode, originalUrl, { tim
     const acceptedLogistics = await capturePostingLogistics(page);
     try {
       await clickPostingControl(page, action, {
+        beforeDispatch: () => receipt.arm(),
         beforeRetry: async () => {
           await requireClearPostingOverlays(page);
           if (mode === 'submit') await requireSpecificationImagesAccepted(page);
@@ -831,7 +854,7 @@ export async function waitForActionResult(page, action, mode, originalUrl, { tim
         if (acknowledged) {
           salesRulesResubmitted = true;
           await requireClearPostingOverlays(page);
-          await clickPostingControl(page, action);
+          await clickPostingControl(page, action, { beforeDispatch: () => receipt.arm() });
           deadline = Date.now() + timeoutMs;
           continue;
         }
@@ -852,7 +875,7 @@ export async function waitForActionResult(page, action, mode, originalUrl, { tim
           // submission. A confirmation is not a successful publication receipt.
           qualityConfirmationAttempted = true;
           qualityConfirmationFeedback = feedback;
-          try { await clickPostingControl(page, qualityNotice.proceed, { timeout: 5000 }); }
+          try { await clickPostingControl(page, qualityNotice.proceed, { timeout: 5000, beforeDispatch: () => receipt.arm() }); }
           catch (error) {
             postingInteractionFailure(error);
             throw postingConfirmationError('国际站质量分检测提示未能确认，请检查发布页面的“继续提交”按钮；已保留当前商品进度');
@@ -870,7 +893,7 @@ export async function waitForActionResult(page, action, mode, originalUrl, { tim
         throw error;
       }
       const result = classifyAlibabaActionResult({ mode, url, originalUrl, feedback, allowPolicyWarningPublish: policyWarningPublishingAllowed() });
-      if (result.succeeded) return { verifiedBy: result.verifiedBy, feedback, responses, requiredAttributes, acceptedLogistics };
+      if (await receipt.accepts(result)) return { verifiedBy: result.verifiedBy, feedback, responses, requiredAttributes, acceptedLogistics };
     }
     const feedback = await visibleFeedback(page);
     requireNoPolicyWarning(feedback);
@@ -892,7 +915,7 @@ export async function waitForActionResult(page, action, mode, originalUrl, { tim
       bodyText,
       allowPolicyWarningPublish: policyWarningPublishingAllowed(),
     });
-    if (finalResult.succeeded) {
+    if (await receipt.accepts(finalResult)) {
       return { verifiedBy: finalResult.verifiedBy, feedback, responses, requiredAttributes, acceptedLogistics };
     }
     let validationFeedback = feedback;
@@ -936,6 +959,7 @@ export async function waitForActionResult(page, action, mode, originalUrl, { tim
     throw error;
   } finally {
     page.off('response', onResponse);
+    await receipt.dispose();
   }
 }
 
@@ -1330,7 +1354,7 @@ export function validateProductData(product, { mode = 'submit' } = {}) {
 // set of values to commit and verify.
 export function preparePublishProduct(product, options = {}) {
   product = recoverDuplicateSkuDimensions(product, { strict: true });
-  product = recoverDuplicateSkuOptions(product, { strict: true });
+  product = recoverDuplicateSkuOptions(product, { strict: true, normalizeValue: englishSpecText });
   // Repair old collected poster rows even when video upload is switched off.
   product = { ...product, detailImages: nativeDescriptionImageUrls(product) };
   product = productForVideoUpload(product, options);
@@ -1837,9 +1861,7 @@ export function buildFlattenedVariantGroup(product, targetId, targetName = 'Spec
   for (const sku of product?.skus || []) {
     const attributes = sku?.attributes || {};
     const values = groups.map((group) => {
-      const expected = requiredAttributeKey(group.name);
-      const entry = Object.entries(attributes)
-        .find(([name]) => requiredAttributeKey(name) === expected);
+      const entry = findSkuAttributeEntry(attributes, group.name);
       return englishSpecText(entry?.[1]);
     });
     if (values.some((value) => !value)) continue;
@@ -4373,8 +4395,8 @@ export function preferredSpecificationImageGroup(product, group) {
   // Prefer the actual IMAGE dimension only when every option-image relation
   // is equivalent; matching image sets alone would swap images between SKUs.
   if (!group || String(group.type || '').toUpperCase() === 'IMAGE' || group.sourceGroups?.length) return null;
-  const sameGroup = (left, right) => (left.id && right.id && String(left.id) === String(right.id))
-    || (left.name && right.name && requiredAttributeKey(left.name) === requiredAttributeKey(right.name));
+  const sameGroup = (left, right) => left.id && right.id ? String(left.id) === String(right.id)
+    : Boolean(left.name && right.name && left.name.normalize('NFKC').trim().toLowerCase() === right.name.normalize('NFKC').trim().toLowerCase());
   const imageFor = (item, value) => item.optionImages?.[value] || item.optionImages?.[englishSpecText(value)];
   const sameImage = (left, right) => Boolean(left && right && distinctAlibabaImageUrls([left, right]).length === 1);
   const groupOptions = [...new Set(group.options || [])];
@@ -4386,8 +4408,8 @@ export function preferredSpecificationImageGroup(product, group) {
     const images = [...groupOptions.map(value => imageFor(group, value)), ...primary.options.map(value => imageFor(primary, value))];
     const skus = product.skus || [];
     if (distinctAlibabaImageUrls(images).length === 1) return skus.every(sku => !sku.image || sameImage(sku.image, images[0]));
-    const optionFor = (sku, item) => Object.entries(sku.attributes || {}).find(([name]) =>
-      name === String(item.id || '') || requiredAttributeKey(name) === requiredAttributeKey(item.name))?.[1];
+    const optionFor = (sku, item) => Object.hasOwn(sku.attributes || {}, String(item.id || ''))
+      ? sku.attributes[String(item.id)] : findSkuAttributeEntry(sku.attributes, item.name)?.[1];
     return skus.length > 0 && skus.every(sku => {
       const image = imageFor(group, optionFor(sku, group));
       return sameImage(image, imageFor(primary, optionFor(sku, primary))) && (!sku.image || sameImage(image, sku.image));
@@ -4403,8 +4425,17 @@ async function uploadPreferredSpecificationImages(page, product, group, groups, 
     if (!await visibleColorSpecRow(page)) return null;
     return enableSpecImageUpload(page, product, primary, downloadImages, onProgress);
   }
-  const target = (groups || []).find(item => String(item.id) === String(primary.id)
-    || requiredAttributeKey(item.name) === requiredAttributeKey(primary.name)) || primary;
+  const byId = (groups || []).filter(item => String(item.id) === String(primary.id));
+  const nameKey = name => String(name || '').normalize('NFKC').trim().toLowerCase().replace(/\s+/g, ' ');
+  // Applied groups retain the source name when their target ID changes.
+  // An alias can identify another source dimension, including this text group.
+  const candidates = byId.length ? byId : (groups || []).filter(item => nameKey(item.name) === nameKey(primary.name));
+  if (candidates.length > 1) return null;
+  const target = candidates[0] || primary;
+  // Delegate only to the actual image dimension, so the recursive uploader
+  // terminates and a rejected match leaves this group's own images available.
+  if (String(target.id) === String(group.id) || String(target.type || '').toUpperCase() !== 'IMAGE'
+    || target.sourceGroups?.length) return null;
   if (!await visibleSaleSpecRow(page, target.id)) return null;
   return enableImageBackedVariantSpecs(page, product, [target], downloadImages, onProgress);
 }
@@ -4979,7 +5010,9 @@ export class SellerPublisher {
   }
 
   clearPublishStop(jobId) {
-    this.publishStops.delete(String(jobId || ''));
+    const key = String(jobId || '');
+    this.publishStops.get(key)?.dispose?.();
+    this.publishStops.delete(key);
   }
 
   async capturePublishPage(jobId, productId) {
@@ -5049,6 +5082,22 @@ export class SellerPublisher {
       }
     }
     throw new Error('卖家浏览器启动失败，请重试');
+  }
+
+  async createProductPage(startUrl, options = {}) {
+    await this.currentSellerPage(startUrl, { ...options, skipNavigation: true, backgroundPublishing: true });
+    const previous = this.publishingPage?.page;
+    // Keep cookies and the browser, but not the previous document's timers,
+    // pending draft redirects or form model. Never reuse a user-opened tab.
+    const page = await browserStep(() => this.context.newPage(), {
+      label: '创建独立商品发布页', timeoutMs: 15000, signal: options.signal,
+      onLateResolve: latePage => latePage?.close(),
+    });
+    this.page = page;
+    if (previous && previous !== page && !previous.isClosed()) {
+      await browserStep(() => previous.close(), { label: '清理上一件商品页面', timeoutMs: 5000 }).catch(() => {});
+    }
+    return page;
   }
 
   async findPostingFormPage(options = {}) {
@@ -7201,7 +7250,7 @@ export class SellerPublisher {
     } catch (error) {
       error.diagnostics = { ...(error.diagnostics || {}), publishStage: lastStage };
       throw error;
-    } finally { await mediaReady; }
+    } finally { this.clearPublishStop(jobId); await mediaReady; }
   }
 
   async publishPreparedProduct(product, publishPageUrl, mode, publishCategory, jobId, reportStage, options) {
@@ -7217,11 +7266,13 @@ export class SellerPublisher {
       connection.abort();
       page?.close().catch(() => {});
     };
-    if (stopKey) this.publishStops.set(stopKey, stop);
+    this.clearPublishStop(stopKey);
+    stop.dispose = () => options.signal?.removeEventListener('abort', stop);
+    this.publishStops.set(stopKey, stop);
     options.signal?.addEventListener('abort', stop, { once: true });
     if (options.signal?.aborted) stop();
     reportStage(resources.constrained ? '连接国际站发布浏览器（已自动降低图片处理并发，延长页面等待）' : '连接国际站发布浏览器');
-    page = await this.currentSellerPage(publishPageUrl, { skipNavigation: true, backgroundPublishing: true, signal: connection.signal, onProgress: reportStage });
+    page = await this.createProductPage(publishPageUrl, { signal: connection.signal, onProgress: reportStage });
     this.publishingPage = { page, jobId: String(jobId || ''), productId: String(product.id || '') };
     if (connection.signal.aborted) {
       page.close().catch(() => {});
@@ -7233,7 +7284,7 @@ export class SellerPublisher {
     // taskbar entry. Progress and platform validation remain in the workbench.
     // Only retry navigation before any product fields or submission are touched.
     // A timeout waiting for DOMContentLoaded is distinct from a rejected field.
-    const publishNavigation = { timeout: resources.navigationTimeoutMs, attempts: 2, retryTimeout: true,
+    const publishNavigation = { timeout: resources.navigationTimeoutMs, attempts: 2, retryTimeout: true, retryInterrupted: true,
       signal: connection.signal,
       onRetry: ({ attempt, attempts }) => reportStage(`发布页连接未完成，正在重试打开（${attempt}/${attempts}，尚未填写或提交）`),
     };
@@ -7261,12 +7312,14 @@ export class SellerPublisher {
     await enterPostingForm(page, publishPageUrl, expectedCategoryId);
     await requirePostingPageAvailable(page);
     await waitForPostingTitle(page, { verify: () => waitForHumanVerification(page), onProgress: reportStage });
+    requireNewProductPage(page.url());
     const initialSchema = postingSchemaWithKnownLabels(product, await page.evaluate(readPostingAttributeSchema));
     product = bindSourceAttributesToPostingSchema(product, initialSchema);
     await ensureSimplifiedChinese(page, {
       onProgress: reportStage, verify: () => waitForHumanVerification(page),
       beforeSwitch: () => requireClearPostingOverlays(page), signal: connection.signal, reloadOnMismatch: true,
     });
+    requireNewProductPage(page.url());
     const actualCategoryId = categoryIdFromUrl(page.url()) || categoryIdFromUrl(publishPageUrl);
     if (expectedCategoryId && actualCategoryId && expectedCategoryId !== actualCategoryId) {
       throw new Error(`国际站实际打开类目 ID ${actualCategoryId}，与商品目标类目 ID ${expectedCategoryId} 不一致，已停止发布`);

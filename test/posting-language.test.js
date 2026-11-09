@@ -251,6 +251,7 @@ test('publishing switches language before writing any product fields or entering
     const product = { title: 'Original product', categoryId: '201346401' };
     const reachedDescription = new Error('Stop before saving any product');
     publisher.currentSellerPage = async () => page;
+    publisher.createProductPage = async () => page;
     publisher.fillLegacyDescription = async (_page, received) => {
       assert.equal(received, product);
       assert.equal(page.url(), postingUrl);

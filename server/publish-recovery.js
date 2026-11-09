@@ -5,7 +5,7 @@ export const MAIN_IMAGE_VALIDATION_TEXT = /(?:商品|产品)\s*图片|主图.*(?
 
 export function publishEnvironmentBlockCode(error) {
   const codes = ['PUBLISH_EDITOR_NOT_READY', 'PUBLISH_FORM_NOT_READY', 'PUBLISH_FIELD_NOT_READY',
-    'PUBLISH_BROWSER_NOT_READY', 'PUBLISH_LANGUAGE_NOT_READY', 'PUBLISH_NAVIGATION_TIMEOUT', 'PUBLISH_ACCOUNT_LIMIT',
+    'PUBLISH_BROWSER_NOT_READY', 'PUBLISH_LANGUAGE_NOT_READY', 'PUBLISH_NAVIGATION_TIMEOUT', 'PUBLISH_NAVIGATION_INTERRUPTED', 'PUBLISH_EXISTING_PRODUCT_PAGE', 'PUBLISH_ACCOUNT_LIMIT',
     'PUBLISH_CATEGORY_INVALID', 'PUBLISH_OVERLAY_BLOCKED', 'PUBLISH_CONTROL_OBSCURED', 'PUBLISH_CONFIRMATION_PENDING', 'PUBLISH_SUBMIT_RESULT_UNKNOWN',
     'PUBLISH_IMAGE_BANK_FULL', 'PUBLISH_IMAGE_SERVICE_BLOCKED', 'PUBLISH_CONTROL_NOT_READY',
     'PUBLISH_CONTROL_RESULT_UNKNOWN', 'PUBLISH_IMAGE_RECEIPT_UNKNOWN',
@@ -21,7 +21,7 @@ export function publishEnvironmentBlockCode(error) {
 
 export function publishRepairPlan(error) {
   const message = String(error?.message || error || '');
-  if (['PUBLISH_CONTROL_RESULT_UNKNOWN', 'PUBLISH_IMAGE_RECEIPT_UNKNOWN'].includes(error?.code)) return [];
+  if (['PUBLISH_CONTROL_RESULT_UNKNOWN', 'PUBLISH_IMAGE_RECEIPT_UNKNOWN', 'PUBLISH_NAVIGATION_INTERRUPTED', 'PUBLISH_EXISTING_PRODUCT_PAGE'].includes(error?.code)) return [];
   // A browser timeout may occur after an action was dispatched. Repair fields
   // only from actual form validation, never from selectors in a call log.
   if (isBrowserInteractionError(error)) return [];

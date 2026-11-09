@@ -41,7 +41,7 @@ function postingTargetState(node) {
   return { target: { ...describe(node), label: label.replace(/\s+/g, ' ').trim().slice(0, 100) }, blockers, position };
 }
 
-export async function clickPostingControl(page, target, { timeout = 4000, recover, beforeRetry, confirmResult, confirmationTimeout = 4000, ...clickOptions } = {}) {
+export async function clickPostingControl(page, target, { timeout = 4000, recover, beforeRetry, beforeDispatch, confirmResult, confirmationTimeout = 4000, ...clickOptions } = {}) {
   const context = postingInteractions.get(page) || {};
   let state;
   const requireActive = () => {
@@ -80,6 +80,8 @@ export async function clickPostingControl(page, target, { timeout = 4000, recove
       await page.waitForTimeout(150);
       continue;
     }
+    requireActive();
+    await beforeDispatch?.();
     requireActive();
     try {
       await target.click({ ...clickOptions, ...(state?.position ? { position: state.position } : {}), force: false, trial: false, timeout });

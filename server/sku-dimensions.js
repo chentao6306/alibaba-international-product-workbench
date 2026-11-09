@@ -30,6 +30,14 @@ export function recoverDuplicateSkuDimensions(product, { strict = false } = {}) 
     }
   }
   const byId = new Map(repeated.map(group => [String(group.id), group]));
+  const optionRecords = new Map();
+  for (const group of repeated) {
+    const records = group.optionValues;
+    if (!Array.isArray(records) || !records.length) continue;
+    if (records.length !== group.options.length || records.some((record, index) => !String(record.id ?? '').trim()
+      || record.name !== group.options[index]) || new Set(records.map(record => String(record.id))).size !== records.length) return fail();
+    optionRecords.set(group, records);
+  }
   const skus = [];
   for (const sku of product.skus) {
     if (sku.evidence?.method !== 'detailData.skuInfoMap' || !sku.evidence.combination) return fail();
@@ -39,7 +47,10 @@ export function recoverDuplicateSkuDimensions(product, { strict = false } = {}) 
       const group = byId.get(parts[0]);
       if (!group) continue;
       if (parts.length !== 2 || decoded.has(group)) return fail();
-      const matches = Object.entries(group.optionIds || {}).filter(([label, id]) => String(id) === parts[1] && group.options.includes(label));
+      const records = optionRecords.get(group);
+      const matches = records
+        ? records.filter(record => String(record.id) === parts[1]).map(record => [record.name, record.id])
+        : Object.entries(group.optionIds || {}).filter(([label, id]) => String(id) === parts[1] && group.options.includes(label));
       if (matches.length !== 1) return fail();
       decoded.set(group, matches[0][0]);
       previous[group.name] = matches[0][0];

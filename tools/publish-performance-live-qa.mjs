@@ -80,7 +80,7 @@ SellerPublisher.prototype.publishProduct = async function(...args) {
       } catch { /* Not every response is JSON. Never retain raw bodies. */ }
     })());
   };
-  for (const name of ['currentSellerPage', 'downloadImageSet', 'uploadMainImages', 'reconcileMainImages',
+  for (const name of ['currentSellerPage', 'createProductPage', 'downloadImageSet', 'uploadMainImages', 'reconcileMainImages',
     'fillLegacyDescription', 'fillProductFields', 'fillPriceFields', 'fillAdditionalProductFields']) {
     if (typeof this[name] !== 'function') continue;
     const method = this[name]; methods.set(name, method);
@@ -89,12 +89,15 @@ SellerPublisher.prototype.publishProduct = async function(...args) {
       row.methods.push(call);
       try {
         const value = await method.apply(this, params);
-        if (name === 'currentSellerPage') {
+        if (name === 'currentSellerPage' || name === 'createProductPage') {
           // skipNavigation creates about:blank first. Check the imported account
           // here; the publisher still verifies the actual posting page/login.
           const accountUrl = value.url() === 'about:blank' ? 'https://www.alibaba.com/' : value.url();
           assert.ok(matchesAlibabaSession(await value.context().cookies(), process.env.QA_EXPECTED_ACCOUNT, accountUrl), 'Expected seller account must be imported before navigation');
-          if (!watchedPage) { watchedPage = value; value.on('response', onResponse); }
+          if (!watchedPage || name === 'createProductPage') {
+            watchedPage?.off('response', onResponse);
+            watchedPage = value; value.on('response', onResponse);
+          }
         }
         if (name === 'fillLegacyDescription' && descriptionCompatibility(params[0], params[1])) {
           const { body } = await waitForDescriptionEditor(params[0]);

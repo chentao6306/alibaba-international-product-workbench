@@ -107,6 +107,53 @@ test('keeps the source image dimension when a text model repeats its exact SKU i
   }
 });
 
+test('routes equivalent model images by property identity without recursing through text aliases', { skip: !findChromium(), timeout: 60000 }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'spec-image-identity-'));
+  const file = path.join(directory, 'source.png');
+  fs.writeFileSync(file, 'source image bytes');
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    page.setDefaultTimeout(1000);
+    await page.route('**/*', route => route.abort());
+    const url = 'https://sc04.alicdn.com/kf/Hsource.jpg';
+    const primary = { id: '191288010', name: 'Model Number', type: 'IMAGE', options: ['As Picture'], optionImages: { 'As Picture': url } };
+    const model = { id: '3', name: 'Model', type: 'TEXT', options: ['Radar Model'], optionImages: { 'Radar Model': url } };
+    const cases = [
+      { label: 'exact ID after text alias', group: model, applied: [model, primary], imageId: primary.id, expected: primary.id },
+      { label: 'exact source name after target ID remapping', group: model, applied: [model, { ...primary, id: '999' }], imageId: '999', expected: '999' },
+      { label: 'visible primary absent from applied groups', group: model, applied: [model], imageId: primary.id, expected: primary.id },
+      { label: 'self target retains its own images', group: { ...model, name: primary.name }, imageId: primary.id, expected: model.id },
+      { label: 'another text target cannot extend the delegation chain', group: model, applied: [model, { ...primary, id: '999', type: 'TEXT', optionImages: {} }], imageId: '999', expected: model.id },
+    ];
+    for (const scenario of cases) {
+      await singleImageDimensionFixture(page);
+      if (scenario.imageId !== primary.id) await page.evaluate(id => {
+        document.querySelector('input[value="191288010"]').value = id;
+        document.querySelector('#p-191288010').id = `p-${id}`;
+      }, scenario.imageId);
+      const product = { variantGroups: [scenario.group, primary], skus: [{ image: url }] };
+      const original = structuredClone(product), downloads = [];
+      let deadline;
+      try {
+        assert.equal(await Promise.race([
+          enableImageBackedVariantSpecs(page, product, scenario.applied || [scenario.group], async urls => {
+            downloads.push(...urls); return [file];
+          }),
+          new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error(`${scenario.label}: image delegation did not terminate`)), 10000); }),
+        ]), true, scenario.label);
+      } finally { clearTimeout(deadline); }
+      assert.deepEqual(await page.evaluate(() => window.toggles), [`p-${scenario.expected}`], scenario.label);
+      assert.deepEqual(await page.evaluate(() => window.uploads), [`p-${scenario.expected}`], scenario.label);
+      assert.deepEqual(downloads, [url], scenario.label);
+      assert.deepEqual(product, original, scenario.label);
+    }
+  } finally {
+    await browser.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('does not erase a different image dimension or turn an incomplete upload into success', { skip: !findChromium(), timeout: 60000 }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'spec-image-conflict-'));
   const file = path.join(directory, 'source.png');

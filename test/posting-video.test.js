@@ -154,15 +154,19 @@ test('a hidden inline video control without an advertised bank still stops befor
 test('video association accepts link and button actions, preserves duration rejection and verifies exact idempotent readback', { skip: !findChromium() }, async t => {
   const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
   try {
-    for (const mode of ['a', 'button', 'delayed-control', 'detail', 'lazy-main', 'lazy-detail', 'grid-main', 'grid-detail', 'chinese-main', 'chinese-detail', 'duration-limit']) {
+    for (const mode of ['a', 'button', 'delayed-control', 'detail', 'lazy-main', 'lazy-detail', 'grid-main', 'grid-detail', 'chinese-main', 'chinese-detail',
+      'no-search-main', 'no-search-detail', 'search-main', 'search-detail', 'no-search-other-selected', 'search-missing', 'duration-limit']) {
       await t.test(mode, async () => {
       const chinese = mode.startsWith('chinese-');
       const detail = mode === 'detail' || mode.endsWith('-detail');
-      const grid = mode.startsWith('grid-');
+      const noSearch = mode.startsWith('no-search-'), searchRequired = mode.startsWith('search-');
+      const grid = mode.startsWith('grid-') || noSearch || searchRequired;
       const lazy = mode.startsWith('lazy-') || grid;
       const tag = mode === 'button' ? 'button' : 'a';
       const context = await browser.newContext();
       let linked = false, writes = 0;
+      const searches = [];
+      const missingTarget = new AbortController();
       const bankUrl = 'https://hz-productposting.alibaba.com/product/videobank/home.htm';
       await context.route('**/*', async route => {
         const url = new URL(route.request().url());
@@ -172,13 +176,18 @@ test('video association accepts link and button actions, preserves duration reje
           linked = true; writes++;
           await route.fulfill({ body: 'ok' }); return;
         }
+        if (url.pathname.endsWith('/search-test')) {
+          searches.push(url.searchParams.get('productId'));
+          if (mode === 'search-missing') setTimeout(() => missingTarget.abort(), 250);
+          await route.fulfill({ body: 'ok' }); return;
+        }
         if (url.pathname.endsWith('/linked_products.htm')) {
           body = linked || detail ? `<table><thead><tr><th>Product name</th><th>${chinese ? '展示状态' : 'Display status'}</th></tr></thead><tbody><tr><td><a href="https://www.alibaba.com/product-detail/test_123456.html">Details video</a></td><td><div>${chinese ? '主图视频' : 'Primary video'}</div>${detail && linked ? `<div>${chinese ? '详情视频' : 'Video for product detail'}</div>` : ''}</td></tr></tbody></table>`
             : '<table></table><p>No linked products!</p>';
         } else if (url.pathname.endsWith('/select-test')) {
-          body = `<input id="productId"><button>Search</button>
-            ${grid ? '<div class="next-row"><div class="next-col"><div class="popup-item">' : '<table><tbody><tr><td>'}<div class="popup-item-img-wrapper" style="width:120px;height:100px" ${lazy ? `onmouseenter="if(!this.querySelector('input'))setTimeout(()=>this.innerHTML='<label><input type=checkbox value=123456>Exact product</label>',100)"` : ''}>${lazy ? 'Product image' : '<label><input type="checkbox" value="123456">Exact product</label>'}</div><div class="popup-item-description"><a href="https://www.alibaba.com/product-detail/test_123456.html">Exact product</a></div>${grid ? '</div></div></div>' : '</td></tr></tbody></table>'}
-            <div class="popup-item-img-wrapper"><label><input type="checkbox" value="654321">Other product</label></div>
+          body = `${noSearch ? '' : `<input id="productId"><button onclick="const id=document.querySelector('#productId').value;fetch('search-test?productId='+id);${mode === 'search-missing' ? '' : "if(id==='123456')document.querySelector('#target').hidden=false"}">Search</button>`}
+            <div id="target" ${searchRequired ? 'hidden' : ''}>${grid ? '<div class="next-row"><div class="next-col"><div class="popup-item">' : '<table><tbody><tr><td>'}<div class="popup-item-img-wrapper" style="width:120px;height:100px" ${lazy ? `onmouseenter="if(!this.querySelector('input'))setTimeout(()=>this.innerHTML='<label><input type=checkbox value=123456>Exact product</label>',100)"` : ''}>${lazy ? 'Product image' : '<label><input type="checkbox" value="123456">Exact product</label>'}</div><div class="popup-item-description"><a href="https://www.alibaba.com/product-detail/test_123456.html">Exact product</a></div>${grid ? '</div></div></div>' : '</td></tr></tbody></table>'}</div>
+            <div class="popup-item-img-wrapper"><label><input type="checkbox" value="654321" ${mode === 'no-search-other-selected' ? 'checked' : ''}>Other product</label></div>
             <button id="confirm" ${mode === 'delayed-control' ? 'disabled' : ''} onclick="parent.postMessage([...document.querySelectorAll('input:checked')].map(n=>n.value).join(','),'*')">Confirm</button>${mode === 'delayed-control' ? `<script>addEventListener('click', event => { if (event.target.type === 'checkbox') setTimeout(() => document.querySelector('#confirm').disabled = false, 5000); });</script>` : ''}`;
         } else {
           const action = mode === 'duration-limit' ? "document.querySelector('#duration-error').hidden=false;return false"
@@ -202,9 +211,25 @@ test('video association accepts link and button actions, preserves duration reje
           assert.equal(writes, 0, 'Rejected videos must not alter any product');
           return;
         }
+        if (mode === 'no-search-other-selected') {
+          await assert.rejects(bankVideoAssociation(page, video, '123456'), /关联选择包含其他商品/);
+          assert.equal(writes, 0);
+          return;
+        }
+        if (mode === 'search-missing') {
+          const associate = (page, video, id, options) => bankVideoAssociation(page, video, id,
+            { signal: AbortSignal.any([options.signal, missingTarget.signal]) });
+          const result = await completePublishedVideo(page, video, 'https://post.alibaba.com/product/success.htm?primaryId=123456', associate, { timeoutMs: 60000 });
+          assert.equal(result.associated, false);
+          assert.equal(result.productId, '123456');
+          assert.equal(writes, 0, 'A missing exact target must not select the other visible product');
+          assert.deepEqual(searches, ['123456']);
+          return;
+        }
         assert.equal((await bankVideoAssociation(page, video, '123456')).associated, true);
         assert.equal((await bankVideoAssociation(page, video, '123456')).alreadyAssociated, true);
         assert.equal(writes, 1, 'Reading an existing association must not write again');
+        assert.deepEqual(searches, searchRequired ? ['123456'] : [], 'Search is needed only when the exact target is not visible');
       } finally { await context.close(); }
       });
     }

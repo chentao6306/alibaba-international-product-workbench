@@ -7,10 +7,11 @@ const hasImages = group => Object.values(group.optionImages || {}).some(Boolean)
 // An option label is not its identity: the source can expose several distinct
 // colors/styles under the same label. Repair only when source IDs prove which
 // option belongs to every SKU; never merge rows or infer IDs from row order.
-export function recoverDuplicateSkuOptions(product, { strict = false } = {}) {
+export function recoverDuplicateSkuOptions(product, { strict = false, normalizeValue = value => value } = {}) {
+  const optionKey = value => key(normalizeValue(value));
   const groups = product.variantGroups || [];
   const repeated = groups.filter(group => {
-    const values = (group.options || []).map(key);
+    const values = (group.options || []).map(optionKey);
     return new Set(values).size !== values.length;
   });
   if (!repeated.length) return product;
@@ -50,8 +51,22 @@ export function recoverDuplicateSkuOptions(product, { strict = false } = {}) {
     if (rawValues) {
       // Collection retains this array before its old label-keyed maps can
       // overwrite an ID or image. It also detects conflicting manual edits.
-      if (rawValues.length !== options.length || rawValues.some((value, index) => value.name !== options[index])) return fail();
-      values = rawValues.map(value => ({ ...value, id: text(value.id), name: value.name, image: text(value.image) }));
+      const prior = group.optionIdentityMappings;
+      if (rawValues.length !== options.length) return fail();
+      if (rawValues.some((value, index) => value.name !== options[index])) {
+        // A previous source-label repair can itself collide after the target
+        // value conversion. Match its retained IDs, never the current row order.
+        if (!Array.isArray(prior) || prior.length !== options.length
+          || prior.some((value, index) => value.name !== options[index])
+          || new Set(prior.map(value => text(value.id))).size !== prior.length) return fail();
+        values = prior.map(value => {
+          const original = rawValues.filter(item => text(item.id) === text(value.id));
+          if (original.length !== 1 || original[0].name !== value.sourceName
+            || text(original[0].image) !== text(value.image)) return null;
+          return { ...value, id: text(value.id), image: text(value.image) };
+        });
+        if (values.some(value => !value)) return fail();
+      } else values = rawValues.map(value => ({ ...value, id: text(value.id), name: value.name, image: text(value.image) }));
     } else {
       if (hasImages(group) && !canUseSkuImage) return fail();
       const byId = new Map();
@@ -100,19 +115,21 @@ export function recoverDuplicateSkuOptions(product, { strict = false } = {}) {
       if (canUseSkuImage && value.image && sku.image && text(sku.image) !== value.image) return fail();
     }
     const counts = new Map();
-    for (const value of values) counts.set(key(value.name), (counts.get(key(value.name)) || 0) + 1);
-    const occupied = new Set(options.map(key)), indexes = new Map();
+    for (const value of values) counts.set(optionKey(value.name), (counts.get(optionKey(value.name)) || 0) + 1);
+    const occupied = new Set(options.map(optionKey)), indexes = new Map();
     const mappings = values.map(value => {
       let name = value.name;
-      if (counts.get(key(name)) > 1) {
-        let index = indexes.get(key(name)) || 0;
-        do { name = `${value.name} (${++index})`; } while (occupied.has(key(name)));
-        indexes.set(key(value.name), index);
-        occupied.add(key(name));
+      if (counts.get(optionKey(name)) > 1) {
+        let index = indexes.get(optionKey(name)) || 0;
+        do { name = `${value.name} (${++index})`; } while (occupied.has(optionKey(name)) && index < 10000);
+        if (occupied.has(optionKey(name))) return null;
+        indexes.set(optionKey(value.name), index);
+        occupied.add(optionKey(name));
       }
-      return { id: value.id, sourceName: value.name, name, image: value.image,
+      return { id: value.id, sourceName: value.sourceName || value.name, name, image: value.image,
         source: rawValues ? 'detailData.skuAttrs' : 'detailData.skuInfoMap' };
     });
+    if (mappings.some(value => !value)) return fail();
     repaired.set(group, {
       ...group,
       sourceOptions: group.sourceOptions || [...options],
