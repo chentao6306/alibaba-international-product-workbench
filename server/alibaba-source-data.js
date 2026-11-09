@@ -1,5 +1,6 @@
 import { alibabaProductIdFromPath } from './source-platform.js';
 import { recoverDuplicateSkuDimensions } from './sku-dimensions.js';
+import { recoverDuplicateSkuOptions } from './sku-options.js';
 
 const asNumber = (value) => {
   const number = Number(String(value ?? '').replace(/,/g, '').match(/-?[\d.]+/)?.[0]);
@@ -277,6 +278,10 @@ function structuredVariants(detailData) {
     const options = values.map((value) => clean(value.name)).filter(Boolean);
     return {
       id: String(attribute.id ?? ''), name: clean(attribute.name), type: clean(attribute.type || 'TEXT'), options,
+      // Labels may repeat for distinct option IDs. Keep the source records
+      // before constructing legacy label-keyed maps so no image/ID is lost.
+      optionValues: values.map(value => ({ id: String(value.id ?? ''), name: clean(value.name),
+        image: clean(value.originImage || value.imageUrl || value.image) })).filter(value => value.name),
       optionIds: Object.fromEntries(values.map((value) => [clean(value.name), String(value.id ?? '')]).filter(([name]) => name)),
       optionImages: Object.fromEntries(values.map((value) => [clean(value.name), clean(value.originImage || value.imageUrl || value.image)]).filter(([name, image]) => name && image)),
       source: 'detailData.skuAttrs'
@@ -303,7 +308,7 @@ function structuredVariants(detailData) {
       evidence: { method: 'detailData.skuInfoMap', combination, exactPricePublished: exactPrice != null, exactStockPublished: exactStock != null }
     };
   });
-  return recoverDuplicateSkuDimensions({ variantGroups, skus, firstSkuId: sku.firstSkuId || null });
+  return recoverDuplicateSkuOptions(recoverDuplicateSkuDimensions({ variantGroups, skus, firstSkuId: sku.firstSkuId || null }));
 }
 
 export function extractAlibabaSourceData(detailData) {

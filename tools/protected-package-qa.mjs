@@ -45,6 +45,7 @@ available.push('lighting-attributes', 'lighting-weight');
 available.push('description-mode');
 available.push('description-compatibility');
 available.push('image-upload-alpha', 'image-download-retry', 'publish-media-integrity');
+available.push('sku-options', 'sku-options-workflow');
 available.push('posting-navigation');
 available.push('authorization-task-pause', 'collection-stall-api');
 available.push('reference-scale', 'reference-workflow', 'spec-image-dimension', 'diagnostics', 'local-api');

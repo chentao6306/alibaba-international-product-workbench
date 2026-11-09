@@ -8,6 +8,7 @@ import { synchronizeProductOrigin } from './origin-country.js';
 import { stockValuesChanged } from './publish-policy.js';
 import { categoryReadiness } from './category-readiness.js';
 import { recoverDuplicateSkuDimensions } from './sku-dimensions.js';
+import { recoverDuplicateSkuOptions } from './sku-options.js';
 
 export const PRODUCT_SCHEMA_VERSION = 5;
 
@@ -528,7 +529,7 @@ export function syncProductModel(product, options = {}) {
     product.source.snapshotHash = fingerprint(product.source.snapshot);
     product.source.snapshotHashVersion = 2;
   }
-  const distinctDimensions = recoverDuplicateSkuDimensions(product);
+  const distinctDimensions = recoverDuplicateSkuOptions(recoverDuplicateSkuDimensions(product));
   if (distinctDimensions !== product) {
     product.variantGroups = distinctDimensions.variantGroups;
     product.skus = distinctDimensions.skus;

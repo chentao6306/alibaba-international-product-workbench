@@ -34,6 +34,7 @@ import { isPublicProductAttribute, planPublicAttributeTransfer, requirePublicAtt
 export { alibabaKeywordText } from './product-keywords.js';
 import { fillReferencedSkuRows, reconcileSkuMinimumOrder, selectSkuPricing, usesSkuPricing } from './sku-reference.js';
 import { recoverDuplicateSkuDimensions } from './sku-dimensions.js';
+import { recoverDuplicateSkuOptions } from './sku-options.js';
 import { fillSalesUnit, requireSalesUnit } from './posting-sales-unit.js';
 import { findNormalDescriptionControl, findPostingTitle, requirePostingPageAvailable, revealDescriptionSection, waitForDescriptionEditor, waitForPostingTitle } from './posting-readiness.js';
 import { readSourceDescriptionFrame, waitForSourceDetailVideos } from './source-description-frame.js';
@@ -1329,6 +1330,7 @@ export function validateProductData(product, { mode = 'submit' } = {}) {
 // set of values to commit and verify.
 export function preparePublishProduct(product, options = {}) {
   product = recoverDuplicateSkuDimensions(product, { strict: true });
+  product = recoverDuplicateSkuOptions(product, { strict: true });
   // Repair old collected poster rows even when video upload is switched off.
   product = { ...product, detailImages: nativeDescriptionImageUrls(product) };
   product = productForVideoUpload(product, options);
@@ -7683,6 +7685,8 @@ export class SellerPublisher {
       ...(videoResult?.inline ? { inlineVideo: { ...videoResult.inline, role: 'main', verifiedBy: 'form-model', displayVerified: false } } : {}),
       videoUploadEnabled: options.uploadProductVideos !== false,
       warnings: [
+        product.variantGroups?.some(group => group.optionIdentityMappings?.some(option => option.name !== option.sourceName))
+          ? '来源中同名但编号不同的规格已增加区分编号；各 SKU 的图片、价格、编码和库存分别保留' : '',
         descriptionConversion?.warning || '',
         videoWarning,
         ...(options.logisticsWarnings || []),

@@ -1,12 +1,14 @@
 # 抄得快 · 阿里巴巴国际站商品工作台
 
-**源码版本：1.4.99｜分支：`codex/1.4.99`｜交接日期：2026-11-09｜发行状态：候选版**
+**源码版本：1.4.100｜分支：`codex/1.4.100`｜交接日期：2026-11-09｜发行状态：候选版**
 
 这是 Windows 桌面商品采集、编辑和发布系统的完整源码快照，包括 React 工作台、本地业务服务、Electron 桌面端、授权管理后台、官网、SQL 结构、构建工具和自动测试，用于继续开发、排障和复现构建。
 
 版本分支使用独立根提交，不继承历史运行资料。商品库、后台用户数据、诊断报告、客户截图、登录会话、API 密钥、签名私钥和安装包均不随仓库分发。测试目录保留构造数据和模拟凭据；类目目录是程序所需的静态定义，不是客户商品库。
 
-**交给 Claude 时先阅读 [CLAUDE.md](CLAUDE.md)、[1.4.99 改动与验收](docs/release-1.4.99.md) 和 [完整开发交接](docs/claude-handoff-1.4.98.md)。** 本版已完成自动回归和部分真实消费电子链路验证；医疗类目的完整发布及发布后回读仍有验收缺口，不能把本分支理解为所有客户问题已经解决。
+**交给 Claude 时先阅读 [CLAUDE.md](CLAUDE.md)、[1.4.100 改动与验收](docs/release-1.4.100.md) 和 [完整开发交接](docs/claude-handoff-1.4.98.md)。** 已有部分真实消费电子链路验证；本次重名 SKU 修复有客户诊断重放和浏览器模拟证据，玩具及医疗类目的真实发布和回读仍有验收缺口，不能把本分支理解为所有客户问题已经解决。
+
+1.4.100 按来源选项编号恢复名称相同但实际不同的规格，避免旧版按名称覆盖后报“SKU 转换后出现重复规格组合”。所有 SKU 的价格、库存、编码和图片分别保留，采集、历史资料重开及发布均使用同一规则；详见 [本次修复及限制](docs/release-1.4.100.md)。
 
 2026-11-09 源码补丁补充了批量引用期间的服务响应、空闲状态读取的桌面桥接阻塞修复、进度轮询恢复、自定义属性长名称修复，以及受限账号的详情格式兼容、视频素材库入口识别和透明图片白底上传。详见 [本地服务检查](docs/local-service-reliability-2026-11-09.md)、[长名称修复](docs/custom-attribute-name-2026-11-09.md) 与 [详情和媒体实测](docs/description-compatibility-2026-11-09.md)。这些修改尚未纳入此前交付的 1.4.98 安装包；不要用同一版本号覆盖旧包。
 
@@ -84,7 +86,7 @@ Electron 主进程 (electron/)
 推荐 Windows x64、Node.js **22.18 或更新的 22 LTS 版本**及 npm。发行保护加载器依赖较新的 Node 模块 API。实际依赖以 `package-lock.json` 为准，接手时不要直接整体升级 Electron、Playwright 或 Vite。
 
 ```powershell
-git clone --branch codex/1.4.99 --single-branch git@github.com:chentao6306/alibaba-international-product-workbench.git
+git clone --branch codex/1.4.100 --single-branch git@github.com:chentao6306/alibaba-international-product-workbench.git
 cd alibaba-international-product-workbench
 npm ci
 node node_modules/playwright-core/cli.js install chromium
@@ -213,7 +215,7 @@ node --test test/local-service.test.js test/reference-scale.test.js test/state-r
 
 使用 Node 内置 `node:test` 和 `assert/strict`，部分测试启动 Chromium、Electron 或临时服务。资源有限时串行运行，完整回归可能超过半小时。PostgreSQL 集成测试只使用 `AUTH_TEST_DATABASE_URL` 指向名称为 `auth_qa_` 前缀的隔离库，不能用生产库。
 
-**1.4.99 当前改动与验收见 [版本记录](docs/release-1.4.99.md)。以下为 1.4.98 历史验证基线（2026-11-06）：**
+**1.4.100 当前改动与验收见 [版本记录](docs/release-1.4.100.md)。以下为 1.4.98 历史验证基线（2026-11-06）：**
 
 | 项目 | 结果与范围 |
 | --- | --- |
@@ -249,18 +251,18 @@ node --test test/local-service.test.js test/reference-scale.test.js test/state-r
 完整 Windows 安装器需要 Chromium、Electron、Windows C# 编译器和现有更新签名私钥；源码不含私钥。
 
 ```powershell
-$env:CHAODEKUAI_RELEASE_DIR='D:/builds/chaodekuai-1.4.99'
+$env:CHAODEKUAI_RELEASE_DIR='D:/builds/chaodekuai-1.4.100'
 $env:CHAODEKUAI_UPDATE_SIGNING_KEY='D:/private/update-signing-key.pem'
 npm run dist:win:installer
-node tools/desktop-package-qa.mjs D:/builds/chaodekuai-1.4.99
-node tools/protected-package-qa.mjs D:/builds/chaodekuai-1.4.99/win-unpacked
+node tools/desktop-package-qa.mjs D:/builds/chaodekuai-1.4.100
+node tools/protected-package-qa.mjs D:/builds/chaodekuai-1.4.100/win-unpacked
 ```
 
-对外文件为 `chaodekuai-1.4.99-setup.exe` 与同次构建的 `.exe.update.json`。`inner.exe`、`win-unpacked/`、`.packaged/` 是中间产物，不作为客户更新组合。签名与 EXE 必须匹配，更换现有签名密钥会使已安装客户端拒绝更新。
+对外文件为 `chaodekuai-1.4.100-setup.exe` 与同次构建的 `.exe.update.json`。`inner.exe`、`win-unpacked/`、`.packaged/` 是中间产物，不作为客户更新组合。签名与 EXE 必须匹配，更换现有签名密钥会使已安装客户端拒绝更新。
 
 打包会保护业务模块并混淆前端入口，源码测试不能替代包内测试。详见 [源码保护](docs/source-protection.md) 与 [在线更新](docs/software-updates.md)。同一正式版本不能替换另一份 EXE，修复后需提升版本号。
 
-后台上传两文件并保存草稿，验收完成后再正式发布。**1.4.99 仍为候选版，尚未完成各客户类目的真实验收。**
+后台上传两文件并保存草稿，验收完成后再正式发布。**1.4.100 仍为候选版，尚未完成各客户类目的真实验收。**
 
 ## 故障排查
 
