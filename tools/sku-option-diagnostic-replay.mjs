@@ -10,11 +10,18 @@ import { resolveReferencedSkuRows, fillReferencedSkuRows } from '../server/sku-r
 
 const input = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const report = input.report || input;
-const matches = (report.failures || []).filter(failure => /重复规格组合/.test(failure.error?.message || ''));
-assert.ok(matches.length, 'Expected a duplicate SKU report');
+const matches = (report.failures || []).filter(failure => /重复规格组合/.test(failure.error?.message || '')
+  || failure.error?.code === 'PUBLISH_SKU_IDENTITY_UNRESOLVED');
+assert.ok(matches.length, 'Expected a duplicate SKU or unresolved option identity report');
 const cases = [];
 for (const failure of matches) {
-  const product = structuredClone(failure.product), original = structuredClone(product);
+  const product = structuredClone(failure.product);
+  // Diagnostic reports keep the original snapshot separately from current
+  // edits. Reconstruct that boundary, rather than replacing edited values.
+  if (!product.source?.snapshot && failure.source?.variantGroups?.length) {
+    product.source = { ...product.source, snapshot: structuredClone(failure.source) };
+  }
+  const original = structuredClone(product), source = original.source?.snapshot || original;
   const prepared = preparePublishProduct(product);
   assert.deepEqual(product, original, 'Publishing preparation cannot mutate source or user data');
   const groups = prepared.variantGroups.map(group => ({ name: group.name, options: [...group.options].reverse() }));
@@ -37,8 +44,8 @@ for (const failure of matches) {
   const reopened = JSON.parse(JSON.stringify(persisted));
   syncProductModel(reopened);
   assert.equal(verifySourceIntegrity(reopened).valid, true);
-  assert.deepEqual(reopened.source.snapshot.variantGroups, original.variantGroups);
-  assert.deepEqual(reopened.source.snapshot.skus, original.skus);
+  assert.deepEqual(reopened.source.snapshot.variantGroups, source.variantGroups);
+  assert.deepEqual(reopened.source.snapshot.skus, source.skus);
   assert.deepEqual(preparePublishProduct(reopened).variantGroups, prepared.variantGroups);
   let browserRows;
   if (process.argv.includes('--browser')) {

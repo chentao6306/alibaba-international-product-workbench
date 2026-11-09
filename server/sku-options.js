@@ -4,13 +4,59 @@ const hasImages = group => Object.values(group.optionImages || {}).some(Boolean)
   || (group.optionValues || []).some(value => value.image)
   || /image/i.test(group.type || '');
 
+function sourceGroupMetadata(product, group) {
+  const snapshot = product.source?.snapshot;
+  if (!snapshot || (product.sourceId && snapshot.sourceId && text(product.sourceId) !== text(snapshot.sourceId))) return null;
+  const matches = (snapshot.variantGroups || []).filter(item => item.name === group.name);
+  const original = matches[0];
+  if (matches.length !== 1 || !text(original.id) || original.source !== 'detailData.skuAttrs'
+    || group.source !== original.source
+    || snapshot.variantGroups.filter(item => text(item.id) === text(original.id)).length !== 1) return null;
+  const sourceOptions = group.sourceOptions || group.options || [];
+  const originalOptions = original.sourceOptions || original.options || [];
+  if (sourceOptions.length !== originalOptions.length
+    || sourceOptions.some((value, index) => value !== originalOptions[index])) return null;
+  const prior = group.optionIdentityMappings;
+  if (prior && (!Array.isArray(prior) || prior.length !== group.options.length
+    || prior.some((value, index) => value.name !== group.options[index])
+    || new Set(prior.map(value => text(value.id))).size !== prior.length)) return null;
+  const originalMappings = original.optionIdentityMappings;
+  if (originalMappings && (!Array.isArray(originalMappings) || originalMappings.length !== original.options.length
+    || originalMappings.some((value, index) => value.name !== original.options[index])
+    || new Set(originalMappings.map(value => text(value.id))).size !== originalMappings.length)) return null;
+  const sourceRows = snapshot.skus || [];
+  if (sourceRows.length !== product.skus?.length || !sourceRows.length) return null;
+  const ids = new Set(), combinations = new Set();
+  for (const sku of product.skus) {
+    const rows = sourceRows.filter(row => text(row.id) === text(sku.id));
+    const row = rows[0], combination = sku.evidence?.combination;
+    if (!text(sku.id) || rows.length !== 1 || ids.has(text(sku.id)) || !combination
+      || combinations.has(combination) || sku.evidence?.method !== 'detailData.skuInfoMap'
+      || row.evidence?.method !== 'detailData.skuInfoMap' || row.evidence.combination !== combination) return null;
+    ids.add(text(sku.id)); combinations.add(combination);
+    const selected = combination.split(';').map(token => token.split(':').map(text))
+      .filter(parts => parts[0] === text(original.id));
+    if (selected.length !== 1 || selected[0].length !== 2 || !selected[0][1]) return null;
+    const mapping = prior?.find(value => text(value.id) === selected[0][1]);
+    const originalMapping = originalMappings?.find(value => text(value.id) === selected[0][1]);
+    if (originalMappings && (!originalMapping || originalMapping.name !== row.attributes?.[original.name])) return null;
+    const sourceName = originalMapping ? originalMapping.sourceName : row.attributes?.[original.name];
+    if (prior && (!mapping || mapping.sourceName !== sourceName)) return null;
+    if (sku.attributes?.[group.name] !== (mapping ? mapping.name : row.attributes?.[original.name])) return null;
+  }
+  return { ...group, id: original.id,
+    ...(!group.optionIds && !prior ? { optionIds: original.optionIds } : {}),
+    ...(!group.optionValues && original.optionValues ? { optionValues: original.optionValues } : {}),
+  };
+}
+
 // An option label is not its identity: the source can expose several distinct
 // colors/styles under the same label. Repair only when source IDs prove which
 // option belongs to every SKU; never merge rows or infer IDs from row order.
 export function recoverDuplicateSkuOptions(product, { strict = false, normalizeValue = value => value } = {}) {
   const optionKey = value => key(normalizeValue(value));
-  const groups = product.variantGroups || [];
-  const repeated = groups.filter(group => {
+  let groups = product.variantGroups || [];
+  let repeated = groups.filter(group => {
     const values = (group.options || []).map(optionKey);
     return new Set(values).size !== values.length;
   });
@@ -21,6 +67,20 @@ export function recoverDuplicateSkuOptions(product, { strict = false, normalizeV
     });
     return product;
   };
+  // A category change deliberately clears target property IDs. An untouched
+  // source snapshot can still prove SKU identity, but its ID must stay local
+  // to this repair and must not become a binding to the new publishing form.
+  const restored = new Map();
+  for (const group of repeated.filter(group => !text(group.id))) {
+    const original = sourceGroupMetadata(product, group);
+    if (!original) return fail();
+    restored.set(original, group);
+  }
+  if (restored.size) {
+    const byWorkingGroup = new Map([...restored].map(([original, group]) => [group, original]));
+    groups = groups.map(group => byWorkingGroup.get(group) || group);
+    repeated = repeated.map(group => byWorkingGroup.get(group) || group);
+  }
   if (!product.skus?.length || repeated.some(group => !text(group.id) || !text(group.name)
     || groups.filter(item => text(item.id) === text(group.id)).length !== 1
     || groups.filter(item => key(item.name) === key(group.name)).length !== 1)) return fail();
@@ -149,5 +209,12 @@ export function recoverDuplicateSkuOptions(product, { strict = false, normalizeV
     const generatedName = sku.name === Object.values(sku.attributes || {}).join(' / ');
     return { ...sku, attributes, ...(generatedName ? { name: Object.values(attributes).join(' / ') } : {}) };
   });
-  return { ...product, variantGroups: groups.map(group => repaired.get(group) || group), skus };
+  return { ...product, variantGroups: groups.map(group => {
+    const next = repaired.get(group) || group;
+    const working = restored.get(group);
+    if (!working) return next;
+    const { id, ...unbound } = next;
+    if (Object.hasOwn(working, 'id')) unbound.id = working.id;
+    return unbound;
+  }), skus };
 }

@@ -80,7 +80,9 @@ test('the draft publishing entry stays in the background when seller login expir
   const currentSellerPage = publisher.currentSellerPage.bind(publisher);
   publisher.currentSellerPage = async (...args) => {
     const page = await currentSellerPage(...args);
-    await page.route('**/*', (route) => route.request().url().startsWith('https://post.alibaba.com/')
+    // Publishing creates a fresh page in the same session for each product.
+    // Route the session so the new page never reaches a real seller endpoint.
+    await page.context().route('**/*', (route) => route.request().url().startsWith('https://post.alibaba.com/')
       // A browser navigation is a new routed request. A fulfilled HTTP 302
       // can follow its redirect outside Playwright routing and hit Alibaba.
       ? route.fulfill({ contentType: 'text/html', body: '<script>location.replace("https://login.alibaba.com/login.htm")</script>' })
