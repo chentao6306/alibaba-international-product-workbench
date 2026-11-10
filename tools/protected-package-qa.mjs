@@ -48,6 +48,9 @@ available.push('image-upload-alpha', 'image-download-retry', 'publish-media-inte
 available.push('sku-options', 'sku-options-workflow');
 available.push('sku-identity-boundaries', 'action-receipt-freshness');
 available.push('sku-source-recovery');
+available.push('choice-read-snapshot', 'diagnostic-coverage', 'publish-timeline', 'publish-timeline-api');
+available.push('sku-matrix-diagnostics', 'specification-committed-labels');
+available.push('publish-diagnostics-failure-api');
 available.push('posting-navigation', 'publish-background-browser');
 available.push('authorization-task-pause', 'collection-stall-api');
 available.push('reference-scale', 'reference-workflow', 'spec-image-dimension', 'diagnostics', 'local-api');

@@ -256,13 +256,19 @@ export class JsonStore {
     if (index < 0) return null;
     // Progress must not clone every product, source capture and historical
     // task. Detach caller-owned patches while retaining unchanged containers.
-    const job = { ...snapshot.jobs[index], ...cloneWorkspaceValue(patch), updatedAt: new Date().toISOString() };
+    const current = snapshot.jobs[index];
+    const changes = cloneWorkspaceValue(patch);
+    const job = { ...current, ...changes, updatedAt: new Date().toISOString() };
     const jobs = snapshot.jobs.slice();
     jobs[index] = job;
     const state = { ...snapshot, jobs };
-    // Stage text is transient. Item results, checkpoints and control changes
-    // still use the atomic durable write below.
-    if (Object.keys(patch).every((key) => key === 'message')) {
+    // Publish progress includes the current verification state on every event.
+    // Only an already-present, unchanged string is transient with the message;
+    // initialization and real verification/control/checkpoint changes stay durable.
+    if (Object.keys(changes).every((key) => key === 'message' || (
+      key === 'verificationState' && Object.hasOwn(current, key)
+      && typeof changes[key] === 'string' && changes[key] === current[key]
+    ))) {
       this.cachedState = state;
     } else {
       this.#commit(state, true);

@@ -2420,12 +2420,18 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
   if (!locator || value == null || value === '') return false;
   if (!await locator.count().catch(() => 0)) return false;
   const expected = attributeTextValue(value);
-  const kind = await locator.evaluate((node) => ({ tag: node.tagName, type: node.type })).catch(() => null);
+  const kind = await locator.evaluate((node) => ({ tag: node.tagName, type: node.type,
+    role: node.getAttribute('role'), hasReadonlyAttribute: node.hasAttribute('readonly') })).catch(() => null);
   if (!kind) return false;
   if (kind.tag === 'SELECT') {
-    const options = await locator.locator('option').evaluateAll((nodes) => nodes.map((node) => ({ value: node.value, label: node.textContent,
-      disabled: node.disabled || node.parentElement?.disabled || !node.value })));
-    const multiple = await locator.evaluate((node) => node.multiple);
+    // These reads precede every action; capture one current control snapshot
+    // while keeping selection, rollback and committed-value checks separate.
+    const { options, multiple, previous } = await locator.evaluate((node) => ({
+      options: [...node.querySelectorAll('option')].map((option) => ({ value: option.value, label: option.textContent,
+        disabled: option.disabled || option.parentElement?.disabled || !option.value })),
+      multiple: node.multiple,
+      previous: [...node.selectedOptions].map((option) => option.value),
+    }));
     // A DOM capture joins multi-select labels into one string; keep a literal
     // comma when that complete label is itself an available option.
     const values = attributeValueList(value, { multiple, options, valueIds });
@@ -2433,7 +2439,6 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
     if (targets.some((item) => !item) || (targets.length > 1 && !multiple)) return false;
     const custom = targets.flatMap((option, index) => isOtherOption(option.label) && !isOtherOption(values[index]) ? [values[index]] : []);
     if (custom.length > 1) return false;
-    const previous = await locator.evaluate((node) => [...node.selectedOptions].map((option) => option.value));
     await locator.selectOption(targets.map((item) => item.value), { timeout: 4000 });
     if (custom.length && !await fillOtherAttributeText(locator, custom[0])) {
       await locator.selectOption(previous, { timeout: 2000 }).catch(() => {});
@@ -2579,8 +2584,7 @@ export async function fillChoice(page, locator, value, { valueIds = {}, minimumS
     } while (Date.now() < deadline);
     return false;
   };
-  const isCombo = await locator.getAttribute('role').catch(() => '') === 'combobox'
-    || await locator.getAttribute('readonly').catch(() => null) !== null;
+  const isCombo = kind.role === 'combobox' || kind.hasReadonlyAttribute;
   if (isCombo) {
     if (allowCustomCombo) {
       const customResult = await fillCustomComboboxValue(page, locator, value);
@@ -3023,6 +3027,20 @@ export async function ensureColorSpecImageSwitch(page, row) {
   return false;
 }
 
+export function committedSpecificationValues(field, values, { valueIds = {}, labels = {} } = {}) {
+  const selected = [...new Set(field?.values || [])];
+  const resolved = [];
+  for (const value of values) {
+    // The field writer may verify a translated label by the option's stable
+    // ID. Otherwise require exact semantic equality, never a containing range.
+    const expected = labels[valueIds[value]] || value;
+    const matches = selected.filter(label => attributeOptionMatchScore(expected, label) === 100);
+    if (matches.length !== 1 || resolved.includes(matches[0])) return null;
+    resolved.push(matches[0]);
+  }
+  return resolved.length === selected.length ? resolved : null;
+}
+
 export async function fillVariantSpecs(page, product, onProgress = () => {}) {
   const variantGroups = structuredClone(product?.variantGroups || []);
   // A single image-backed source SKU can satisfy categories that require one
@@ -3368,8 +3386,13 @@ export async function fillVariantSpecs(page, product, onProgress = () => {}) {
         ? await fillRepeatableCategoryText(page, field, values)
         : await fillChoice(page, categoryFieldLocator(page, field), values, options));
       const actual = (await page.evaluate(readPostingAttributeSchema)).find((entry) => entry.id === field.id && entry.saleSpecification);
-      if (filled && actual && attributeFieldMatchesValue(actual, values, options)) {
-        rawValues.forEach((raw, index) => { group.appliedValues[raw] = labels[valueIds[values[index]]] || values[index]; });
+      const committed = filled && actual && attributeFieldMatchesValue(actual, values, options)
+        ? committedSpecificationValues(actual, values, options) : null;
+      if (committed) {
+        // Record the labels actually committed by this native field. A custom
+        // source value such as 120w can select the standard option 120 W even
+        // without a positive source option ID. The SKU matrix uses that label.
+        rawValues.forEach((raw, index) => { group.appliedValues[raw] = committed[index]; });
         onProgress(`已填写规格 ${group.name}：${rawValues.length}/${rawValues.length}`);
       } else {
         rawValues.forEach((raw) => unmapped.push(`${group.name}: ${englishSpecText(raw)}`));

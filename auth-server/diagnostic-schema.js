@@ -1,8 +1,9 @@
 // Shared allowlist for desktop capture and server ingestion. Product evidence
 // is sanitized separately; browser sessions and credentials are never included.
-import { sanitizeDiagnosticFailure } from './diagnostic-evidence.js';
+import { diagnosticText, sanitizeDiagnosticFailure } from './diagnostic-evidence.js';
 export const DIAGNOSTIC_MAX_BYTES = 8 * 1024 * 1024;
 export const DIAGNOSTIC_RETENTION_DAYS = 30;
+export const DIAGNOSTIC_FAILURE_INDEX_LIMIT = 60;
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const number = value => Number.isFinite(value) && value >= 0 ? Math.min(Math.floor(value), Number.MAX_SAFE_INTEGER) : 0;
 const date = value => typeof value === 'string' && /^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(value) && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : '';
@@ -46,8 +47,9 @@ export function diagnosticCode(error = {}) {
 
 export function diagnosticStage(value) {
   const text = String(value || '').slice(0, 500);
-  if (['video', 'description', 'packaging', 'images', 'pricing', 'specifications', 'attributes', 'category', 'language', 'submit', 'login', 'collection', 'startup', 'publishing', 'workspace', 'reference', 'settings', 'storage', 'diagnostics'].includes(text)) return text;
+  if (['video', 'description', 'packaging', 'images', 'pricing', 'specifications', 'attributes', 'category', 'language', 'submit', 'save-draft', 'verification', 'login', 'collection', 'startup', 'publishing', 'workspace', 'reference', 'settings', 'storage', 'diagnostics'].includes(text)) return text;
   for (const [pattern, stage] of [
+    [/人工验证|验证码|验证页面|captcha/i, 'verification'], [/保存草稿|草稿.*保存|save.?draft/i, 'save-draft'],
     [/视频|video/i, 'video'], [/详情|description/i, 'description'], [/包装|物流|packaging/i, 'packaging'],
     [/图片|主图|image/i, 'images'], [/价格|定价|price/i, 'pricing'], [/规格|sku/i, 'specifications'],
     [/属性|产地|attribute/i, 'attributes'], [/类目|category/i, 'category'], [/语言|中文|language/i, 'language'],
@@ -89,11 +91,15 @@ export function diagnosticRequestContext(request = {}) {
 
 export function sanitizeDiagnosticEvent(event = {}) {
   event = event && typeof event === 'object' ? event : {};
-  const allowed = ['main-exception', 'renderer-stopped', 'workbench-startup-failed', 'service-stopped', 'service-exited', 'service-exception', 'service-started', 'login-failed', 'api-error', 'publish-started', 'publish-progress', 'publish-completed', 'publish-failed', 'collection-failed'];
+  const allowed = ['main-exception', 'renderer-stopped', 'workbench-startup-failed', 'service-stopped', 'service-exited', 'service-exception', 'service-started', 'login-failed', 'api-error', 'publish-started', 'publish-progress', 'publish-stage-completed', 'publish-completed', 'publish-failed', 'collection-failed'];
   const route = diagnosticApiRoute(event.route);
   return {
     at: date(event.at), event: allowed.includes(event.event) ? event.event : 'runtime-event',
     code: event.code ? diagnosticCode(event) : '', stage: diagnosticStage(event.stage),
+    ...(uuid.test(event.attemptId || '') ? { attemptId: event.attemptId.toLowerCase() } : {}),
+    ...(['draft', 'submit'].includes(event.mode) ? { mode: event.mode } : {}),
+    ...(['rules', 'assisted'].includes(event.processingMode) ? { processingMode: event.processingMode } : {}),
+    ...(Number.isFinite(event.stageMs) && event.stageMs >= 0 ? { stageMs: number(event.stageMs) } : {}),
     ...(['oom', 'exception', 'exit', 'requested', 'clean-exit', 'abnormal-exit', 'killed', 'crashed', 'launch-failed', 'integrity-failure'].includes(event.reason) ? { reason: event.reason } : {}),
     ...(typeof event.expected === 'boolean' ? { expected: event.expected } : {}),
     ...(Number.isInteger(event.exitCode) && event.exitCode >= -2147483648 && event.exitCode <= 4294967295 ? { exitCode: event.exitCode } : {}),
@@ -101,6 +107,31 @@ export function sanitizeDiagnosticEvent(event = {}) {
     ...(route && ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].includes(event.method) ? { method: event.method } : {}),
     ...(['main', 'worker'].includes(event.memoryScope) ? { memoryScope: event.memoryScope } : {}),
     ...Object.fromEntries(['rss', 'heap', 'external', 'elapsedMs', 'count', 'failed', 'bytes', 'categoryId'].map(key => [key, number(event[key])])),
+  };
+}
+
+const omissionReasons = new Set(['snapshot-limit', 'report-budget', 'not-captured', 'retention-expired', 'unreadable']);
+
+// The index is a small inventory, not a second copy of product snapshots. It
+// identifies failures excluded from the five full captures across categories.
+export function sanitizeDiagnosticFailureSummary(input = {}) {
+  input = input && typeof input === 'object' ? input : {};
+  const product = input.product || {};
+  const targetCategoryId = input.targetCategoryId ?? product.categoryId;
+  return {
+    id: uuid.test(input.id || '') ? input.id.toLowerCase() : '', at: date(input.at),
+    ...(uuid.test(input.attemptId || '') ? { attemptId: input.attemptId.toLowerCase() } : {}),
+    product: Object.fromEntries(['id', 'sourceId', 'title', 'sourcePlatform'].map(key => [key, diagnosticText(product[key], key === 'title' ? 240 : 120)])),
+    targetCategoryId: /^\d{1,30}$/.test(String(targetCategoryId)) ? String(targetCategoryId) : '',
+    sourceCategoryId: diagnosticText(input.sourceCategoryId ?? product.sourceCategoryId, 80),
+    mode: ['draft', 'submit'].includes(input.mode) ? input.mode : '',
+    ...(['rules', 'assisted'].includes(input.processingMode) ? { processingMode: input.processingMode } : {}),
+    stage: diagnosticStage(input.stage || input.error?.diagnostics?.publishStage), elapsedMs: number(input.elapsedMs),
+    error: { code: diagnosticCode(input.error), message: diagnosticText(input.error?.message, 1200),
+      requiredFields: (Array.isArray(input.error?.requiredFields) ? input.error.requiredFields : []).slice(0, 12).map(field => diagnosticText(field, 100)) },
+    evidence: ['included', 'historical'].includes(input.evidence) ? input.evidence : 'omitted',
+    ...(omissionReasons.has(input.omissionReason) ? { omissionReason: input.omissionReason } : {}),
+    truncated: input.truncated === true,
   };
 }
 
@@ -131,5 +162,15 @@ export function sanitizeDiagnosticReport(input = {}) {
     events: (Array.isArray(input.events) ? input.events : []).slice(-80).map(sanitizeDiagnosticEvent),
     failures: (Array.isArray(input.failures) ? input.failures : []).slice(0, 5).map(sanitizeDiagnosticFailure),
     omittedFailures: number(input.omittedFailures),
+    ...(Array.isArray(input.failureIndex) ? { failureIndex: input.failureIndex.slice(0, DIAGNOSTIC_FAILURE_INDEX_LIMIT).map(sanitizeDiagnosticFailureSummary) } : {}),
+    ...(input.failureCoverage && typeof input.failureCoverage === 'object' ? { failureCoverage: {
+      indexLimit: DIAGNOSTIC_FAILURE_INDEX_LIMIT, fullEvidenceLimit: 5, snapshotRetentionDays: 7,
+      indexedFailures: Math.min(DIAGNOSTIC_FAILURE_INDEX_LIMIT, Array.isArray(input.failureIndex) ? input.failureIndex.length : 0),
+      omittedIndexEntries: number(input.failureCoverage.omittedIndexEntries) + Math.max(0, (input.failureIndex?.length || 0) - DIAGNOSTIC_FAILURE_INDEX_LIMIT),
+      retainedSnapshots: number(input.failureCoverage.retainedSnapshots),
+      prunedDuringRead: Object.fromEntries(['retention', 'fileSize', 'storageLimit'].map(key => [key, number(input.failureCoverage.prunedDuringRead?.[key])])),
+      // Earlier pruning counts are intentionally unknown, not inferred from
+      // current failures. Expiry and capacity policies stay visible instead.
+    } } : {}),
   };
 }

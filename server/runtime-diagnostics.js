@@ -24,6 +24,10 @@ export function createRuntimeDiagnostics(file) {
       for (const key of ['count', 'updated', 'failed', 'bytes', 'exitCode', 'elapsedMs', 'categoryId']) {
         if (Number.isFinite(fields[key])) values[key] = fields[key];
       }
+      if (Number.isFinite(fields.stageMs) && fields.stageMs >= 0) values.stageMs = Math.min(7 * 86400000, Math.round(fields.stageMs));
+      if (typeof fields.attemptId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(fields.attemptId)) values.attemptId = fields.attemptId;
+      if (['draft', 'submit'].includes(fields.mode)) values.mode = fields.mode;
+      if (['rules', 'assisted'].includes(fields.processingMode)) values.processingMode = fields.processingMode;
       for (const key of ['code', 'reason', 'version']) {
         if (typeof fields[key] === 'string') values[key] = fields[key].replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 80);
       }

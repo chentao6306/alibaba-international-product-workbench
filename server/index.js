@@ -57,6 +57,7 @@ import { createRuntimeDiagnostics, pruneRuntimeDiagnostics } from './runtime-dia
 import { diagnosticSummaryFromState } from './diagnostic-report.js';
 import { diagnosticCode, diagnosticStage, diagnosticRequestContext } from '../auth-server/diagnostic-schema.js';
 import { capturePublishFailure, createPublishDiagnosticStore, pruneAllPublishDiagnostics } from './publish-diagnostics.js';
+import { createPublishTimeline } from './publish-timeline.js';
 
 // APP_ROOT_DIR also supports desktop builds with assets inside app.asar.
 const rootDir = process.env.APP_ROOT_DIR
@@ -1128,7 +1129,11 @@ async function runPublishJob(jobId) {
       let diagnosticCurrentStage = 'publishing';
       let diagnosticCategoryId = 0;
       let diagnosticAiMapping = [];
-      runtimeDiagnostic('publish-started', { stage: diagnosticCurrentStage });
+      const diagnosticAttemptId = newId();
+      const diagnosticTimeline = createPublishTimeline(diagnosticCurrentStage);
+      let diagnosticProcessingMode = 'rules';
+      const diagnosticContext = () => ({ attemptId: diagnosticAttemptId, mode, processingMode: diagnosticProcessingMode,
+        categoryId: diagnosticCategoryId, elapsedMs: performance.now() - diagnosticStarted });
       try {
         product = preparePublishProduct(product, { stockPolicy: job.metadata.stockPolicy || 'preserve', defaultStock: job.metadata.defaultStock });
         store.update((draft) => {
@@ -1141,6 +1146,8 @@ async function runPublishJob(jobId) {
         // Publishing consumes saved product data only. Source visits belong to
         // collection or an explicit refresh, including missing-data repairs.
         const settings = store.read((state) => state.settings);
+        diagnosticProcessingMode = settings.aiProductAssistance?.mode === 'assisted' ? 'assisted' : 'rules';
+        runtimeDiagnostic('publish-started', { ...diagnosticContext(), stage: diagnosticCurrentStage });
         if (['pause_requested', 'paused'].includes(store.read((state) => state.jobs.find((item) => item.id === jobId)?.status))) {
           throw Object.assign(new Error('任务已暂停，已完成数据已保存'), { code: 'PUBLISH_PAUSED' });
         }
@@ -1201,9 +1208,12 @@ async function runPublishJob(jobId) {
             initialStage: '启动国际站发布流程',
             onProgress: (stage) => {
               const nextStage = diagnosticStage(stage);
+              const completedStage = diagnosticTimeline.advance(nextStage, { waiting: verificationState === 'waiting' });
+              if (completedStage) runtimeDiagnostic('publish-stage-completed', { ...diagnosticContext(),
+                stage: completedStage.stage, stageMs: completedStage.durationMs });
               if (nextStage !== diagnosticCurrentStage) {
                 diagnosticCurrentStage = nextStage;
-                runtimeDiagnostic('publish-progress', { stage: nextStage, categoryId: diagnosticCategoryId, elapsedMs: performance.now() - diagnosticStarted });
+                runtimeDiagnostic('publish-progress', { ...diagnosticContext(), stage: nextStage });
               }
               store.patchJob(jobId, { verificationState, message: `正在处理 ${index + 1}/${total}：${product.title} - ${stage}` });
             },
@@ -1211,7 +1221,8 @@ async function runPublishJob(jobId) {
           }
         );
         // The publishing session remains in the background after completion.
-        runtimeDiagnostic('publish-completed', { stage: diagnosticCurrentStage, categoryId: diagnosticCategoryId, elapsedMs: performance.now() - diagnosticStarted });
+        runtimeDiagnostic('publish-completed', { ...diagnosticContext(), stage: diagnosticCurrentStage,
+          stageMs: diagnosticTimeline.snapshot('completed').entries.at(-1).durationMs });
         store.update((draft) => {
           const target = draft.products.find((item) => item.id === product.id);
           if (target) Object.assign(target, {
@@ -1233,11 +1244,14 @@ async function runPublishJob(jobId) {
         publisher.clearPublishStop(jobId);
         store.patchJob(jobId, { progress: index + 1, total, message: `已处理 ${index + 1}/${total}：${product.title}` });
       } catch (error) {
-        runtimeDiagnostic('publish-failed', { code: diagnosticCode(error), stage: diagnosticCurrentStage, categoryId: diagnosticCategoryId, elapsedMs: performance.now() - diagnosticStarted });
+        const diagnosticTrace = diagnosticTimeline.snapshot('failed');
+        runtimeDiagnostic('publish-failed', { ...diagnosticContext(), code: diagnosticCode(error), stage: diagnosticCurrentStage,
+          stageMs: diagnosticTrace.entries.at(-1).durationMs });
         try {
           const current = publisher.publishingPage;
           const page = current?.productId === String(product.id) && current?.jobId === String(jobId) ? current.page : null;
           const evidence = await capturePublishFailure({ page, product, error, mode, aiMapping: diagnosticAiMapping,
+            attemptId: diagnosticAttemptId, timeline: diagnosticTrace, targetCategoryId: diagnosticCategoryId, processingMode: diagnosticProcessingMode,
             stage: error.diagnostics?.publishStage || diagnosticCurrentStage, elapsedMs: performance.now() - diagnosticStarted });
           createPublishDiagnosticStore(dataDir, process.env.KUA_YIPU_ACCOUNT).write(evidence);
         } catch { /* Diagnostics must never replace the original publish error. */ }
@@ -1256,7 +1270,8 @@ async function runPublishJob(jobId) {
           if (target) {
             const result = { status: 'failed', message, code: error.code || '',
               listingMode: normalizeListingMode(job.metadata?.listingMode),
-              ...(error.diagnostics ? { diagnostics: error.diagnostics } : {}),
+              diagnostics: { ...(error.diagnostics || {}), attemptId: diagnosticAttemptId, processingMode: diagnosticProcessingMode,
+                targetCategoryId: diagnosticCategoryId, publishStage: error.diagnostics?.publishStage || diagnosticCurrentStage },
               requiredFields: [...new Set([...(error.requiredFields || []), ...requiredLabelsFromError(message)])], missingSourceFields: error.missingSourceFields || [],
               unmatchedSourceFields: error.unmatchedSourceFields || [], conflictingSourceFields: error.conflictingSourceFields || [] };
             Object.assign(target, { status: 'publish_failed', publishResult: result, updatedAt: new Date().toISOString() });

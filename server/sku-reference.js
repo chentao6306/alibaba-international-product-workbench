@@ -187,23 +187,44 @@ export async function selectSkuPricing(page, product, fill, { timeoutMs = 10000 
 }
 
 export function resolveReferencedSkuRows(product, groups, { appliedGroups = [], normalizeValue = (value) => value } = {}) {
-  const mismatch = () => new Error('商品 SKU 与国际站规格组合不一致，请检查规格选项');
   const total = groups.reduce((count, group) => count * group.options.length, groups.length ? 1 : 0);
-  if (!total || total > 5000) throw mismatch();
+  const diagnosticLabel = value => String(value ?? '').slice(0, 80);
+  const mismatch = (reason, details = {}) => Object.assign(new Error('商品 SKU 与国际站规格组合不一致，请检查规格选项'), {
+    code: 'PUBLISH_SKU_COMBINATION_MISMATCH', fieldName: '规格表',
+    diagnostics: {
+      reason, sourceSkuCount: product.skus.length, targetCombinationCount: total,
+      // The full product is captured separately. Keep the live form and writer
+      // evidence small enough to survive the diagnostic report's error budget.
+      targetGroups: groups.slice(0, 6).map(group => ({ name: diagnosticLabel(group.name), optionCount: group.options.length,
+        options: group.options.slice(0, 8).map(diagnosticLabel) })),
+      appliedGroups: appliedGroups.slice(0, 6).map(group => ({ name: diagnosticLabel(group.name),
+        targetName: diagnosticLabel(group.targetName), id: diagnosticLabel(group.id),
+        sourceGroups: group.sourceGroups?.slice(0, 6).map(diagnosticLabel),
+        appliedValues: Object.entries(group.appliedValues || {}).slice(0, 8)
+          .map(([source, target]) => ({ source: diagnosticLabel(source), target: diagnosticLabel(target) })),
+      })),
+      ...details,
+    },
+  });
+  if (!total) throw mismatch('target-matrix-empty');
+  if (total > 5000) throw mismatch('target-matrix-limit');
   const targetNames = new Set(groups.map(group => dimensionKey(group.name)));
-  if (targetNames.size !== groups.length) throw mismatch();
+  if (targetNames.size !== groups.length) throw mismatch('duplicate-target-dimensions');
   const targetFor = name => {
     const exact = groups.filter(group => dimensionKey(group.name) === dimensionKey(name));
     if (exact.length === 1) return exact[0];
     const aliases = groups.filter(group => nameKey(group.name) === nameKey(name));
-    if (aliases.length > 1) throw mismatch();
+    if (aliases.length > 1) throw mismatch('ambiguous-target-dimension', { sourceDimension: diagnosticLabel(name) });
     return aliases[0];
   };
   const expected = new Map();
   for (const sku of product.skus) {
     const attributes = {}, consumed = new Set();
     const assign = (name, value) => {
-      if (Object.hasOwn(attributes, name) && valueKey(normalizeValue(attributes[name])) !== valueKey(normalizeValue(value))) throw mismatch();
+      if (Object.hasOwn(attributes, name) && valueKey(normalizeValue(attributes[name])) !== valueKey(normalizeValue(value))) {
+        throw mismatch('conflicting-target-assignment', { targetDimension: diagnosticLabel(name),
+          previousValue: diagnosticLabel(attributes[name]), nextValue: diagnosticLabel(value) });
+      }
       attributes[name] = value;
     };
     for (const group of appliedGroups) {
@@ -231,7 +252,11 @@ export function resolveReferencedSkuRows(product, groups, { appliedGroups = [], 
       assign(name, value);
     }
     const key = skuKey(Object.fromEntries(Object.entries(attributes).map(([name, value]) => [name, normalizeValue(value)])));
-    if (expected.has(key)) throw new Error('商品 SKU 转换后出现重复规格组合，未写入价格、编码和库存');
+    if (expected.has(key)) {
+      const error = mismatch('duplicate-source-combination');
+      error.message = '商品 SKU 转换后出现重复规格组合，未写入价格、编码和库存';
+      throw error;
+    }
     expected.set(key, sku);
   }
   const resolved = Array.from({ length: total }, (_, index) => {
@@ -244,7 +269,13 @@ export function resolveReferencedSkuRows(product, groups, { appliedGroups = [], 
     return { attributes, sku: expected.get(skuKey(attributes)) };
   });
   const matched = new Set(resolved.filter((row) => row.sku).map((row) => row.sku));
-  if (matched.size !== product.skus.length || resolved.filter((row) => row.sku).length !== matched.size) throw mismatch();
+  const matchedRowCount = resolved.filter((row) => row.sku).length;
+  if (matched.size !== product.skus.length || matchedRowCount !== matched.size) {
+    throw mismatch(matchedRowCount !== matched.size ? 'duplicate-target-combination' : 'source-combinations-unmatched', {
+      matchedSkuCount: matched.size, matchedRowCount,
+      unmatchedSourceIndices: product.skus.flatMap((sku, index) => matched.has(sku) ? [] : [index]).slice(0, 25),
+    });
+  }
   return resolved;
 }
 

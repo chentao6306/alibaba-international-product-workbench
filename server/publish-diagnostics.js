@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { diagnosticProduct, diagnosticText, sanitizeDiagnosticFailure } from '../auth-server/diagnostic-evidence.js';
-import { diagnosticCode, diagnosticStage } from '../auth-server/diagnostic-schema.js';
+import { diagnosticCode, diagnosticStage, sanitizeDiagnosticFailureSummary } from '../auth-server/diagnostic-schema.js';
 
 const MAX_FILE = 4 * 1024 * 1024;
 const MAX_TOTAL = 96 * 1024 * 1024;
@@ -18,7 +18,8 @@ function failureGroup(record) {
   }
   // Use bounded workflow categories, not product titles or changing progress
   // counters, so repeated failures cannot crowd out another kind of evidence.
-  return JSON.stringify([diagnosticCode(record.error), fields.length ? fields : diagnosticStage(stage)]);
+  return JSON.stringify([record.targetCategoryId || record.product?.categoryId || '', record.mode || '', record.processingMode || '',
+    diagnosticCode(record.error), fields.length ? fields : diagnosticStage(stage)]);
 }
 export function pruneAllPublishDiagnostics(dataDirectory, now = Date.now()) {
   const root = path.join(dataDirectory, 'diagnostics');
@@ -49,36 +50,42 @@ export function createPublishDiagnosticStore(dataDirectory, account, { now = Dat
   }
   function prune() {
     let total = 0; let kept = 0;
+    const removed = { retention: 0, fileSize: 0, storageLimit: 0 };
     for (const item of entries()) {
       total += item.size; kept += 1;
       if (now() - item.time > RETENTION || item.size > MAX_FILE || total > MAX_TOTAL || kept > 60) {
+        removed[now() - item.time > RETENTION ? 'retention' : item.size > MAX_FILE ? 'fileSize' : 'storageLimit'] += 1;
         fs.unlinkSync(item.file); total -= item.size; kept -= 1;
       }
     }
+    return removed;
   }
   return {
     prune,
     write(input) {
       const record = sanitizeDiagnosticFailure({ ...input, id: crypto.randomUUID(), at: new Date(now()).toISOString() });
       let content = JSON.stringify(record);
-      while (Buffer.byteLength(content) > MAX_FILE && record.screenshots.length) { record.screenshots.pop(); record.truncated = true; content = JSON.stringify(record); }
+      while (Buffer.byteLength(content) > MAX_FILE && record.screenshots.length) { record.screenshots.pop(); record.truncated = true; record.truncation.screenshots = true; content = JSON.stringify(record); }
       if (Buffer.byteLength(content) > MAX_FILE) return false;
       prune();
       fs.writeFileSync(path.join(directory, record.id + '.json'), content, { mode: 0o600 });
       prune(); return true;
     },
     read(maxBytes = 6 * 1024 * 1024) {
-      prune(); let bytes = 0;
-      const files = entries(), selected = [], deferred = [], groups = new Set();
-      for (let index = 0; index < files.length && selected.length < 5; index++) {
+      const prunedDuringRead = prune(); let bytes = 0;
+      const files = entries(), selected = [], deferred = [], groups = new Set(), failureIndex = [];
+      for (let index = 0; index < files.length; index++) {
         const item = files[index];
-        if (bytes + item.size > maxBytes) continue;
         try {
           const record = sanitizeDiagnosticFailure(JSON.parse(fs.readFileSync(item.file, 'utf8')));
+          failureIndex.push(sanitizeDiagnosticFailureSummary(record));
+          if (selected.length >= 5 || bytes + item.size > maxBytes) continue;
           const group = failureGroup(record);
           if (groups.has(group)) { deferred.push({ item, index }); continue; }
           selected.push({ record, index }); groups.add(group); bytes += item.size;
-        } catch { /* A corrupt record must not hide the next valid failure. */ }
+        } catch {
+          failureIndex.push(sanitizeDiagnosticFailureSummary({ id: path.basename(item.file, '.json'), at: new Date(item.time).toISOString(), omissionReason: 'unreadable' }));
+        }
       }
       // Keep only file references for duplicates, not dozens of large product
       // snapshots/screenshots. Read at most one bounded file at a time and use
@@ -92,15 +99,23 @@ export function createPublishDiagnosticStore(dataDirectory, account, { now = Dat
         } catch { /* Count unreadable records with all other omitted files. */ }
       }
       const failures = selected.sort((a, b) => a.index - b.index).map(item => item.record);
-      return { failures, omittedFailures: files.length - failures.length, clearedAt: clearedAt() };
+      const selectedIndices = new Set(selected.map(item => item.index));
+      for (let index = 0; index < failureIndex.length; index++) {
+        const summary = failureIndex[index];
+        if (selectedIndices.has(index)) { summary.evidence = 'included'; delete summary.omissionReason; }
+        else if (summary.omissionReason !== 'unreadable') summary.omissionReason = bytes + files[index].size > maxBytes ? 'report-budget' : 'snapshot-limit';
+      }
+      return { failures, failureIndex, omittedFailures: files.length - failures.length, clearedAt: clearedAt(),
+        failureCoverage: { retainedSnapshots: files.length, prunedDuringRead } };
     },
     clear() { for (const item of entries()) fs.unlinkSync(item.file); fs.writeFileSync(clearMarker, '', { mode: 0o600 }); },
   };
 }
 
-export async function capturePublishFailure({ page, product, error, stage, mode, elapsedMs, aiMapping = [] }) {
+export async function capturePublishFailure({ page, product, error, stage, mode, elapsedMs, targetCategoryId, processingMode, timeline, attemptId, aiMapping = [] }) {
   const current = diagnosticProduct(product); const source = diagnosticProduct(product.source?.snapshot || {});
   const record = { product: current.value, source: source.value, truncated: current.truncated || source.truncated,
+    truncation: { product: current.truncated, source: source.truncated }, targetCategoryId, processingMode, timeline, attemptId,
     error: { code: error.code, message: diagnosticText(error.message), stack: diagnosticText(error.stack, 16000).replace(/[a-z]:[\\/][^\r\n()]*?[\\/]([^\\/\s()]+\.m?js:\d+:\d+)/gi, '$1'),
       ...(error.cause instanceof Error ? { cause: { code: error.cause.code, message: diagnosticText(error.cause.message, 6000) } } : {}),
       requiredFields: error.requiredFields, diagnostics: { ...error.diagnostics,
