@@ -1,4 +1,6 @@
 import fs from 'node:fs';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { setTimeout as waitForImageRetry } from 'node:timers/promises';
 import { assertCollectionActive, trackCollectionPage } from './collection-control.js';
 import { sanitizeTemplateHtml, templatePublishHtml, placeTemplateImages } from './description-templates.js';
 import { readSellerReference } from './seller-reference.js';
@@ -27,7 +29,7 @@ import { descriptionImageSlots, descriptionContainsText, restoreDescriptionImage
 import { fillStructuredDescription, structuredHighlightText, acceptedStructuredHighlights, requireAcceptedNativeDescription, requireStructuredDescriptionReady } from './structured-description.js';
 import { ensureSourceDescriptionMode, requireSourceDescriptionMode, descriptionCompatibility } from './description-mode.js';
 import { compatibleLegacyDescriptionHtml, acceptCompatibleLegacyDescription, requireCompatibleLegacyDescription } from './description-compatibility.js';
-import { currentDescriptionStructure, extractDescriptionStructure, descriptionSourceHash, nativeDescriptionImageUrls } from './description-structure.js';
+import { currentDescriptionStructure, extractDescriptionStructure, descriptionSourceHash, nativeDescriptionImageUrls, syncStructuredDescriptionImages } from './description-structure.js';
 import { alibabaKeywordText } from './product-keywords.js';
 import { fillCustomAttributes, requireCustomAttributes } from './custom-attributes.js';
 import { isPublicProductAttribute, planPublicAttributeTransfer, requirePublicAttributeValues } from './attribute-transfer.js';
@@ -56,6 +58,8 @@ import { ensureSimplifiedChinese } from './posting-language.js';
 import { attributeId, extractAlibabaAttributes, mergeSourceAttributes, packagingFromAttributes, readAlibabaAttributeRows, readPostingAttributeSchema, sourceAttributeForField, sourceSpecificationForField, SOURCE_ATTRIBUTE_SCHEMA_VERSION, bindSourceAttributesToPostingSchema } from './category-attributes.js';
 
 const WORKBENCH_URL = 'https://i.alibaba.com/';
+const imageDownloadContext = new AsyncLocalStorage();
+const imageDownloadSignalIds = new WeakMap();
 const SOURCE_DESCRIPTION_SELECTOR = '[data-module-name^="module_structure_descption_"], [data-module-name="module_description"], [data-testid="module-description"], [data-module-name="module_structure_description"], [data-testid="module-details-structure-description"]';
 
 const PROMOTIONAL_TEXT = /(?:Alibaba\s*Lens|免费比价插件|寻找价格更低|相似商品|省时又省钱|下载扩展程序|Accio\s*Work|报告可疑活动|report suspicious activity|find similar products)/i;
@@ -1360,7 +1364,17 @@ export function preparePublishProduct(product, options = {}) {
   product = productForVideoUpload(product, options);
   product = applyStockPolicy(product, options);
   const next = { ...product };
-  const descriptionStructure = currentDescriptionStructure(product);
+  let descriptionStructure = currentDescriptionStructure(product);
+  if (product.imageEdits?.detail && descriptionStructure) {
+    // Older image edits saved the selected list but left native gallery URLs
+    // untouched. Explicit edit provenance makes that list authoritative. Repair
+    // only the detached publish copy; never restore deleted source images.
+    descriptionStructure = syncStructuredDescriptionImages(product, {
+      beforeImages: descriptionStructure.modules.filter(module => module.type === 'gallery')
+        .flatMap(module => module.images.map(image => image.url)),
+      detailImages: product.detailImages || [], html: product.descriptionHtml || '',
+    });
+  }
   next.videoUrl = productVideoUploads(product, options).find(video => video.role === 'main')?.url || '';
   const collectedAttributes = [...(product.attributes || []), ...(product.customAttributes || [])];
   next.origin = productOrigin(product) || productOriginText(product);
@@ -5834,13 +5848,19 @@ export class SellerPublisher {
     };
   }
 
-  async downloadImageSet(product, urls, prefix, limit = 6) {
+  async downloadImageSet(product, urls, prefix, limit = 6, { signal = imageDownloadContext.getStore()?.signal } = {}) {
+    signal?.throwIfAborted();
+    if (signal && !imageDownloadSignalIds.has(signal)) imageDownloadSignalIds.set(signal, crypto.randomUUID());
     fs.mkdirSync(this.imageDir, { recursive: true });
-    const selectedUrls = distinctAlibabaImageUrls(urls).filter(isUsableImageUrl).slice(0, Math.max(limit, 24));
+    const requiredDetails = ['detail', 'structured-detail'].includes(prefix);
+    const candidates = distinctAlibabaImageUrls(urls);
+    const selectedUrls = (requiredDetails ? candidates : candidates.filter(isUsableImageUrl)).slice(0, Math.max(limit, 24));
     const failures = [];
-    let downloadDeadline = 0;
     const downloadOne = async (url, index) => {
+      let stage = 'input', attempts = 0;
       try {
+        signal?.throwIfAborted();
+        if (!isUsableImageUrl(url)) throw new Error('图片地址无效或不受支持');
         const safeId = String(product.sourceId || product.id || 'product').replace(/[^A-Za-z0-9]/g, '').slice(-16);
         const safePrefix = `${String(prefix || 'image').replace(/[^A-Za-z0-9]/g, '')}${prefix === 'detail' ? '-tall2' : ''}-white1-${crypto.createHash('sha256').update(url).digest('hex').slice(0, 16)}`;
         const cached = ['jpg', 'png'].map((extension) => path.join(this.imageDir, `${safeId}${safePrefix}${index}.${extension}`))
@@ -5850,52 +5870,58 @@ export class SellerPublisher {
         if (cached) {
           try {
             const metadata = await sharp(cached, { limitInputPixels: 40000000 }).metadata();
-            if (['jpeg', 'png'].includes(metadata.format) && fs.statSync(cached).size <= 5 * 1024 * 1024) return cached;
-          } catch { /* Re-download incomplete files left by an interrupted run. */ }
+            signal?.throwIfAborted();
+            if (['jpeg', 'png'].includes(metadata.format) && fs.statSync(cached).size <= 5 * 1024 * 1024) return { path: cached };
+          } catch { signal?.throwIfAborted(); /* Re-download incomplete files left by an interrupted run. */ }
         }
         let contentType = '';
         let buffer;
         if (/^data:image\//i.test(url)) {
           const match = String(url).match(/^data:(image\/[^;]+);base64,(.+)$/i);
-          if (!match) return '';
+          if (!match) throw new Error('内嵌图片数据格式无效');
           contentType = match[1];
           buffer = Buffer.from(match[2], 'base64');
         } else if (/^\/media\//i.test(url)) {
+          stage = 'local-file';
           const localPath = path.join(this.dataDir, 'media', path.basename(url));
-          if (!fs.existsSync(localPath)) return '';
+          if (!fs.existsSync(localPath)) throw Object.assign(new Error('本地图片文件不存在，请恢复原图或重新上传'), { code: 'ENOENT' });
           contentType = `image/${path.extname(localPath).slice(1).toLowerCase() === 'png' ? 'png' : 'jpeg'}`;
           buffer = fs.readFileSync(localPath);
         } else {
-          // Later gallery candidates share one budget, rather than extending
-          // a broken CDN connection by several minutes on a single worker.
-          downloadDeadline ||= Date.now() + 60000;
+          stage = 'transport';
+          // Each queued image needs its own bounded transport attempts. A set
+          // deadline starting at the first image can expire before later files
+          // receive a single request, even while earlier downloads succeed.
           let lastError;
           for (let attempt = 0; attempt < 3; attempt += 1) {
             try {
-              const remainingMs = downloadDeadline - Date.now();
-              if (remainingMs <= 0) throw Object.assign(new Error('本组图片下载等待超过 60 秒'), { retryable: false });
+              signal?.throwIfAborted();
+              attempts += 1;
               const response = await fetch(url, {
                 headers: {
                   accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
                   referer: product.sourceUrl,
                   'user-agent': 'Mozilla/5.0'
                 },
-                signal: AbortSignal.timeout(Math.min(12000, remainingMs))
+                signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(12000)]) : AbortSignal.timeout(12000)
               });
               if (!response.ok) throw Object.assign(new Error(`HTTP ${response.status}`), {
+                status: response.status,
                 retryable: response.status >= 500 || [408, 429].includes(response.status)
               });
               contentType = response.headers.get('content-type') || '';
               buffer = Buffer.from(await response.arrayBuffer());
               break;
             } catch (error) {
+              signal?.throwIfAborted();
               lastError = error;
               if (error.retryable === false) break;
-              if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, [500, 1500][attempt]));
+              if (attempt < 2) await waitForImageRetry([500, 1500][attempt], undefined, { signal });
             }
           }
           if (!buffer) throw lastError || new Error('图片下载失败');
         }
+        stage = 'image-data';
         if (!buffer.length || buffer.length > 25 * 1024 * 1024) throw new Error('图片为空或超过 25 MB 下载限制');
         // CDN responses can be octet-stream; inspect the actual image instead
         // of silently discarding valid bytes based only on a response header.
@@ -5928,9 +5954,17 @@ export class SellerPublisher {
         }
         if (buffer.length > 5 * 1024 * 1024 && prefix !== 'structured-detail') throw new Error('图片转换后仍超过 5 MB 上传限制');
         const filePath = path.join(this.imageDir, `${safeId}${safePrefix}${index}.${extension}`);
+        signal?.throwIfAborted();
+        stage = 'cache-write';
         fs.writeFileSync(filePath, buffer);
-        return filePath;
-      } catch (error) { failures.push(error.message); return ''; }
+        return { path: filePath };
+      } catch (error) {
+        signal?.throwIfAborted();
+        const causeCode = error.cause?.code || error.code || error.name || '';
+        return { path: '', failure: { index: index + 1, stage, attempts,
+          status: error.status || null, code: causeCode, message: error.message,
+          imageId: crypto.createHash('sha256').update(String(url)).digest('hex').slice(0, 16) } };
+      }
     };
     // AliCDN occasionally resets a burst of six parallel TLS connections.
     // Three workers retain good throughput while each file still gets its own
@@ -5944,15 +5978,25 @@ export class SellerPublisher {
       const indices = Array.from({ length: end - nextIndex }, (_, offset) => nextIndex + offset);
       nextIndex = end;
       await Promise.all(indices.map(async (index) => {
-        const key = JSON.stringify([product.sourceId || product.id, prefix, index, selectedUrls[index]]);
-        paths[index] = await this.imageDownloads.run(key, () => downloadOne(selectedUrls[index], index));
+        const key = JSON.stringify([product.sourceId || product.id, prefix, index, selectedUrls[index], signal ? imageDownloadSignalIds.get(signal) : '']);
+        const result = await this.imageDownloads.run(key, () => downloadOne(selectedUrls[index], index), { signal });
+        paths[index] = result.path;
+        if (result.failure) failures.push(result.failure);
       }));
     }
+    failures.sort((left, right) => left.index - right.index);
+    const diagnostics = { reason: 'image-download', prefix, expected: Math.min(limit, selectedUrls.length),
+      downloaded: paths.filter(Boolean).length, failures };
+    const failureSummary = failures.slice(0, 3).map(item => `第 ${item.index} 张：${item.message}${item.code && !['Error', 'TypeError'].includes(item.code) ? `（${item.code}）` : ''}`).join('；');
+    if (requiredDetails && paths.filter(Boolean).length < Math.min(limit, selectedUrls.length)) {
+      throw Object.assign(new Error(`详情图片未全部下载成功（应有 ${diagnostics.expected} 张，成功 ${diagnostics.downloaded} 张）；${failureSummary || '来源图片无法读取'}。已停止提交，请处理失败图片后重试`),
+        { code: 'DETAIL_IMAGE_DOWNLOAD_FAILED', diagnostics });
+    }
     if (String(prefix).startsWith('spec-') && selectedUrls.length && paths.filter(Boolean).length < Math.min(limit, selectedUrls.length)) {
-      throw Object.assign(new Error(`来源规格图片下载失败：${failures[0] || '图片为空、格式不支持或超过大小限制'}。当前商品未提交，可稍后重试`), { code: 'SPEC_IMAGE_DOWNLOAD_FAILED' });
+      throw Object.assign(new Error(`来源规格图片下载失败：${failureSummary || '图片为空、格式不支持或超过大小限制'}。当前商品未提交，可稍后重试`), { code: 'SPEC_IMAGE_DOWNLOAD_FAILED', diagnostics });
     }
     if (prefix === 'main' && selectedUrls.length >= 4 && paths.filter(Boolean).length < 4) {
-      throw Object.assign(new Error(`主图下载失败：${selectedUrls.length} 张来源主图仅下载成功 ${paths.filter(Boolean).length} 张；${failures[0] || '来源图片无法读取'}。当前商品未提交，可稍后重试`), { code: 'MAIN_IMAGE_DOWNLOAD_FAILED' });
+      throw Object.assign(new Error(`主图下载失败：${selectedUrls.length} 张来源主图仅下载成功 ${paths.filter(Boolean).length} 张；${failureSummary || '来源图片无法读取'}。当前商品未提交，可稍后重试`), { code: 'MAIN_IMAGE_DOWNLOAD_FAILED', diagnostics });
     }
     return paths.filter(Boolean).slice(0, limit);
   }
@@ -7249,31 +7293,41 @@ export class SellerPublisher {
     // Only download the current product's media in advance. All sets share
     // a bounded queue; low-memory machines use one image worker. Browser uploads
     // and submission remain sequential.
-    this.imageDownloads.limit = browserResourcePolicy().imageConcurrency;
-    const mediaReady = Promise.allSettled([
-      this.downloadImageSet(product, product.mainImages?.length ? product.mainImages : [product.mainImage, ...(product.images || [])], 'main', 6),
-      this.downloadImageSet(product, product.detailImages || [], 'detail', (product.detailImages || []).length),
-      ...[...new Set((product.variantGroups || []).find(isColorVariantGroup)?.options || [])].slice(0, 12).map((value, index) => {
-        const group = product.variantGroups.find(isColorVariantGroup);
-        return this.downloadImageSet(product, [group.optionImages?.[value] || group.optionImages?.[englishSpecText(value)]], `spec-color-${index}`, 1);
-      }),
-    ]);
-    try {
-      for (let attempt = 0; ; attempt++) {
-        try {
-          return await withPostingPolicy({ ...options, onProgress: reportStage },
-            () => this.publishPreparedProduct(product, publishPageUrl, mode, publishCategory, jobId, reportStage, options));
-        } catch (error) {
-          // These typed errors only originate while preparing the form, before
-          // any save/submit. Never replay a submission with an unknown receipt.
-          if (options.signal?.aborted || attempt || error.code !== 'PUBLISH_FORM_NOT_READY') throw error;
-          reportStage('发布页加载不完整，重新加载后重试一次');
+    const mediaController = new AbortController();
+    const mediaSignal = options.signal ? AbortSignal.any([options.signal, mediaController.signal]) : mediaController.signal;
+    return imageDownloadContext.run({ signal: mediaSignal, cancel: reason => mediaController.abort(reason) }, async () => {
+      this.imageDownloads.limit = browserResourcePolicy().imageConcurrency;
+      const mediaReady = Promise.allSettled([
+        this.downloadImageSet(product, product.mainImages?.length ? product.mainImages : [product.mainImage, ...(product.images || [])], 'main', 6),
+        this.downloadImageSet(product, product.detailImages || [], 'detail', (product.detailImages || []).length),
+        ...[...new Set((product.variantGroups || []).find(isColorVariantGroup)?.options || [])].slice(0, 12).map((value, index) => {
+          const group = product.variantGroups.find(isColorVariantGroup);
+          return this.downloadImageSet(product, [group.optionImages?.[value] || group.optionImages?.[englishSpecText(value)]], `spec-color-${index}`, 1);
+        }),
+      ]);
+      try {
+        for (let attempt = 0; ; attempt++) {
+          try {
+            return await withPostingPolicy({ ...options, onProgress: reportStage },
+              () => this.publishPreparedProduct(product, publishPageUrl, mode, publishCategory, jobId, reportStage, options));
+          } catch (error) {
+            // These typed errors only originate while preparing the form, before
+            // any save/submit. Never replay a submission with an unknown receipt.
+            if (options.signal?.aborted || attempt || error.code !== 'PUBLISH_FORM_NOT_READY') throw error;
+            reportStage('发布页加载不完整，重新加载后重试一次');
+          }
         }
+      } catch (error) {
+        error.diagnostics = { ...(error.diagnostics || {}), publishStage: lastStage };
+        throw error;
+      } finally {
+        // A failed form or completed receipt no longer needs speculative media.
+        // Cancel before awaiting cleanup so queued retries cannot delay a pause.
+        mediaController.abort();
+        this.clearPublishStop(jobId);
+        await mediaReady;
       }
-    } catch (error) {
-      error.diagnostics = { ...(error.diagnostics || {}), publishStage: lastStage };
-      throw error;
-    } finally { this.clearPublishStop(jobId); await mediaReady; }
+    });
   }
 
   async publishPreparedProduct(product, publishPageUrl, mode, publishCategory, jobId, reportStage, options) {
@@ -7283,9 +7337,11 @@ export class SellerPublisher {
     options = { ...options, onLogisticsDecision: reportStage };
     const resources = browserResourcePolicy();
     const connection = new AbortController();
+    const media = imageDownloadContext.getStore();
     const stopKey = String(jobId || '');
     let page;
     const stop = () => {
+      media?.cancel(options.signal?.reason || Object.assign(new Error('已暂停当前商品操作'), { code: 'PUBLISH_PAUSED' }));
       connection.abort();
       page?.close().catch(() => {});
     };

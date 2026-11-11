@@ -16,6 +16,7 @@ import { requiredAttributeKey } from '../server/publish-reference.js';
 import { currentDescriptionStructure } from '../server/description-structure.js';
 import { compileNativeDescription, nativeDescriptionSchemas, readNativeDescriptionFields, requireNativeDescriptionFields, requireNativeDescriptionAccepted } from '../server/native-description-fields.js';
 import { prepareStructuredDescriptionImages } from '../server/structured-description-images.js';
+import { bindReadbackSkuGroups } from './qa/sku-readback-identity.mjs';
 import sharp from 'sharp';
 
 const directory = process.env.QA_LEDGER_DIR;
@@ -73,11 +74,12 @@ try {
     const skuRoot = page.locator('#sku');
     await skuRoot.scrollIntoViewIfNeeded();
     await skuRoot.locator('[data-name="skuOuterId"][data-row]').first().waitFor({ timeout: 30000 });
-    const groups = await skuRoot.locator('.sku-header th').evaluateAll(nodes => nodes.map(node => ({
+    const headers = await skuRoot.locator('.sku-header th').evaluateAll(nodes => nodes.map(node => ({
       name: node.querySelector('.th-saleProps-label > span')?.textContent?.trim(),
       options: [...node.querySelectorAll('.checkSelectBabel .labelText')].map(option => option.textContent.trim()),
     })).filter(group => group.name && group.options.length));
-    const expected = resolveReferencedSkuRows(product, groups);
+    const { groups, appliedGroups } = bindReadbackSkuGroups(product, headers, await page.evaluate(readPostingAttributeSchema));
+    const expected = resolveReferencedSkuRows(product, groups, { appliedGroups });
     result.skuPrices = [];
     const seen = new Set();
     const scroll = skuRoot.locator('.virtualized-table-scroll-wrapper');

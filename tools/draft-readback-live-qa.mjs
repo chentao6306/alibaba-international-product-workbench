@@ -19,6 +19,7 @@ import { compatibleLegacyDescriptionHtml, compatibleDescriptionFingerprint } fro
 import { compileNativeDescription, nativeDescriptionSchemas, readNativeDescriptionFields,
   requireNativeDescriptionFields, requireNativeDescriptionAccepted } from '../server/native-description-fields.js';
 import { prepareStructuredDescriptionImages } from '../server/structured-description-images.js';
+import { bindReadbackSkuGroups } from './qa/sku-readback-identity.mjs';
 
 const root = process.env.QA_OUTPUT_DIR, prior = process.env.QA_DRAFT_DIR;
 assert.ok(root && prior && process.env.QA_SOURCE_IDS && process.env.QA_DESKTOP_USER_DATA_DIR && process.env.QA_EXPECTED_ACCOUNT);
@@ -77,11 +78,12 @@ async function checkSkuRows(page, product) {
   const root = page.locator('#sku:visible');
   await root.scrollIntoViewIfNeeded();
   await root.locator('[data-name="skuOuterId"][data-row]').first().waitFor({ timeout: 30000 });
-  const groups = await root.locator('.sku-header th').evaluateAll(nodes => nodes.map(node => ({
+  const headers = await root.locator('.sku-header th').evaluateAll(nodes => nodes.map(node => ({
     name: node.querySelector('.th-saleProps-label > span')?.textContent?.trim(),
     options: [...node.querySelectorAll('.checkSelectBabel .labelText')].map(option => option.textContent.trim()),
   })).filter(group => group.name && group.options.length));
-  const expected = resolveReferencedSkuRows(product, groups);
+  const { groups, appliedGroups } = bindReadbackSkuGroups(product, headers, await page.evaluate(readPostingAttributeSchema));
+  const expected = resolveReferencedSkuRows(product, groups, { appliedGroups });
   const rows = new Map(), scroll = root.locator('.virtualized-table-scroll-wrapper');
   await scroll.evaluate(node => { node.scrollTop = 0; node.dispatchEvent(new Event('scroll')); });
   let stagnant = 0;
@@ -116,7 +118,7 @@ async function checkSkuRows(page, product) {
     await scroll.evaluate(node => { node.scrollTop += Math.max(48, node.clientHeight - 48); node.dispatchEvent(new Event('scroll')); });
     await page.waitForTimeout(180);
   }
-  return { applicable: true, groups, rows: [...rows.values()].sort((a, b) => a.index - b.index) };
+  return { applicable: true, groups, appliedGroups, rows: [...rows.values()].sort((a, b) => a.index - b.index) };
 }
 
 async function imageBytes(page, value) {

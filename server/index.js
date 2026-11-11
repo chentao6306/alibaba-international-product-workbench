@@ -47,8 +47,7 @@ import { assistCollectedProduct, assistAttributeMapping, requestProductAi, creat
 import { DEFAULT_PROCESSING, prepareMarketplaceProduct, processingSettings, translateProductTitle } from './product-processing.js';
 import { initializeCollectionFolders, requireCollectionFolder, saveCollectionFolder, collectionFolderDeletionPreview, deleteCollectionFolder, moveProductsToFolder, findCollectedProduct } from './collection-folders.js';
 import { createWorkbenchStateReader } from './workbench-state.js';
-import { registerProductImageApi, imageListPatch } from './product-image-api.js';
-import { editImageLists } from './product-images.js';
+import { registerProductImageApi, coherentProductImagePatch } from './product-image-api.js';
 import { registerDescriptionTemplateApi } from './description-templates.js';
 import { createUpdateGuard } from './update-guard.js';
 import { createBackgroundTasks } from './background-tasks.js';
@@ -769,6 +768,7 @@ app.patch('/api/products/:id', (request, response, next) => {
       }
       Object.assign(patch, categoryChangePatch(product, patch));
       if (request.body.usdRate && product.currencySymbol !== '$') Object.assign(patch, convertProductPrices({ ...product, ...patch }, request.body.usdRate));
+      Object.assign(patch, coherentProductImagePatch(product, patch));
       if (!product.source?.snapshot) syncProductModel(product);
       recordProductMutation(product, patch, { actor: 'user', action: 'single-edit' });
       syncProductModel(attachCategoryRequirements(product, state.postingSchemas));
@@ -837,7 +837,7 @@ app.post('/api/products/batch-update', (request, response, next) => {
         if (patch.services) next.services = { ...(product.services || {}), ...patch.services };
         if (patch.regionalPricing) next.regionalPricing = { ...(product.regionalPricing || {}), ...patch.regionalPricing };
         if (patch.packaging) next.packaging = { ...(product.packaging || {}), ...patch.packaging };
-        if (patch.imageOperation) Object.assign(next, imageListPatch(product, editImageLists(product, patch.imageOperation)));
+        Object.assign(next, coherentProductImagePatch(product, next, patch.imageOperation));
         if (patch.descriptionPrefix || patch.imageOperation) { delete next.descriptionPrefix; delete next.imageOperation; }
         delete next.priceTransform; delete next.skuTransform; delete next.skuRows;
         delete next.attributeOperation; delete next.variantOperation;
@@ -846,6 +846,7 @@ app.post('/api/products/batch-update', (request, response, next) => {
         delete next.source;
         delete next.sourceSnapshot;
         delete next.sourceSnapshotHash;
+        if (!product.source?.snapshot) syncProductModel(product);
         recordProductMutation(product, { ...categoryChangePatch(product, next), status: 'ready' }, { actor: 'user', action: 'batch-edit' });
         syncProductModel(attachCategoryRequirements(product, state.postingSchemas));
       });

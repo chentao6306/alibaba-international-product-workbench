@@ -1,5 +1,5 @@
 import { load } from 'cheerio';
-import { currentDescriptionStructure, descriptionSourceHash } from './description-structure.js';
+import { currentDescriptionStructure, descriptionSourceHash, materializeLegacyFaqHtml } from './description-structure.js';
 import { descriptionFingerprint } from './structured-description.js';
 
 const receipts = new WeakMap();
@@ -39,7 +39,7 @@ export function descriptionCompatibilityKey(product) {
 export function compatibleLegacyDescriptionHtml(product, html) {
   const structure = currentDescriptionStructure(product);
   if (!structure?.modules?.length) throw failure('source-modules');
-  const $ = load(html || '', null, false);
+  const $ = load(materializeLegacyFaqHtml(product, html, structure) || '', null, false);
   const text = normalize($.root().text());
   const urls = [...new Set(product.detailImages || [])];
   for (const module of structure.modules) {

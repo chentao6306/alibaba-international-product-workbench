@@ -49,8 +49,9 @@ try {
   assert.equal(requests.filter((r) => /^\/api\/products\/product-/.test(r.url)).length, 0, 'opening batch editor must not fetch 500 full details');
   assert.equal(await page.locator('.batch-preview-row').count(), 30);
   await page.locator('.batch-tabs').getByRole('button', { name: '产品图片', exact: true }).click();
-  await images.getByLabel('预览商品', { exact: true }).waitFor(); await settled('.batch-image-editor');
-  assert.equal(await images.getByLabel('预览商品', { exact: true }).locator('option').count(), 500);
+  await images.getByRole('navigation', { name: '已选商品图片导航' }).waitFor(); await settled('.batch-image-editor');
+  assert.equal(await images.locator('.bie-product-card').count(), 12);
+  await images.getByLabel('图片编辑商品范围').selectOption('all');
   assert.equal(requests.filter((r) => r.url === '/api/products/image-drafts').length, 5);
   await images.getByLabel('水印类型').selectOption('image');
   await images.getByLabel('上传水印图片', { exact: true }).setInputFiles(logo); await settled('.batch-image-editor');
@@ -62,7 +63,7 @@ try {
   assert.match(await failure.innerText(), /图片损坏/);
   assert.equal(requests.filter((r) => r.url === '/api/media/process').length, 17, 'shared images are processed once');
   await failure.getByRole('button', { name: '查看商品' }).click();
-  assert.equal(await images.getByLabel('预览商品', { exact: true }).inputValue(), 'product-13');
+  assert.equal(await images.locator('.bie-images').getAttribute('data-product-id'), 'product-13');
   await page.screenshot({ path: path.join(output, '500-products-image-failure.png') });
   fs.writeFileSync(path.join(media, 'broken.png'), source);
   await failure.getByRole('button', { name: '只重试失败图片' }).click(); await settled('.batch-image-editor');

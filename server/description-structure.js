@@ -106,6 +106,116 @@ export function currentDescriptionStructure(product) {
   return recoverSanitizedFaq(product, current);
 }
 
+// Old collection cleanup removed whole FAQ spans containing "contact us" but
+// retained their text in the structured snapshot. Materialize only that proven
+// loss in the detached legacy conversion, after checking the real source hash,
+// every FAQ row and the current module. Never fill arbitrary blank user edits.
+export function materializeLegacyFaqHtml(product, html, current = currentDescriptionStructure(product)) {
+  const source = product.source, snapshot = source?.snapshot;
+  if (product.descriptionTemplate || !current || !snapshot || source.snapshotHashVersion !== 2
+    || source.snapshotHash !== descriptionSourceHash(JSON.stringify(snapshot))) return html;
+  if (product.sourceId && snapshot.sourceId && String(product.sourceId) !== String(snapshot.sourceId)) return html;
+  const original = snapshot.structuredDescription;
+  if (original?.version !== 1 || original.sourceHtmlHash !== descriptionSourceHash(snapshot.descriptionHtml || '')) return html;
+  const faqItems = structure => {
+    const modules = (structure?.modules || []).filter(module => module.type === 'faq');
+    return modules.length === 1 && Array.isArray(modules[0].items)
+      ? modules[0].items.map(item => ({ question: text(item.question), answer: text(item.answer) })) : null;
+  };
+  const expected = faqItems(original), baseline = faqItems(extractDescriptionStructure(snapshot.descriptionHtml));
+  const active = faqItems(current), currentHtml = faqItems(extractDescriptionStructure(product.descriptionHtml));
+  if (!expected?.length || !baseline || expected.length !== baseline.length
+    || JSON.stringify(active) !== JSON.stringify(expected) || JSON.stringify(currentHtml) !== JSON.stringify(baseline)) return html;
+  const repairs = [];
+  for (const [index, item] of expected.entries()) {
+    // At least one surviving field must identify each repaired row.
+    if (!baseline[index].question && !baseline[index].answer) return html;
+    for (const field of ['question', 'answer']) {
+      if (item[field] === baseline[index][field]) continue;
+      if (baseline[index][field] || !/\bcontact us\b/i.test(item[field])
+        || /@|\b(?:tel(?:ephone)?|phone)\b\s*[:：]?\s*\+?\d[\d ()-]{5,}\d\b|\b(?:whats?app|wechat|skype)\b\s*(?:[:：]|(?:id|account|number)\s*[:：]?)\s*[+\w@.-]{4,}/i.test(item[field])) return html;
+      repairs.push({ index, field, value: item[field] });
+    }
+  }
+  if (!repairs.length) return html;
+  const $ = load(html || '', null, false);
+  const roots = $('[data-testid="product-detail-qa"]');
+  if (roots.length !== 1) return html;
+  const rows = roots.children().toArray();
+  if (rows.length !== baseline.length || rows.some(row => $(row).children().length !== 2)) return html;
+  const actual = rows.map(row => ({ question: text($(row).children().eq(0).text()), answer: text($(row).children().eq(1).text()) }));
+  if (JSON.stringify(actual) !== JSON.stringify(baseline)) return html;
+  for (const repair of repairs) {
+    const cell = $(rows[repair.index]).children().eq(repair.field === 'question' ? 0 : 1);
+    // Empty text around media/table content is not an empty FAQ field.
+    if (cell.find('img,video,table,[data-workbench-source-image]').length) return html;
+  }
+  for (const repair of repairs) $(rows[repair.index]).children().eq(repair.field === 'question' ? 0 : 1).text(repair.value);
+  return $.root().html() || '';
+}
+
+// Image edits change the working galleries as well as HTML. Keep native module
+// identity and text; the immutable source may supply gallery membership only
+// for explicitly restored URLs, never overwrite the current description text.
+export function syncStructuredDescriptionImages(product, { beforeImages, detailImages, html, restoreStructure = null }) {
+  const current = currentDescriptionStructure(product);
+  if (!current) return null;
+  const selected = new Set(detailImages);
+  const remaining = new Map();
+  detailImages.forEach(url => remaining.set(url, (remaining.get(url) || 0) + 1));
+  const take = url => {
+    if (!remaining.get(url)) return false;
+    remaining.set(url, remaining.get(url) - 1);
+    return true;
+  };
+  const position = new Map(detailImages.map((url, index) => [url, index]));
+  const sourceGalleries = (restoreStructure?.modules || []).filter(module => module.type === 'gallery');
+  const sourceUrls = new Set(sourceGalleries.flatMap(module => module.images.map(image => image.url)));
+  const insertGallery = (gallery, source = null) => {
+    const sourceModules = restoreStructure?.modules || [];
+    const following = source ? sourceModules.slice(sourceModules.indexOf(source) + 1) : [];
+    const successor = following.map(module => current.modules.findIndex(candidate => candidate.type === module.type
+      && (module.type !== 'gallery' || candidate.scope === module.scope && candidate.title === module.title))).find(index => index >= 0);
+    const boundary = current.modules.findIndex(module => gallery.scope === 'company' ? module.type === 'faq'
+      : module.type === 'company' || module.type === 'faq' || module.type === 'gallery' && module.scope === 'company');
+    current.modules.splice(successor ?? (boundary < 0 ? current.modules.length : boundary), 0, gallery);
+  };
+  for (const module of current.modules.filter(module => module.type === 'gallery')) {
+    module.images = module.images.flatMap(image => {
+      const index = beforeImages.indexOf(image.url);
+      const replacement = beforeImages.length === detailImages.length && index >= 0 ? detailImages[index] : '';
+      const url = selected.has(image.url) ? image.url
+        : replacement && !beforeImages.includes(replacement) && !sourceUrls.has(replacement) ? replacement : '';
+      if (!url || !take(url)) return [];
+      return [{ ...image, url }];
+    }).sort((left, right) => position.get(left.url) - position.get(right.url));
+  }
+  for (const source of sourceGalleries) {
+    const restored = source.images.filter(image => take(image.url));
+    if (!restored.length) continue;
+    let gallery = current.modules.find(module => module.type === 'gallery' && module.scope === source.scope && module.title === source.title);
+    if (!gallery) {
+      gallery = { ...structuredClone(source), images: [] };
+      insertGallery(gallery, source);
+    }
+    gallery.images.push(...structuredClone(restored));
+  }
+  const added = detailImages.filter(take);
+  if (added.length) {
+    let gallery = current.modules.find(module => module.type === 'gallery' && module.scope !== 'company' && module.title === 'Other product images');
+    if (!gallery) {
+      gallery = { type: 'gallery', scope: 'product', title: 'Other product images', images: [] };
+      insertGallery(gallery);
+    }
+    gallery.images.push(...added.map(url => ({ url, caption: '' })));
+  }
+  current.modules = current.modules.filter(module => module.type !== 'gallery' || module.images.length);
+  for (const module of current.modules.filter(module => module.type === 'gallery')) {
+    module.images.sort((left, right) => position.get(left.url) - position.get(right.url));
+  }
+  return { ...current, sourceHtmlHash: descriptionSourceHash(html), images: [...detailImages], html };
+}
+
 function recoverSanitizedFaq(product, current) {
   const source = product.source;
   const snapshot = source?.snapshot;

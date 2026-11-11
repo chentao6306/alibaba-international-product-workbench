@@ -1,18 +1,37 @@
 import { load } from 'cheerio';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
-import { imageRevision as imageState, productImageLists } from './product-images.js';
+import { editImageLists, imageRevision as imageState, productImageLists } from './product-images.js';
 import { findWorkspaceJobs } from './store.js';
 import { imageError, friendlyImageError, localImagePath, processImage, uploadImage } from './image-processing.js';
-import { recordProductMutation, syncProductModel } from './product-model.js';
+import { recordProductMutation, syncProductModel, verifySourceIntegrity } from './product-model.js';
 import { createRuntimeDiagnostics } from './runtime-diagnostics.js';
+import { syncStructuredDescriptionImages } from './description-structure.js';
 
-const imageRevision = (product) => createHash('sha256').update(imageState(product)).digest('hex');
+const imageRevision = (product) => createHash('sha256').update(JSON.stringify([
+  imageState(product), product.source?.snapshotHash || '',
+  product.source?.snapshot ? productImageLists(product.source.snapshot) : null,
+])).digest('hex');
 
-export function imageListPatch(product, lists) {
+// Only the immutable capture can provide collected originals. Current images
+// and watermark repair history are working copies, not a collection snapshot.
+export function sourceImageDraft(product) {
+  const integrity = verifySourceIntegrity(product);
+  if (!integrity.present) return { sourceImages: null, sourceImageError: '没有采集原图快照，无法恢复；请重新采集后重试' };
+  if (!integrity.valid) return { sourceImages: null, sourceImageError: '来源快照校验失败，无法恢复采集原图；请重新采集后重试' };
+  const sourceImages = productImageLists(product.source.snapshot), sourceImageErrors = {};
+  for (const key of ['mainImages', 'detailImages']) {
+    const label = key === 'mainImages' ? '主图' : '详情图';
+    if (!sourceImages[key].length) sourceImageErrors[key] = `采集快照中没有${label}，无法恢复`;
+    else if (sourceImages[key].some(url => typeof url !== 'string' || url.length > 4096 || !/^(https?:\/\/|\/media\/)/i.test(url))) sourceImageErrors[key] = `采集${label}地址无效，无法恢复；请重新采集后重试`;
+  }
+  return { sourceImages, sourceImageErrors };
+}
+
+export function imageListPatch(product, lists, { forceMain = false, forceDetail = false } = {}) {
   const before = productImageLists(product);
-  const mainChanged = JSON.stringify(before.mainImages) !== JSON.stringify(lists.mainImages);
-  const detailChanged = JSON.stringify(before.detailImages) !== JSON.stringify(lists.detailImages);
+  const mainChanged = forceMain || JSON.stringify(before.mainImages) !== JSON.stringify(lists.mainImages);
+  const detailChanged = forceDetail || JSON.stringify(before.detailImages) !== JSON.stringify(lists.detailImages);
   if (!mainChanged && !detailChanged) return {};
   const patch = { ...lists, images: [...lists.mainImages], mainImage: lists.mainImages[0] || '',
     imageEdits: { ...product.imageEdits, ...(mainChanged ? { main: true } : {}), ...(detailChanged ? { detail: true } : {}) } };
@@ -21,25 +40,85 @@ export function imageListPatch(product, lists) {
     // publisher and editor must not resurrect stale HTML images after deletion.
     const replaceImages = (html) => {
       const $ = load(html || '', null, false);
-      const present = new Set();
+      const remaining = new Map();
+      for (const url of lists.detailImages) remaining.set(url, (remaining.get(url) || 0) + 1);
+      const present = [];
       $('img').each((_, node) => {
         const image = $(node);
         const old = image.attr('data-src') || image.attr('data-original') || image.attr('src') || '';
         const index = before.detailImages.indexOf(old);
         const url = lists.detailImages.includes(old) ? old
           : before.detailImages.length === lists.detailImages.length && index >= 0 ? lists.detailImages[index] : '';
-        if (!url) { image.remove(); return; }
-        image.attr('src', url).removeAttr('data-src data-original srcset'); present.add(url);
+        if (!url || !remaining.get(url)) { image.remove(); return; }
+        image.attr('src', url).removeAttr('data-src data-original srcset');
+        remaining.set(url, remaining.get(url) - 1);
+        present.push({ url, node });
       });
       $('picture source').remove();
       $('picture').each((_, node) => { if (!$(node).find('img').length) $(node).remove(); });
-      for (const url of lists.detailImages) if (!present.has(url)) { $.root().append($('<img>').attr('src', url)); present.add(url); }
+      // Insert restored images before their next surviving image, preserving
+      // the selected sequence without replacing edited text, tables or video.
+      let previous = null;
+      const anchors = [...present];
+      for (const [index, url] of lists.detailImages.entries()) {
+        const match = anchors.findIndex(item => item.url === url);
+        if (match >= 0) { previous = anchors.splice(match, 1)[0].node; continue; }
+        const image = $('<img>').attr('src', url);
+        const following = lists.detailImages.slice(index + 1).map(next => anchors.find(item => item.url === next)).find(Boolean);
+        if (following) $(following.node).before(image);
+        else if (previous) $(previous).after(image);
+        else $.root().append(image);
+        previous = image[0];
+      }
       return $.root().html() || '';
     };
     patch.descriptionHtml = replaceImages(product.descriptionHtml || product.structuredDescription?.html || '');
-    if (product.structuredDescription) patch.structuredDescription = { ...product.structuredDescription, images: [...lists.detailImages], html: replaceImages(product.structuredDescription.html || '') };
+    const structure = syncStructuredDescriptionImages(product, {
+      beforeImages: before.detailImages, detailImages: lists.detailImages, html: patch.descriptionHtml,
+      restoreStructure: verifySourceIntegrity(product).valid ? product.source?.snapshot?.structuredDescription : null,
+    });
+    if (!structure && product.structuredDescription?.version === 1) patch.structuredDescription = null;
+    else if (structure || product.structuredDescription) patch.structuredDescription = {
+      ...(structure || product.structuredDescription), images: [...lists.detailImages],
+      html: structure ? structure.html : replaceImages(product.structuredDescription?.html || ''),
+    };
   }
   return patch;
+}
+
+// Editor and batch APIs may send images together with new description text.
+// Reconcile against that text while comparing lists with the persisted product.
+export function coherentProductImagePatch(product, patch, operation = '') {
+  const imageFields = ['mainImages', 'images', 'mainImage', 'detailImages'];
+  if (!operation && !imageFields.some(key => Object.hasOwn(patch, key))) return patch;
+  const integrity = verifySourceIntegrity(product);
+  if (integrity.present && !integrity.valid) throw imageError('来源快照校验失败，未保存图片；请重新采集后重试', 409);
+  let lists = productImageLists(product);
+  for (const key of ['mainImages', 'images', 'detailImages']) {
+    if (Object.hasOwn(patch, key) && (!Array.isArray(patch[key]) || patch[key].some(url => typeof url !== 'string'))) throw imageError('图片列表无效');
+  }
+  if (Object.hasOwn(patch, 'mainImages')) lists.mainImages = [...patch.mainImages];
+  else if (Object.hasOwn(patch, 'images')) lists.mainImages = [...patch.images];
+  else if (Object.hasOwn(patch, 'mainImage')) {
+    if (typeof patch.mainImage !== 'string') throw imageError('主图地址无效');
+    lists.mainImages = patch.mainImage ? [patch.mainImage, ...lists.mainImages.slice(1)] : [];
+  }
+  if (Object.hasOwn(patch, 'detailImages')) lists.detailImages = [...patch.detailImages];
+  if (operation) {
+    try { lists = editImageLists({ ...product, ...lists, ...sourceImageDraft(product) }, operation); }
+    catch (error) { throw imageError(error.message, error.status || 400); }
+  }
+  const descriptions = Object.fromEntries(['descriptionHtml', 'structuredDescription'].filter(key => Object.hasOwn(patch, key)).map(key => [key, patch[key]]));
+  const mainSupplied = ['mainImages', 'images', 'mainImage'].some(key => Object.hasOwn(patch, key));
+  // An explicit clear also confirms intent for older saved empty arrays that
+  // predate imageEdits. Never infer that intent during publication itself.
+  const forceMain = !product.imageEdits?.main && !lists.mainImages.length && (mainSupplied || operation === 'clear-main');
+  const forceDetail = !product.imageEdits?.detail && !lists.detailImages.length && (Object.hasOwn(patch, 'detailImages') || operation === 'clear-detail');
+  return {
+    ...patch, ...imageListPatch({ ...product, ...descriptions }, lists, { forceMain, forceDetail }),
+    ...(mainSupplied
+      ? { mainImages: [...lists.mainImages], images: [...lists.mainImages], mainImage: lists.mainImages[0] || '' } : {}),
+  };
 }
 
 export function registerProductImageApi(app, { store, mediaDir }) {
@@ -55,7 +134,7 @@ export function registerProductImageApi(app, { store, mediaDir }) {
         return ids.map((id) => {
           const product = index.get(id);
           if (!product) throw imageError(`商品 ${id} 已不存在，请刷新`, 409);
-          return { id, title: product.title, revision: imageRevision(product), ...productImageLists(product) };
+          return { id, title: product.title, revision: imageRevision(product), ...productImageLists(product), ...sourceImageDraft(product) };
         });
       });
       response.json(products);
@@ -92,6 +171,8 @@ export function registerProductImageApi(app, { store, mediaDir }) {
             const product = index.get(item.id);
             if (!product || imageRevision(product) !== item.revision) throw imageError('商品图片或详情已被其他操作修改，请关闭窗口后重新编辑', 409);
             if (busyProducts.has(product.id)) throw imageError('商品正在处理，请等待任务完成或暂停后再保存图片', 409);
+            const integrity = verifySourceIntegrity(product);
+            if (integrity.present && !integrity.valid) throw imageError('来源快照校验失败，未保存图片；请重新采集后重试', 409);
             ready.push({ product, patch: imageListPatch(product, productImageLists(item)) });
           } catch (error) {
             if (!partial) throw error;
@@ -124,7 +205,8 @@ export function registerProductImageApi(app, { store, mediaDir }) {
       if (sourceRevision !== revision) {
         sourceUrls = new Set(store.read((state) => state.products.flatMap((p) => {
           const lists = productImageLists(p);
-          return [...lists.mainImages, ...lists.detailImages];
+          const originals = sourceImageDraft(p).sourceImages;
+          return [...lists.mainImages, ...lists.detailImages, ...(originals?.mainImages || []), ...(originals?.detailImages || [])];
         })));
         sourceRevision = revision;
       }

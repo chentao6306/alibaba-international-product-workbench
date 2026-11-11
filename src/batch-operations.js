@@ -6,11 +6,12 @@ export function chunks(items, size = BATCH_SIZE) {
 
 // Keep a bounded number of requests active. An individual failure never discards
 // successful previews; callers retain the exact target for a selective retry.
-export async function processImageTargets(targets, process, onProgress = () => {}) {
+export async function processImageTargets(targets, process, onProgress = () => {}, { shouldCancel = () => false } = {}) {
   const cache = new Map(), results = new Array(targets.length);
   let cursor = 0, completed = 0, lastProgress = 0;
   async function worker() {
     while (cursor < targets.length) {
+      if (shouldCancel()) return;
       const index = cursor++, target = targets[index];
       try {
         if (!cache.has(target.url)) cache.set(target.url, Promise.resolve().then(() => process(target)));
@@ -23,6 +24,12 @@ export async function processImageTargets(targets, process, onProgress = () => {
     }
   }
   await Promise.all([worker(), worker()]);
+  // Do not abort in-flight transforms: their returned preview is useful and
+  // writes no product data. Unstarted targets keep their original identity so
+  // the user can resume them without reprocessing completed images.
+  for (let index = 0; index < results.length; index++) {
+    if (!results[index]) results[index] = { target: targets[index], error: '已停止，尚未处理', cancelled: true };
+  }
   return results;
 }
 

@@ -35,7 +35,8 @@ async function settled() { await page.waitForFunction(() => !document.querySelec
 async function open() {
   await page.getByRole('button', { name: '批量修改 2', exact: true }).click();
   await page.locator('.batch-tabs').getByRole('button', { name: '产品图片', exact: true }).click();
-  await editor.getByLabel('预览商品').waitFor(); await settled();
+  await editor.getByRole('navigation', { name: '已选商品图片导航' }).waitFor(); await settled();
+  await editor.getByLabel('图片编辑商品范围').selectOption('all');
 }
 async function save() { await editor.getByRole('button', { name: '保存图片修改', exact: true }).click(); await editor.waitFor({ state: 'hidden' }); }
 async function chooseImage() {
