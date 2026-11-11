@@ -59,6 +59,33 @@ export async function waitForBankVideoReady(page, name, timeout = 120000) {
   }, timeout);
 }
 
+// The picker may expand advanced search itself while its old button is still
+// reported visible. Re-read the destination during safe actionability retries;
+// never keep waiting for a button that hydration has already replaced.
+export async function openBankAdvancedSearch(page, button, ready, { timeoutMs = 50000 } = {}) {
+  const reached = new Error('Video picker search is already open');
+  const checkDestination = async () => { if (await ready()) throw reached; };
+  if (await ready()) return;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      await clickPostingControl(page, button, { timeout: Math.min(2000, Math.max(1, deadline - Date.now())),
+        beforeRetry: checkDestination, beforeDispatch: checkDestination,
+        confirmResult: ready, confirmationTimeout: 3000 });
+      return;
+    } catch (error) {
+      if (error?.code === 'PUBLISH_PAUSED') throw error;
+      if (error === reached || await ready()) return;
+      // Preserve the previous slow-control budget. Only trial failures prove
+      // no click was dispatched; an uncertain real click must never re-enter.
+      if (error?.diagnostics?.phase === 'trial'
+        && ['PUBLISH_CONTROL_NOT_READY', 'PUBLISH_CONTROL_OBSCURED'].includes(error.code)
+        && Date.now() < deadline) continue;
+      throw error;
+    }
+  }
+}
+
 async function bankRow(page, name) {
   await videoNameInput(page).waitFor({ timeout: 30000 });
   await videoNameInput(page).fill(name);
@@ -202,17 +229,19 @@ export async function bankVideoAssociation(page, video, productId, { signal } = 
         || await frame.locator('input#productId').isVisible() || await advanced.isVisible(), 30000);
       if (!await exactCardVisible()) {
         if (!await frame.locator('input#productId').isVisible()) {
-          try { await clickBankControl(bank, advanced); }
-          catch (error) { if (!await frame.locator('input#productId').isVisible()) throw error; }
+          await openBankAdvancedSearch(bank, advanced, async () => await exactCardVisible()
+            || await frame.locator('input#productId').isVisible());
         }
-        await frame.locator('input#productId').waitFor({ timeout: 20000 });
-        await frame.locator('input#productId').fill(String(productId));
-        const videoFilter = frame.locator('#isVideo').locator('xpath=ancestor::span[contains(@class,"next-select-single")][1]');
-        if (await videoFilter.count() && !/^(?:All|全部)$/.test((await videoFilter.locator('em').innerText()).trim())) {
-          await clickBankControl(bank, videoFilter);
-          await clickBankControl(bank, frame.locator('[role="option"]:visible, .next-menu-item:visible').filter({ hasText: /^(?:All|全部)$/ }));
+        if (!await exactCardVisible()) {
+          await frame.locator('input#productId').waitFor({ timeout: 20000 });
+          await frame.locator('input#productId').fill(String(productId));
+          const videoFilter = frame.locator('#isVideo').locator('xpath=ancestor::span[contains(@class,"next-select-single")][1]');
+          if (await videoFilter.count() && !/^(?:All|全部)$/.test((await videoFilter.locator('em').innerText()).trim())) {
+            await clickBankControl(bank, videoFilter);
+            await clickBankControl(bank, frame.locator('[role="option"]:visible, .next-menu-item:visible').filter({ hasText: /^(?:All|全部)$/ }));
+          }
+          await clickBankControl(bank, frame.locator('button').filter({ hasText: /^(?:Search|搜索)$/i }));
         }
-        await clickBankControl(bank, frame.locator('button').filter({ hasText: /^(?:Search|搜索)$/i }));
       }
     }
     const input = frame.locator(`input[type="checkbox"][value="${productId}"]`);

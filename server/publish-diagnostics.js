@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { diagnosticProduct, diagnosticText, sanitizeDiagnosticFailure } from '../auth-server/diagnostic-evidence.js';
+import { diagnosticData, diagnosticProduct, diagnosticText, sanitizeDiagnosticFailure } from '../auth-server/diagnostic-evidence.js';
 import { diagnosticCode, diagnosticStage, sanitizeDiagnosticFailureSummary } from '../auth-server/diagnostic-schema.js';
 
 const MAX_FILE = 4 * 1024 * 1024;
@@ -112,6 +112,68 @@ export function createPublishDiagnosticStore(dataDirectory, account, { now = Dat
   };
 }
 
+// Read only visible form validation and its nearest field. Plain help text and
+// unrelated page notices are not validation, and credentials are never values.
+export async function readPostingFieldFeedback(page) {
+  const rows = await page.evaluate(() => {
+    const root = document.querySelector('#struct-content') || document.body;
+    const visible = node => !!node.getClientRects().length && getComputedStyle(node).visibility !== 'hidden';
+    const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
+    const sensitive = /password|passwd|cookie|token|authorization|activation|secret|credential|one-time-code|密码|授权码|密钥/i;
+    const fieldSelector = '.sell-catProp-item, .next-form-item, [id^="struct-"]';
+    const controls = 'input,textarea,select,[contenteditable="true"]';
+    const fieldLabel = field => clean(field?.querySelector('.label, .next-form-item-label, label:not(:has(input)), legend, h2, h3')?.innerText).slice(0, 160);
+    const safeControl = node => visible(node) && !['password', 'hidden', 'file'].includes(node.type)
+      && !sensitive.test([node.name, node.id, node.getAttribute('autocomplete'), node.getAttribute('aria-label'),
+        ...[...(node.labels || [])].map(label => label.innerText)].join(' '));
+    const result = [], seen = new Set();
+    const selector = '.sell-error-message, .next-form-item-help, .next-feedback-error, .next-message-error, .next-notice-error, .error-msg, .error-message, [role="alert"]';
+    for (const node of root.querySelectorAll(selector)) {
+      if (!visible(node)) continue;
+      const message = clean(node.innerText).slice(0, 2000);
+      if (!message) continue;
+      const field = node.closest(fieldSelector);
+      if (!field || field === root) continue;
+      const label = fieldLabel(field);
+      if (sensitive.test(label + ' ' + field.id) || field.querySelector('input[type="password"], input[autocomplete="one-time-code"]')) continue;
+      if (node.matches('.next-form-item-help') && !node.closest('.has-error, .is-error') && !field.querySelector('[aria-invalid="true"]')
+        && !/不能为空|必填|不支持|不允许|请不要输入|无效|错误|失败|invalid|required|not allowed|unsupported/i.test(message)) continue;
+      const key = field.id + '\n' + label + '\n' + message;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const invalidText = message.match(/请不要输入[^:：]*[:：]\s*(.+)$/)?.[1];
+      const excerpt = value => {
+        const text = clean(value);
+        const index = invalidText ? text.indexOf(invalidText) : -1;
+        return { value: text.slice(Math.max(0, index - 120), Math.max(0, index - 120) + 600), valueTruncated: text.length > 600 };
+      };
+      const values = [...field.querySelectorAll(controls)].filter(safeControl).slice(0, 5)
+        .map(control => ({ id: control.id.slice(0, 160), name: String(control.name || '').slice(0, 160),
+          type: control.type || control.tagName, ...excerpt(control.value ?? control.innerText) }));
+      // Legacy rich text is inside an editor iframe, not a normal input. Read
+      // visible editor text only; never inspect other embedded pages or HTML.
+      for (const frame of field.querySelectorAll('iframe')) {
+        if (values.length >= 5) break;
+        if (!visible(frame)) continue;
+        let body;
+        try { body = frame.contentDocument?.querySelector('body.mce-content-body, body[contenteditable="true"]'); } catch { continue; }
+        if (body && !sensitive.test(frame.id + ' ' + frame.name)) values.push({ id: frame.id.slice(0, 160), name: frame.name.slice(0, 160), type: 'rich-text', ...excerpt(body.innerText) });
+      }
+      result.push({ message, fieldId: field.id.slice(0, 160), label, values });
+      if (result.length >= 30) break;
+    }
+    return result;
+  });
+  let remaining = 16000;
+  return rows.flatMap(row => {
+    const safe = diagnosticData(row, { budget: 10000 }).value;
+    const size = JSON.stringify(safe).length;
+    if (size > remaining) return [];
+    remaining -= size;
+    return [safe];
+  });
+}
+
 export async function capturePublishFailure({ page, product, error, stage, mode, elapsedMs, targetCategoryId, processingMode, timeline, attemptId, aiMapping = [] }) {
   const current = diagnosticProduct(product); const source = diagnosticProduct(product.source?.snapshot || {});
   const record = { product: current.value, source: source.value, truncated: current.truncated || source.truncated,
@@ -127,7 +189,9 @@ export async function capturePublishFailure({ page, product, error, stage, mode,
   const captureErrors = [];
   try {
     let timer;
-    try { record.page = await Promise.race([page.evaluate(() => {
+    try { record.page = await Promise.race([Promise.all([readPostingFieldFeedback(page).catch(failure => {
+      captureErrors.push(diagnosticText(failure.message, 300)); return [];
+    }), page.evaluate(() => {
       const visible = n => !!n.getClientRects().length && getComputedStyle(n).visibility !== 'hidden';
       const root = document.querySelector('#struct-content') || document.body;
       return { url: location.origin + location.pathname + location.search,
@@ -136,7 +200,10 @@ export async function capturePublishFailure({ page, product, error, stage, mode,
         fields: [...root.querySelectorAll('input,textarea,select,[contenteditable="true"]')].filter(n => visible(n) && !['password', 'hidden', 'file'].includes(n.type) && !/password|cookie|token|authorization|activation|secret|密码|授权码/i.test(n.name + ' ' + n.id))
           .slice(0, 400).map(n => ({ id: n.id, name: n.name, type: n.type || n.tagName, value: String(n.value ?? n.innerText ?? '').slice(0, 2000), checked: n.checked, disabled: n.disabled })),
       };
-    }), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Publishing page snapshot timed out')), 3000); })]); }
+    })]).then(([fieldFeedback, snapshot]) => ({ url: snapshot.url,
+      feedback: [...new Set([...fieldFeedback.map(row => row.message).filter(Boolean), ...snapshot.feedback])].slice(0, 30),
+      fieldFeedback, text: snapshot.text, fields: snapshot.fields,
+    })), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Publishing page snapshot timed out')), 3000); })]); }
     finally { clearTimeout(timer); }
   } catch (failure) { captureErrors.push(diagnosticText(failure.message, 300)); }
   try {

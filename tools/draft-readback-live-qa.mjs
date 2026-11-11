@@ -1,5 +1,5 @@
-// Read a confirmed draft after a fresh navigation. Never save, submit, switch
-// description mode or infer a draft ID from a source/published product ID.
+// Read a confirmed draft, or its separately receipted publication, after a
+// fresh navigation. Never save, submit, switch description mode or infer IDs.
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
@@ -31,6 +31,9 @@ const reportFile = path.join(root, 'draft-readback.json');
 const report = { readOnly: true, kind: 'draft-reopen', startedAt: new Date().toISOString(), samples: [], blockedWrites: [] };
 const save = () => fs.writeFileSync(reportFile, JSON.stringify(report, null, 2));
 const proof = JSON.parse(fs.readFileSync(path.join(prior, 'performance.json'), 'utf8'));
+const publication = process.env.QA_PUBLISHED_REPORT_FILE
+  ? JSON.parse(fs.readFileSync(process.env.QA_PUBLISHED_REPORT_FILE, 'utf8')) : null;
+if (publication) report.kind = 'published-reopen';
 const workspace = JSON.parse(fs.readFileSync(path.join(prior, 'workspace/workspace.json'), 'utf8'));
 const ids = process.env.QA_SOURCE_IDS.split(',');
 assert.ok(ids.length && ids.length <= 10 && new Set(ids).size === ids.length);
@@ -229,7 +232,18 @@ try {
     assert.ok(evidence && evidence.result?.status === 'drafted' && evidence.attributesAccepted && !evidence.error, `${sourceId}: successful validated draft required`);
     const source = workspace.products.find(row => row.sourceId === sourceId);
     assert.ok(source);
-    return { evidence, product: preparePublishProduct(source, { uploadProductVideos: evidence.result.videoUploadEnabled !== false && proof.videos !== false }), draftId: savedDraftIdentity(evidence) };
+    const saved = publication?.samples.findLast(row => row.sourceId === sourceId);
+    let publishedId;
+    if (publication) {
+      assert.ok(saved?.result?.status === 'published' && !saved.error, 'A successful publication receipt is required');
+      const url = new URL(saved.result.url);
+      assert.equal(url.origin, 'https://post.alibaba.com');
+      assert.equal(url.pathname, '/product/success.htm');
+      publishedId = url.searchParams.get('primaryId');
+      assert.match(publishedId || '', /^\d{10,16}$/);
+      assert.equal(publishedId, saved.publishedId);
+    }
+    return { evidence, product: preparePublishProduct(source, { uploadProductVideos: evidence.result.videoUploadEnabled !== false && proof.videos !== false }), draftId: savedDraftIdentity(evidence), publishedId };
   });
   writePrivateSession(sessionFile, readPrivateSession(path.join(process.env.QA_DESKTOP_USER_DATA_DIR, 'alibaba-cookies.json')));
   process.env.KUA_YIPU_ALIBABA_COOKIES_FILE = sessionFile;
@@ -243,15 +257,15 @@ try {
       await route.abort();
     } else await route.continue();
   });
-  for (const { evidence, product, draftId } of samples) {
-    const row = { sourceId: product.sourceId, draftId, startedAt: new Date().toISOString() };
+  for (const { evidence, product, draftId, publishedId } of samples) {
+    const row = { sourceId: product.sourceId, draftId, ...(publishedId ? { publishedId } : {}), startedAt: new Date().toISOString() };
     report.samples.push(row); save();
     try {
-      await page.goto(`https://post.alibaba.com/product/publish.htm?itemId=${draftId}&pubAction=draft&language=zh_CN`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.goto(`https://post.alibaba.com/product/publish.htm?itemId=${publishedId || draftId}${publishedId ? '' : '&pubAction=draft'}&language=zh_CN`, { waitUntil: 'domcontentloaded', timeout: 60000 });
       await page.locator('input#productTitle:visible').waitFor({ timeout: 60000 });
       row.url = page.url();
-      assert.equal(new URL(row.url).searchParams.get('itemId'), draftId);
-      assert.equal(new URL(row.url).searchParams.get('pubAction'), 'draft');
+      assert.equal(new URL(row.url).searchParams.get('itemId'), publishedId || draftId);
+      if (!publishedId) assert.equal(new URL(row.url).searchParams.get('pubAction'), 'draft');
       row.title = await page.locator('input#productTitle:visible').inputValue();
       assert.equal(row.title, product.title);
       row.images = await mainImageFormState(page);

@@ -111,3 +111,67 @@ test('never adds a second custom row when the first add has no confirmed result'
     assert.equal(await page.evaluate(() => window.additions), 1);
   } finally { await browser.close(); }
 });
+
+test('reuses committed custom values without retyping names or opening their suggestions on a second pass', { skip: !findChromium(), timeout: 15000 }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<div id="customMoreProperty"><div class="list">${row}</div><button class="add-attr-btn">Add</button></div>
+      <script>window.inputs=0;window.additions=0;
+      document.querySelector('button').onclick=()=>{window.additions++;document.querySelector('.list').insertAdjacentHTML('beforeend',${JSON.stringify(row)})};
+      document.addEventListener('input',()=>window.inputs++);</script>`);
+    const product = { customAttributes: [{ name: 'keyword', value: 'tablet phone 4g android' }, { name: 'P-SAM*2', value: 'Support' }] };
+    const source = structuredClone(product);
+    await fillCustomAttributes(page, product, fillAndVerify);
+    const inputs = await page.evaluate(() => window.inputs);
+    assert.equal(inputs, 4);
+    await fillCustomAttributes(page, product, fillAndVerify);
+    assert.equal(await page.evaluate(() => window.inputs), inputs);
+    assert.equal(await page.evaluate(() => window.additions), 1);
+    assert.deepEqual(await readCustomAttributes(page), product.customAttributes);
+    assert.deepEqual(product, source);
+  } finally { await browser.close(); }
+});
+
+test('closes a custom recommendation that opens after the Add trial before dispatching exactly once', { skip: !findChromium(), timeout: 15000 }, async () => {
+  const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<style>body{margin:0;min-height:2000px}#customMoreProperty{margin-top:700px}.suggestions{position:fixed;inset:0;background:white;z-index:5}</style>
+      <div id="customMoreProperty"><div class="list">${row}</div><button class="add-attr-btn">Add</button></div>
+      <div class="next-overlay-wrapper opened"><ul class="next-menu suggestions" hidden><li class="next-menu-item item" role="menuitem"><span class="text">Keywords</span><span>3% 人填写</span></li></ul></div>
+      <script>window.additions=0;window.suggestions=0;
+      document.querySelector('.attr-title input').value='keyword';document.querySelector('.attr-value input').value='tablet phone 4g android';
+      document.querySelector('button').onclick=()=>{window.additions++;document.querySelector('.list').insertAdjacentHTML('beforeend',${JSON.stringify(row)})};
+      document.querySelector('li').onclick=()=>window.suggestions++;
+      document.onkeydown=e=>{if(e.key==='Escape')document.querySelector('.suggestions').hidden=true};</script>`);
+    const nativeLocator = page.locator.bind(page);
+    const nativeRoot = nativeLocator('#customMoreProperty');
+    const nativeAdd = nativeRoot.locator('.add-attr-btn:visible').first();
+    let trials = 0;
+    // Model the platform portal mounting in the gap between trial and real
+    // click. All clicks still use Chromium actionability and actual DOM events.
+    const add = new Proxy(nativeAdd, { get(target, name) {
+      if (name === 'click') return async options => {
+        const result = await target.click(options);
+        if (options?.trial && !trials++) await page.evaluate(() => { document.querySelector('.suggestions').hidden = false; });
+        return result;
+      };
+      const value = Reflect.get(target, name); return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const root = new Proxy(nativeRoot, { get(target, name) {
+      if (name === 'locator') return (selector, ...args) => selector === '.add-attr-btn:visible' ? { first: () => add } : target.locator(selector, ...args);
+      const value = Reflect.get(target, name); return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const instrumented = new Proxy(page, { get(target, name) {
+      if (name === 'locator') return (selector, ...args) => selector === '#customMoreProperty' ? root : nativeLocator(selector, ...args);
+      const value = Reflect.get(target, name); return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const product = { customAttributes: [{ name: 'keyword', value: 'tablet phone 4g android' }, { name: 'P-SAM*2', value: 'Support' }] };
+    await fillCustomAttributes(instrumented, product, fillAndVerify);
+    assert.equal(trials, 1);
+    assert.deepEqual(await page.evaluate(() => [window.additions, window.suggestions]), [1, 0]);
+    assert.deepEqual(await readCustomAttributes(page), product.customAttributes);
+    assert.equal(await page.locator('.suggestions').isVisible(), false);
+  } finally { await browser.close(); }
+});

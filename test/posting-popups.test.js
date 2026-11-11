@@ -2,8 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright-core';
 import { findChromium } from '../server/browser-runtime.js';
-import { attributeMenuForControl, closePostingAttributeMenus } from '../server/posting-popups.js';
-import { clickPostingControl, fillCategoryAttributes, fillChoice, requireCategoryAttributes } from '../server/publisher.js';
+import { attributeMenuForControl, closePostingAttributeMenus, targetPopupContext } from '../server/posting-popups.js';
+import { clickPostingControl, fillAndVerify, fillCategoryAttributes, fillChoice, recoverPostingClick, requireCategoryAttributes } from '../server/publisher.js';
+import { configurePostingInteractions } from '../server/posting-interaction.js';
+import { fillCustomAttributes, readCustomAttributes } from '../server/custom-attributes.js';
 
 const browserTest = (name, run) => test(name, { skip: !findChromium(), timeout: 60000 }, async (t) => {
   const browser = await chromium.launch({ executablePath: findChromium(), headless: true });
@@ -113,6 +115,52 @@ browserTest('dismissing keyword suggestions preserves navigation menus and never
   assert.equal(await closePostingAttributeMenus(page), false);
   assert.equal(await page.locator('ul').isVisible(), true);
   assert.equal(await page.evaluate(() => Boolean(window.confirmed)), false);
+});
+
+browserTest('dismisses the observed custom-name recommendation portal before adding one custom row', async (page) => {
+  await page.setContent(`<style>body{margin:0;min-height:100vh}.add-attr-btn{position:absolute;top:200px;left:80px;width:180px;height:40px}
+    .suggestions{position:fixed;top:150px;left:40px;width:350px;height:200px;background:white;z-index:100}</style>
+    <nav class="next-menu" role="menu"><a href="#" onclick="window.navClicks++">Products</a></nav>
+    <div id="customMoreProperty"><div class="list"></div><button class="add-attr-btn">添加自定义属性</button></div>
+    <div class="next-overlay-wrapper opened"><ul class="next-menu suggestions" role="menu">
+      <li class="next-menu-item item" role="menuitem" onclick="window.suggestionClicks++"><span class="text">Keywords</span><span>3% 人填写</span></li>
+    </ul></div><script>
+      window.adds=0;window.suggestionClicks=0;window.navClicks=0;
+      document.querySelector('.add-attr-btn').onclick=()=>{window.adds++;setTimeout(()=>document.querySelector('.list').insertAdjacentHTML('beforeend',
+        '<div class="item"><div class="attr-title"><input></div><div class="attr-value"><input></div></div>'),100)};
+      document.addEventListener('mousedown',e=>{const menu=document.querySelector('.suggestions');if(!menu.contains(e.target))menu.hidden=true});
+    </script>`);
+  configurePostingInteractions(page, { recover: target => recoverPostingClick(page, target) });
+  const product = { customAttributes: [{ name: 'Usage', value: 'Home use' }] };
+  await fillCustomAttributes(page, product, fillAndVerify);
+  await fillCustomAttributes(page, product, fillAndVerify);
+  assert.deepEqual(await readCustomAttributes(page), [{ name: 'Usage', value: 'Home use' }]);
+  assert.deepEqual(await page.evaluate(() => [window.adds, window.suggestionClicks, window.navClicks]), [1, 0, 0]);
+  assert.equal(await page.locator('.suggestions').isVisible(), false);
+  assert.equal(await page.locator('nav').isVisible(), true);
+});
+
+browserTest('custom-name suggestions cannot be used as category choices or dismissed while selecting their own item', async (page) => {
+  await page.setContent(`<input id="field"><div class="next-overlay-wrapper opened"><ul class="next-menu" role="menu">
+    <li class="next-menu-item item" role="menuitem"><span class="text">Keywords</span><span>3% 人填写</span></li>
+    </ul></div><script>window.escapes=0;document.onkeydown=e=>{if(e.key==='Escape')window.escapes++}</script>`);
+  assert.equal(await attributeMenuForControl(page, page.locator('input')), null);
+  assert.equal((await targetPopupContext(page.getByRole('menuitem'))).inMenu, true);
+  assert.equal(await closePostingAttributeMenus(page, page.getByRole('menuitem')), false);
+  assert.equal(await page.locator('ul').isVisible(), true);
+  assert.equal(await page.evaluate(() => window.escapes), 0);
+});
+
+browserTest('generic Fusion action and navigation menus are not treated as custom-name recommendations', async (page) => {
+  await page.setContent(`<div class="next-overlay-wrapper opened"><ul class="next-menu" role="menu">
+      <li class="next-menu-item item" role="menuitem"><span class="text">Archive</span></li></ul>
+    <nav><ul class="next-menu"><li class="next-menu-item item" role="menuitem"><span class="text">Keywords</span><span>3% 人填写</span></li></ul></nav>
+    <div class="next-menu"><li class="next-menu-item item" role="menuitem"><span class="text">Keywords</span><span>3% 人填写</span><button>Apply</button></li></div>
+    </div><script>window.events=0;document.onkeydown=document.onmousedown=()=>window.events++;</script>`);
+  assert.equal(await closePostingAttributeMenus(page), true);
+  assert.equal(await page.evaluate(() => window.events), 0);
+  assert.equal(await page.locator('nav').isVisible(), true);
+  assert.equal((await targetPopupContext(page.getByText('Archive'))).inMenu, false);
 });
 
 browserTest('closes a dropdown inside a logistics modal before confirmation without closing the parent modal', async (page) => {

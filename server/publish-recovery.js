@@ -21,7 +21,7 @@ export function publishEnvironmentBlockCode(error) {
 
 export function publishRepairPlan(error) {
   const message = String(error?.message || error || '');
-  if (['PUBLISH_CONTROL_RESULT_UNKNOWN', 'PUBLISH_IMAGE_RECEIPT_UNKNOWN', 'PUBLISH_NAVIGATION_INTERRUPTED', 'PUBLISH_EXISTING_PRODUCT_PAGE'].includes(error?.code)) return [];
+  if (['PUBLISH_CONTROL_RESULT_UNKNOWN', 'PUBLISH_IMAGE_RECEIPT_UNKNOWN', 'PUBLISH_NAVIGATION_INTERRUPTED', 'PUBLISH_EXISTING_PRODUCT_PAGE', 'PUBLISH_INVALID_CHARACTERS'].includes(error?.code)) return [];
   // A browser timeout may occur after an action was dispatched. Repair fields
   // only from actual form validation, never from selectors in a call log.
   if (isBrowserInteractionError(error)) return [];

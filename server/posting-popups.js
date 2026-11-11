@@ -6,6 +6,16 @@ export const VISIBLE_ATTRIBUTE_MENU = ATTRIBUTE_MENU.split(', ').map((selector) 
 // between fields, but must never participate in attribute option matching.
 const INPUT_MENU = `${ATTRIBUTE_MENU}, .posting-field-keywords-overlay`;
 const VISIBLE_INPUT_MENU = INPUT_MENU.split(', ').map((selector) => `${selector}:visible`).join(', ');
+// Custom-name recommendations use generic Fusion menuitems. The observed
+// portal includes a usage-rate caption (for example "3% 人填写"); require it
+// as well as the suggestion layout so action/navigation menus stay untouched.
+// These suggestions are dismissible input UI, never attribute-choice options.
+const CUSTOM_NAME_MENU = '.next-overlay-wrapper.opened .next-menu:not(nav):not(nav *):not([role="navigation"] *):not(:has(a,button,[role="button"])):has(.next-menu-item.item[role="menuitem"] .text)';
+const CUSTOM_NAME_RATE = /\d+(?:\.\d+)?%\s*人填写/;
+const BACKGROUND_EXCLUDED_MENU = `${INPUT_MENU}, ${CUSTOM_NAME_MENU}`;
+function inputMenus(page) {
+  return page.locator(VISIBLE_INPUT_MENU).or(page.locator(`${CUSTOM_NAME_MENU}:visible`).filter({ hasText: CUSTOM_NAME_RATE }));
+}
 export const POSTING_DIALOG = '[role="dialog"]:not(.mce-tinymce-inline:not([aria-modal="true"]):has([role="toolbar"]))';
 const MODAL = '.next-dialog, [aria-modal="true"], .product-attr-dialog, .mce-window';
 
@@ -37,29 +47,31 @@ export async function attributeMenuForControl(page, control) {
 
 export async function targetPopupContext(target) {
   return target.evaluate((node, selectors) => ({
-    inMenu: Boolean(node.closest(selectors.menu)),
+    inMenu: Boolean(node.closest(selectors.menu)
+      || new RegExp(selectors.customRate).test(node.closest(selectors.customMenu)?.textContent || '')),
     inDialog: Boolean(node.closest(selectors.modal) || node.closest(selectors.dialog)),
-  }), { menu: INPUT_MENU, modal: MODAL, dialog: POSTING_DIALOG }, { timeout: 1000 })
+  }), { menu: INPUT_MENU, customMenu: CUSTOM_NAME_MENU, customRate: CUSTOM_NAME_RATE.source, modal: MODAL, dialog: POSTING_DIALOG }, { timeout: 1000 })
     .catch(() => ({ inMenu: false, inDialog: false }));
 }
 
 // Close committed menus by real click-away/blur actions. When operating inside
 // a dialog, stay inside that dialog and do not send Escape to its parent.
 export async function closePostingAttributeMenus(page, target) {
-  const menus = page.locator(VISIBLE_INPUT_MENU);
+  const menus = inputMenus(page);
   if (!await menus.count()) return true;
   const handle = target ? await target.elementHandle({ timeout: 1000 }).catch(() => null) : null;
+  const menuHandles = await menus.elementHandles();
   try {
-    const state = await page.evaluate(({ menuSelector, modalSelector, dialogSelector, targetNode }) => {
+    const state = await page.evaluate(({ menuNodes, modalSelector, dialogSelector, targetNode }) => {
       const visible = (node) => node.getClientRects().length && getComputedStyle(node).visibility !== 'hidden';
-      const menus = [...document.querySelectorAll(menuSelector)].filter(visible);
+      const menus = menuNodes.filter(visible);
       const dialogs = [...document.querySelectorAll(`${modalSelector}, ${dialogSelector}`)]
-        .filter((node) => visible(node) && (node.matches(modalSelector) || (!node.matches(menuSelector) && !node.closest(menuSelector))));
+        .filter((node) => visible(node) && (node.matches(modalSelector) || !menus.some(menu => menu.contains(node))));
       const dialog = targetNode?.closest(`${modalSelector}, ${dialogSelector}`);
-      const inMenu = targetNode?.closest(menuSelector);
+      const inMenu = targetNode && menus.some(menu => menu.contains(targetNode));
       return { blocked: Boolean(inMenu) || dialogs.some((node) => !dialog || !(node === dialog || node.contains(dialog) || dialog.contains(node))),
         inDialog: Boolean(dialog), hasMenus: menus.length > 0 };
-    }, { menuSelector: INPUT_MENU, modalSelector: MODAL, dialogSelector: POSTING_DIALOG, targetNode: handle });
+    }, { menuNodes: menuHandles, modalSelector: MODAL, dialogSelector: POSTING_DIALOG, targetNode: handle });
     if (!state.hasMenus) return true;
     if (state.blocked) return false;
     if (!state.inDialog) {
@@ -80,7 +92,7 @@ export async function closePostingAttributeMenus(page, target) {
         const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
         const hit = document.elementFromPoint(x, y);
         return hit && (hit === node || node.contains(hit)) ? { x, y } : null;
-      }, { menuSelector: INPUT_MENU, dialogSelector: `${MODAL}, ${POSTING_DIALOG}`, targetNode: handle }).catch(() => null);
+      }, { menuSelector: BACKGROUND_EXCLUDED_MENU, dialogSelector: `${MODAL}, ${POSTING_DIALOG}`, targetNode: handle }).catch(() => null);
       if (!point) continue;
       await page.mouse.click(point.x, point.y);
       if (await menus.first().waitFor({ state: 'hidden', timeout: 300 }).then(() => true, () => false) && !await menus.count()) return true;
@@ -100,11 +112,14 @@ export async function closePostingAttributeMenus(page, target) {
         }
       }
       return null;
-    }, { menuSelector: INPUT_MENU, dialogSelector: `${MODAL}, ${POSTING_DIALOG}`, targetNode: handle });
+    }, { menuSelector: BACKGROUND_EXCLUDED_MENU, dialogSelector: `${MODAL}, ${POSTING_DIALOG}`, targetNode: handle });
     if (point) {
       await page.mouse.click(point.x, point.y);
       await menus.first().waitFor({ state: 'hidden', timeout: 700 }).catch(() => {});
     }
     return !await menus.count();
-  } finally { await handle?.dispose(); }
+  } finally {
+    await handle?.dispose();
+    await Promise.all(menuHandles.map(menu => menu.dispose()));
+  }
 }

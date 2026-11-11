@@ -26,6 +26,8 @@ import { ImageDownloadQueue } from './image-download-queue.js';
 import { ORIGIN_COUNTRIES, originCountry, isOriginAttribute, isOriginRegionAttribute, isCountryOnlyOrigin, productOrigin, productOriginText, originValueForField, isLiteralOriginField, sourceOriginRegion, synchronizeProductOrigin } from './origin-country.js';
 import { uploadEditorDetailImages } from './description-image-upload.js';
 import { descriptionImageSlots, descriptionContainsText, restoreDescriptionImages } from './description-layout.js';
+import { prepareLegacyDescriptionText, recordLegacyDescriptionText, legacyDescriptionTextConversions } from './description-text-compatibility.js';
+import { readPostingFieldFeedback } from './publish-diagnostics.js';
 import { fillStructuredDescription, structuredHighlightText, acceptedStructuredHighlights, requireAcceptedNativeDescription, requireStructuredDescriptionReady } from './structured-description.js';
 import { ensureSourceDescriptionMode, requireSourceDescriptionMode, descriptionCompatibility } from './description-mode.js';
 import { compatibleLegacyDescriptionHtml, acceptCompatibleLegacyDescription, requireCompatibleLegacyDescription } from './description-compatibility.js';
@@ -426,7 +428,8 @@ export async function visibleFeedback(page) {
 const SUBMIT_SUCCESS_TEXT = /(?:发布成功|提交成功|已提交发布|审核中|产品信息已经成功提交|产品已经进入审核流程|您的产品信息已经成功提交|您的产品已经进入审核流程|successfully\s+(?:submitted|published)|submitted successfully)/i;
 const DRAFT_SUCCESS_TEXT = /(?:保存成功|草稿.*成功|已保存|successfully\s+saved|saved successfully)/i;
 const ACCOUNT_LIMIT_TEXT = /(?:产品|商品)(?:总量|数量).{0,20}(?:超出|超过|上限)|product.{0,30}(?:quota|limit).{0,20}(?:exceed|reach)/i;
-const BLOCKING_FEEDBACK_TEXT = /(?:报错反馈|错误项|必填项.*不能为空|无效起订量|物流属性.*(?:请填写完整|不能为空)|重量、体积.*(?:请填写完整|不能为空)|logistics attribute.*(?:fill in completely|remove all)|请上传相关产品图片|请不要输入如下(?:非英文)?字符|required|invalid)/i;
+const INVALID_CHARACTER_FEEDBACK_TEXT = /请不要输入.{0,60}字符/;
+const BLOCKING_FEEDBACK_TEXT = /(?:报错反馈|错误项|必填项.*不能为空|无效起订量|物流属性.*(?:请填写完整|不能为空)|重量、体积.*(?:请填写完整|不能为空)|logistics attribute.*(?:fill in completely|remove all)|请上传相关产品图片|请不要输入.{0,60}字符|required|invalid)/i;
 
 export function classifyAlibabaActionResult({ mode = 'draft', url = '', originalUrl = '', feedback = [], bodyText = '', allowPolicyWarningPublish = false } = {}) {
   const messages = Array.isArray(feedback) ? feedback.filter(Boolean) : [];
@@ -819,6 +822,10 @@ export async function waitForActionResult(page, action, mode, originalUrl, { tim
     if (mode === 'submit') await acknowledgeSalesRules(page);
     const requiredAttributes = await captureCategoryAttributes(page);
     const acceptedLogistics = await capturePostingLogistics(page);
+    const fieldErrorKey = field => JSON.stringify([field.fieldId, field.label, field.message]);
+    const initialFieldFeedback = await readPostingFieldFeedback(page).catch(() => null);
+    const initialCharacterErrors = initialFieldFeedback && new Set(initialFieldFeedback.filter(field => INVALID_CHARACTER_FEEDBACK_TEXT.test(field.message)).map(fieldErrorKey));
+    let previousCharacterErrors = '';
     try {
       await clickPostingControl(page, action, {
         beforeDispatch: () => receipt.arm(),
@@ -890,7 +897,7 @@ export async function waitForActionResult(page, action, mode, originalUrl, { tim
         // while a confirmation is still open. Never click it repeatedly.
         continue;
       }
-      const accountLimit = await page.locator('body').innerText().then((value) => value.match(/[^\n]*您发布的产品总量已超出限制[^\n]*/)?.[0]).catch(() => '');
+      const accountLimit = await page.locator('body').evaluate(node => node.innerText.match(/[^\n]*您发布的产品总量已超出限制[^\n]*/)?.[0] || '').catch(() => '');
       if (accountLimit) {
         const error = new Error(`国际站账号发布额度不足：${accountLimit.trim()}`);
         error.code = 'PUBLISH_ACCOUNT_LIMIT';
@@ -898,6 +905,20 @@ export async function waitForActionResult(page, action, mode, originalUrl, { tim
       }
       const result = classifyAlibabaActionResult({ mode, url, originalUrl, feedback, allowPolicyWarningPublish: policyWarningPublishingAllowed() });
       if (await receipt.accepts(result)) return { verifiedBy: result.verifiedBy, feedback, responses, requiredAttributes, acceptedLogistics };
+      // A new field-scoped character rejection is a confirmed invalid value,
+      // not a slow receipt. Require two stable reads and an idle action before
+      // leaving the wait; stale validators and unknown saves still wait fully.
+      let characterErrors = '';
+      if (initialCharacterErrors && feedback.some(text => INVALID_CHARACTER_FEEDBACK_TEXT.test(text))) {
+        const fresh = (await readPostingFieldFeedback(page).catch(() => [])).filter(field => INVALID_CHARACTER_FEEDBACK_TEXT.test(field.message))
+          .map(fieldErrorKey).filter(key => !initialCharacterErrors.has(key)).sort();
+        const idle = await action.evaluate(node => !node.disabled && node.getAttribute('aria-busy') !== 'true'
+          && node.getAttribute('aria-disabled') !== 'true' && !node.classList.contains('next-btn-loading')
+          && !node.querySelector('.next-loading, .next-icon-loading, [role="progressbar"]')).catch(() => false);
+        if (fresh.length && idle) characterErrors = JSON.stringify(fresh);
+      }
+      if (characterErrors && characterErrors === previousCharacterErrors) break;
+      previousCharacterErrors = characterErrors;
     }
     const feedback = await visibleFeedback(page);
     requireNoPolicyWarning(feedback);
@@ -930,7 +951,7 @@ export async function waitForActionResult(page, action, mode, originalUrl, { tim
         throw postingConfirmationError('已确认平台提示，但尚未收到国际站的明确发布结果；请先在商品管理中核对，避免重复发布', 'PUBLISH_SUBMIT_RESULT_UNKNOWN');
       }
     }
-    if (mode === 'submit') await requireSpecificationImagesAccepted(page, validationFeedback);
+    if (mode === 'submit' && !validationFeedback.some(text => INVALID_CHARACTER_FEEDBACK_TEXT.test(text))) await requireSpecificationImagesAccepted(page, validationFeedback);
     const relevant = validationFeedback
       .filter((text) => SPECIFICATION_IMAGE_REQUIRED_TEXT.test(text) || /必填|不能为空|请填写|请输入|无效|未填写|请上传|请不要输入|非英文|至少|错误|失败|error|required|invalid/i.test(text))
       .sort((left, right) => left.length - right.length);
@@ -946,7 +967,18 @@ export async function waitForActionResult(page, action, mode, originalUrl, { tim
     }
     const error = new Error(`国际站提示：${detail}`);
     error.requiredFields = [...new Set([...await visibleEmptyAttributeLabels(page), ...requiredLabelsFromError(detail)])];
-    if (MAIN_IMAGE_VALIDATION_TEXT.test(detail)) {
+    if (INVALID_CHARACTER_FEEDBACK_TEXT.test(detail)) {
+      const fields = await readPostingFieldFeedback(page).catch(() => []);
+      const rejected = fields.filter(field => INVALID_CHARACTER_FEEDBACK_TEXT.test(field.message));
+      error.code = 'PUBLISH_INVALID_CHARACTERS';
+      const labels = [...new Set(rejected.map(field => field.label).filter(Boolean))];
+      if (labels.length) error.message = `国际站${labels.join('、')}校验未通过：${detail}`;
+      error.requiredFields = labels;
+      error.diagnostics = { section: rejected.some(field => /supertext|商品详情|详情描述/i.test(field.fieldId + ' ' + field.label)) ? 'description' : 'form-validation',
+        fieldFeedback: rejected, feedback: relevant.slice(0, 8),
+        descriptionTextConversions: legacyDescriptionTextConversions(page) };
+    }
+    else if (MAIN_IMAGE_VALIDATION_TEXT.test(detail)) {
       error.code = 'PUBLISH_MAIN_IMAGE_VALIDATION';
       error.diagnostics = { section: 'main-images', state: await mainImageFormState(page), files: await mainImageUploadRecords(page) };
     }
@@ -6623,6 +6655,7 @@ export class SellerPublisher {
     // custom fallbacks only after those native fields exist, otherwise Color
     // and Model Number can incorrectly consume an extra custom slot.
     const attributePlan = planPublicAttributeTransfer(product, await page.evaluate(readPostingAttributeSchema));
+    onProgress('填写并复核自定义属性');
     const customAttributes = await fillCustomAttributes(page, attributePlan.product, fillAndVerify);
     for (const item of customAttributes) { mappedAttributes.add(item.name); unmappedAttributes.delete(item.name); }
     for (const { source, fields } of attributePlan.standard) {
@@ -6777,6 +6810,7 @@ export class SellerPublisher {
   }
 
   async fillLegacyDescription(page, product, onProgress = () => {}) {
+    recordLegacyDescriptionText(page, []);
     await waitForHumanVerification(page);
     await requireClearPostingOverlays(page);
     await revealDescriptionSection(page);
@@ -6801,7 +6835,11 @@ export class SellerPublisher {
       verify: () => waitForHumanVerification(page), onProgress
     });
     const compatible = descriptionCompatibility(page, product);
-    const html = compatible ? compatibleLegacyDescriptionHtml(product, buildLegacyDescriptionHtml(product)) : buildLegacyDescriptionHtml(product);
+    const prepared = prepareLegacyDescriptionText(compatible
+      ? compatibleLegacyDescriptionHtml(product, buildLegacyDescriptionHtml(product)) : buildLegacyDescriptionHtml(product));
+    const html = prepared.html;
+    recordLegacyDescriptionText(page, prepared.conversions);
+    if (prepared.conversions.length) onProgress('详情单位已转换为等价英文写法，原始资料保留');
     await body.evaluate((node, value) => {
       node.innerHTML = value;
       node.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
@@ -7634,6 +7672,7 @@ export class SellerPublisher {
     await fillCategoryAttributes(page, product, reportStage);
     product = (await attributeAi.run(product, { phase: 'final-check' })).product;
     const finalAttributePlan = planPublicAttributeTransfer(product, await page.evaluate(readPostingAttributeSchema));
+    reportStage('逐项复核自定义属性');
     await fillCustomAttributes(page, finalAttributePlan.product, fillAndVerify);
     fieldMapping.attributeTransfer = await requirePublicAttributeTransfer(page, product);
     const readinessWarnings = [];
@@ -7675,6 +7714,7 @@ export class SellerPublisher {
     let sellerGroup = null;
     let additionalFields = { regionalPrices: [], warnings: [] };
     let basicFields;
+    const descriptionTextConversions = legacyDescriptionTextConversions(page);
     const verification = await submitWithRepairs({
       submit: async () => {
         if (options.sellerGroup) {
@@ -7721,6 +7761,7 @@ export class SellerPublisher {
             // MOQ/specification changes can remount delivery controls. Commit
             // every source tier after those changes and immediately before save.
             fieldMapping.deliveryTime = await fillDeliveryFields(page, product.deliveryTime);
+            reportStage(mode === 'submit' ? '提交国际站并等待结果' : '保存国际站草稿');
             return waitForActionResult(page, candidate, mode, originalUrl);
           }
         }
@@ -7807,6 +7848,7 @@ export class SellerPublisher {
       ...(options.logisticsDecision ? { logisticsDecision: options.logisticsDecision } : {}),
       stockProvenance: product.stockProvenance,
       fieldMapping,
+      ...(descriptionTextConversions.length ? { descriptionTextConversions } : {}),
       ...(descriptionConversion ? { descriptionCompatibility: {
         sourceFormat: descriptionConversion.sourceFormat, targetFormat: descriptionConversion.targetFormat,
         reason: descriptionConversion.reason,
@@ -7820,6 +7862,7 @@ export class SellerPublisher {
         product.variantGroups?.some(group => group.optionIdentityMappings?.some(option => option.name !== option.sourceName))
           ? '来源中同名但编号不同的规格已增加区分编号；各 SKU 的图片、价格、编码和库存分别保留' : '',
         descriptionConversion?.warning || '',
+        descriptionTextConversions.length ? '详情中的单位符号 ㎡ 已以等价写法 m2 填写，原始采集内容保留' : '',
         videoWarning,
         ...(options.logisticsWarnings || []),
         basicFields?.subtitle.status === 'unavailable' ? '当前发布页未提供副标题输入项，副标题保留在本地商品中' : '',
