@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright-core';
 import { findChromium } from '../server/browser-runtime.js';
-import { capturePublishFailure, readPostingFieldFeedback } from '../server/publish-diagnostics.js';
+import { capturePublishFailure, readPostingFieldFeedback, readPostingDescriptionSchema } from '../server/publish-diagnostics.js';
 import { sanitizeDiagnosticFailure } from '../auth-server/diagnostic-evidence.js';
 
 const browserTest = (name, run) => test(name, { skip: !findChromium(), timeout: 30000 }, async () => {
@@ -11,6 +11,23 @@ const browserTest = (name, run) => test(name, { skip: !findChromium(), timeout: 
     const page = await browser.newPage();
     await run(page);
   } finally { await browser.close(); }
+});
+
+browserTest('captures bounded native gallery capabilities without arbitrary component data or secrets', async page => {
+  await page.setContent('<div id="companyImage"><button class="add-custom-gallery-name-btn">Custom gallery</button></div>');
+  await page.evaluate(() => { window.Json = { components: { companyImage: { props: {
+    maxImageItem: 30, maxCustomGalleryItem: 3, maxGalleryNameLength: 50,
+    privateKey: 'PRIVATE_KEY', value: 'PRIVATE_FORM_CONTENT', token: 'PRIVATE_TOKEN',
+    dataSource: Array.from({ length: 80 }, (_, index) => ({ value: index, enName: 'Company ' + index, cnName: '公司', privateKey: 'PRIVATE_KEY' })),
+  } } } }; });
+  const schema = await readPostingDescriptionSchema(page);
+  assert.equal(schema.companyImage.options.length, 40);
+  assert.equal(schema.companyImage.maxCustomGalleryItem, 3);
+  assert.deepEqual(schema.companyImage.customControls, [{ visible: true, disabled: false }]);
+  assert.doesNotMatch(JSON.stringify(schema), /PRIVATE_|privateKey|token/);
+  const sanitized = sanitizeDiagnosticFailure({ page: { descriptionSchema: schema, text: 'x'.repeat(100000) } });
+  assert.deepEqual(sanitized.page.descriptionSchema, schema);
+  assert.equal(sanitized.truncation.page, true);
 });
 
 browserTest('captures legacy detail validation with its field and rejected unit excerpt through diagnostic sanitization', async page => {

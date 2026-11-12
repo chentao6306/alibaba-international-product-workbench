@@ -1,5 +1,6 @@
 // Native publishing fields are the source of the platform's structured
 // highlights/company/FAQ layout. Never substitute a rich-text blob for them.
+import { clickPostingControl } from './posting-interaction.js';
 const clean = value => String(value || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
 // The native English FAQ validator rejects typographic apostrophes even
 // though the rich-text editor accepts them. Keep the original source intact.
@@ -44,7 +45,8 @@ export function compileNativeDescription(structure, schemas) {
     if (matches.length > 1 || matches[0]?.disabled) throw problem(`当前表单无法唯一匹配图集“${name}”`, 'gallery-mapping');
     if (unnamed && !matches.length) throw problem(`原${rootId === 'companyImage' ? '公司' : '商品'}图集未提供名称，当前表单也未提供可用的“${name}”图集；原图已保留`, 'gallery-mapping');
     const custom = matches.length === 0;
-    if (custom && (!schema.supportCustomGallery || !name || name.length > schema.maxGalleryNameLength || /[^\x20-\x7e]/.test(name))) {
+    if (custom && (!schema.supportCustomGallery || !name || !(Number(schema.maxGalleryNameLength) > 0)
+      || name.length > schema.maxGalleryNameLength || /[^\x20-\x7e]/.test(name))) {
       throw problem(`当前表单无法唯一匹配图集“${name}”`, 'gallery-mapping');
     }
     const option = matches[0] || { value: null, enName: name };
@@ -75,14 +77,26 @@ export async function resolveNativeGallery(page, gallery, beforeInteraction = as
   const label = root.locator('label.gallery-names-checkbox').filter({ has: page.locator('.gallery-names-checkbox-en-name').filter({ hasText: new RegExp(`^${gallery.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`) }) });
   if (!await label.count()) {
     const add = root.locator('.add-custom-gallery-name-btn');
-    await beforeInteraction(add); await add.click();
+    if (await add.count() !== 1 || await add.evaluate(node => node.disabled || node.classList.contains('disabled') || node.getAttribute('aria-disabled') === 'true')) {
+      throw problem(`当前表单不能新增自定义图集“${gallery.name}”，请核对图集数量限制`, 'gallery-limit');
+    }
     const input = root.locator('.custom-input input');
-    await input.fill(gallery.name); await input.press('Tab');
+    if (await input.count()) throw problem('已有未完成的自定义图集名称，未重复新增', 'gallery-pending');
+    await beforeInteraction(add);
+    await clickPostingControl(page, add, { timeout: 5000, confirmResult: async () => await input.count() === 1 && await input.isVisible() });
+    await input.waitFor({ state: 'visible', timeout: 10000 });
+    const maxLength = await input.getAttribute('maxlength');
+    if (maxLength != null && Number(maxLength) >= 0 && gallery.name.length > Number(maxLength)) {
+      throw problem(`自定义图集“${gallery.name}”超过当前输入框 ${maxLength} 字符限制；未截断名称`, 'gallery-name-limit');
+    }
+    await input.fill(gallery.name);
+    if (await input.inputValue() !== gallery.name) throw problem(`自定义图集“${gallery.name}”未完整写入`, 'gallery-name-readback');
+    await input.press('Tab');
     await label.waitFor({ state: 'visible', timeout: 10000 });
   }
   if (await label.count() !== 1) throw problem(`自定义图集“${gallery.name}”不唯一`, 'gallery-mapping');
   gallery.value = await label.locator('input[type="checkbox"]').getAttribute('value');
-  if (gallery.value == null) throw problem(`自定义图集“${gallery.name}”未取得有效标识`, 'gallery-mapping');
+  if (!gallery.value || await label.locator('input[type="checkbox"]').isDisabled()) throw problem(`自定义图集“${gallery.name}”未取得有效标识`, 'gallery-mapping');
 }
 
 export async function readNativeDescriptionFields(page) {
@@ -244,5 +258,22 @@ export async function fillNativeDescriptionText(page, plan, { beforeInteraction 
 
 export async function nativeDescriptionSchemas(page) {
   return page.evaluate(() => Object.fromEntries(['textDesc', 'companyDesc', 'companyFaqDesc', 'detailImage', 'companyImage']
-    .map(key => [key, window.Json?.components?.[key]?.props || null])));
+    .map(key => {
+      const props = window.Json?.components?.[key]?.props;
+      if (!props) return [key, null];
+      const schema = { ...props };
+      // The company component renders custom galleries without exporting the
+      // detail component's supportCustomGallery flag. Confirm the current
+      // scoped control and explicit limits instead of assuming all categories
+      // have the same feature or treating the absent flag as a prohibition.
+      const addControls = document.querySelectorAll(`#${key} .add-custom-gallery-name-btn`);
+      const addControl = addControls.length === 1 ? addControls[0] : null;
+      if (['detailImage', 'companyImage'].includes(key) && schema.supportCustomGallery == null
+        && Number(schema.maxGalleryNameLength) > 0 && Number(schema.maxCustomGalleryItem) > 0
+        && addControl && !addControl.disabled && !addControl.classList.contains('disabled') && addControl.getAttribute('aria-disabled') !== 'true') {
+        schema.supportCustomGallery = true;
+        schema.customGalleryCapabilitySource = 'current-form-control-and-limits';
+      }
+      return [key, schema];
+    })));
 }

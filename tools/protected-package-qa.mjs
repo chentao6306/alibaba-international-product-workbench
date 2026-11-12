@@ -65,6 +65,7 @@ available.push('custom-attribute-name', 'reference-responsive', 'local-state-rec
 available.push('posting-popups', 'description-text-compatibility', 'publish-inline-feedback');
 available.push('custom-attribute-duplicates');
 available.push('video-picker-hydration');
+available.push('apparel-gallery-mapping', 'structured-gallery-rerender');
 const requested = process.argv.slice(3);
 assert.ok(requested.every(name => available.includes(name)), 'Unknown package regression selection');
 const selected = requested.length ? requested : available;

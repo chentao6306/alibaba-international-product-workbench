@@ -28,7 +28,7 @@ import { uploadEditorDetailImages } from './description-image-upload.js';
 import { descriptionImageSlots, descriptionContainsText, restoreDescriptionImages } from './description-layout.js';
 import { prepareLegacyDescriptionText, recordLegacyDescriptionText, legacyDescriptionTextConversions } from './description-text-compatibility.js';
 import { readPostingFieldFeedback } from './publish-diagnostics.js';
-import { fillStructuredDescription, structuredHighlightText, acceptedStructuredHighlights, requireAcceptedNativeDescription, requireStructuredDescriptionReady } from './structured-description.js';
+import { fillStructuredDescription, structuredHighlightText, acceptedStructuredHighlights, requireAcceptedNativeDescription, requireStructuredDescriptionReady, prepareStructuredInteraction } from './structured-description.js';
 import { ensureSourceDescriptionMode, requireSourceDescriptionMode, descriptionCompatibility } from './description-mode.js';
 import { compatibleLegacyDescriptionHtml, acceptCompatibleLegacyDescription, requireCompatibleLegacyDescription } from './description-compatibility.js';
 import { currentDescriptionStructure, extractDescriptionStructure, descriptionSourceHash, nativeDescriptionImageUrls, syncStructuredDescriptionImages } from './description-structure.js';
@@ -6826,7 +6826,7 @@ export class SellerPublisher {
       ), { code: 'DETAIL_IMAGE_DOWNLOAD_FAILED' });
       await fillStructuredDescription(page, { html: buildLegacyDescriptionHtml(product), files, imageUrls: images,
         structure: currentDescriptionStructure(product), highlights: structuredHighlightText(product), onProgress,
-        beforeInteraction: async target => { await target.scrollIntoViewIfNeeded(); await requireClearPostingOverlays(page); } });
+        beforeInteraction: target => prepareStructuredInteraction(page, target, { clearOverlays: () => requireClearPostingOverlays(page) }) });
       return true;
     }
     await prepareDescriptionEditor(page);

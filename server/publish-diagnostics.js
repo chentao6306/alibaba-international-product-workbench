@@ -9,7 +9,7 @@ const MAX_TOTAL = 96 * 1024 * 1024;
 const RETENTION = 7 * 86400000;
 const filePattern = /^[a-f0-9-]{36}\.json$/i;
 
-function failureGroup(record) {
+function failureGroup(record, { causeOnly = false } = {}) {
   const fields = [...new Set((Array.isArray(record.error?.requiredFields) ? record.error.requiredFields : [])
     .map(value => String(value).normalize('NFKC').trim().toLowerCase()).filter(Boolean))].sort();
   let stage = String(record.stage || record.error?.diagnostics?.publishStage || '');
@@ -18,8 +18,11 @@ function failureGroup(record) {
   }
   // Use bounded workflow categories, not product titles or changing progress
   // counters, so repeated failures cannot crowd out another kind of evidence.
-  return JSON.stringify([record.targetCategoryId || record.product?.categoryId || '', record.mode || '', record.processingMode || '',
-    diagnosticCode(record.error), fields.length ? fields : diagnosticStage(stage)]);
+  const detailStage = record.error?.diagnostics?.stage;
+  const descriptionReason = /^PUBLISH_DESCRIPTION_/.test(diagnosticCode(record.error))
+    && /^(?:faq|gallery|native|field|text|source|content|module|image)[a-z-]{0,50}$/.test(detailStage || '') ? detailStage : '';
+  const cause = [diagnosticCode(record.error), fields.length ? fields : diagnosticStage(stage), descriptionReason];
+  return JSON.stringify(causeOnly ? cause : [record.targetCategoryId || record.product?.categoryId || '', record.mode || '', record.processingMode || '', ...cause]);
 }
 export function pruneAllPublishDiagnostics(dataDirectory, now = Date.now()) {
   const root = path.join(dataDirectory, 'diagnostics');
@@ -73,7 +76,7 @@ export function createPublishDiagnosticStore(dataDirectory, account, { now = Dat
     },
     read(maxBytes = 6 * 1024 * 1024) {
       const prunedDuringRead = prune(); let bytes = 0;
-      const files = entries(), selected = [], deferred = [], groups = new Set(), failureIndex = [];
+      const files = entries(), selected = [], deferred = [], groups = new Set(), causes = new Set(), failureIndex = [];
       for (let index = 0; index < files.length; index++) {
         const item = files[index];
         try {
@@ -81,8 +84,9 @@ export function createPublishDiagnosticStore(dataDirectory, account, { now = Dat
           failureIndex.push(sanitizeDiagnosticFailureSummary(record));
           if (selected.length >= 5 || bytes + item.size > maxBytes) continue;
           const group = failureGroup(record);
-          if (groups.has(group)) { deferred.push({ item, index }); continue; }
-          selected.push({ record, index }); groups.add(group); bytes += item.size;
+          const cause = failureGroup(record, { causeOnly: true });
+          if (causes.has(cause)) { deferred.push({ item, index, group }); continue; }
+          selected.push({ record, index }); groups.add(group); causes.add(cause); bytes += item.size;
         } catch {
           failureIndex.push(sanitizeDiagnosticFailureSummary({ id: path.basename(item.file, '.json'), at: new Date(item.time).toISOString(), omissionReason: 'unreadable' }));
         }
@@ -90,13 +94,26 @@ export function createPublishDiagnosticStore(dataDirectory, account, { now = Dat
       // Keep only file references for duplicates, not dozens of large product
       // snapshots/screenshots. Read at most one bounded file at a time and use
       // remaining slots for the most recent repeats after distinct groups.
-      for (const { item, index } of deferred) {
+      // First reserve evidence for distinct causes across categories. Then
+      // retain category/mode diversity before filling with recent duplicates.
+      const duplicates = [];
+      for (const entry of deferred) {
+        const { item, index, group } = entry;
+        if (groups.has(group)) { duplicates.push(entry); continue; }
+        if (selected.length >= 5) break;
+        if (bytes + item.size > maxBytes) continue;
+        try {
+          const record = sanitizeDiagnosticFailure(JSON.parse(fs.readFileSync(item.file, 'utf8')));
+          selected.push({ record, index }); groups.add(group); bytes += item.size;
+        } catch { /* Count unreadable records with all other omitted files. */ }
+      }
+      for (const { item, index } of duplicates) {
         if (selected.length >= 5) break;
         if (bytes + item.size > maxBytes) continue;
         try {
           const record = sanitizeDiagnosticFailure(JSON.parse(fs.readFileSync(item.file, 'utf8')));
           selected.push({ record, index }); bytes += item.size;
-        } catch { /* Count unreadable records with all other omitted files. */ }
+        } catch { /* The index still records the omitted snapshot. */ }
       }
       const failures = selected.sort((a, b) => a.index - b.index).map(item => item.record);
       const selectedIndices = new Set(selected.map(item => item.index));
@@ -174,6 +191,28 @@ export async function readPostingFieldFeedback(page) {
   });
 }
 
+export async function readPostingDescriptionSchema(page) {
+  return page.evaluate(() => {
+    const ids = ['textDesc', 'companyDesc', 'companyFaqDesc', 'detailImage', 'companyImage'];
+    const scalarKeys = ['maxLength', 'maxItem', 'questionLength', 'answerLength', 'maxImageItem', 'maxCustomGalleryItem', 'maxGalleryNameLength', 'supportCustomGallery'];
+    return Object.fromEntries(ids.map(id => {
+      const props = window.Json?.components?.[id]?.props;
+      if (!props) return [id, null];
+      const schema = Object.fromEntries(scalarKeys.filter(key => typeof props[key] === 'boolean'
+        || (typeof props[key] === 'number' && Number.isFinite(props[key]))).map(key => [key, props[key]]));
+      if (Array.isArray(props.dataSource)) schema.options = props.dataSource.slice(0, 40).map(option => ({
+        value: String(option.value ?? '').slice(0, 80), enName: String(option.enName || '').slice(0, 120),
+        cnName: String(option.cnName || '').slice(0, 120), disabled: Boolean(option.disabled),
+      }));
+      schema.customControls = [...document.querySelectorAll(`#${id} .add-custom-gallery-name-btn`)].slice(0, 4).map(node => ({
+        visible: Boolean(node.getClientRects().length) && getComputedStyle(node).visibility !== 'hidden',
+        disabled: Boolean(node.disabled || node.getAttribute('aria-disabled') === 'true'),
+      }));
+      return [id, schema];
+    }));
+  });
+}
+
 export async function capturePublishFailure({ page, product, error, stage, mode, elapsedMs, targetCategoryId, processingMode, timeline, attemptId, aiMapping = [] }) {
   const current = diagnosticProduct(product); const source = diagnosticProduct(product.source?.snapshot || {});
   const record = { product: current.value, source: source.value, truncated: current.truncated || source.truncated,
@@ -191,6 +230,8 @@ export async function capturePublishFailure({ page, product, error, stage, mode,
     let timer;
     try { record.page = await Promise.race([Promise.all([readPostingFieldFeedback(page).catch(failure => {
       captureErrors.push(diagnosticText(failure.message, 300)); return [];
+    }), readPostingDescriptionSchema(page).catch(failure => {
+      captureErrors.push(diagnosticText(failure.message, 300)); return {};
     }), page.evaluate(() => {
       const visible = n => !!n.getClientRects().length && getComputedStyle(n).visibility !== 'hidden';
       const root = document.querySelector('#struct-content') || document.body;
@@ -200,9 +241,9 @@ export async function capturePublishFailure({ page, product, error, stage, mode,
         fields: [...root.querySelectorAll('input,textarea,select,[contenteditable="true"]')].filter(n => visible(n) && !['password', 'hidden', 'file'].includes(n.type) && !/password|cookie|token|authorization|activation|secret|密码|授权码/i.test(n.name + ' ' + n.id))
           .slice(0, 400).map(n => ({ id: n.id, name: n.name, type: n.type || n.tagName, value: String(n.value ?? n.innerText ?? '').slice(0, 2000), checked: n.checked, disabled: n.disabled })),
       };
-    })]).then(([fieldFeedback, snapshot]) => ({ url: snapshot.url,
+    })]).then(([fieldFeedback, descriptionSchema, snapshot]) => ({ url: snapshot.url,
       feedback: [...new Set([...fieldFeedback.map(row => row.message).filter(Boolean), ...snapshot.feedback])].slice(0, 30),
-      fieldFeedback, text: snapshot.text, fields: snapshot.fields,
+      fieldFeedback, descriptionSchema, text: snapshot.text, fields: snapshot.fields,
     })), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Publishing page snapshot timed out')), 3000); })]); }
     finally { clearTimeout(timer); }
   } catch (failure) { captureErrors.push(diagnosticText(failure.message, 300)); }

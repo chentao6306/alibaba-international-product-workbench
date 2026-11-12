@@ -1,12 +1,16 @@
 # 抄得快 · 阿里巴巴国际站商品工作台
 
-**源码版本：1.4.105｜分支：`codex/1.4.105`｜交接日期：2026-11-11｜发行状态：候选版**
+**源码版本：1.4.106｜分支：`codex/1.4.106`｜交接日期：2026-11-12｜发行状态：候选版**
 
 这是 Windows 桌面商品采集、编辑和发布系统的完整源码快照，包括 React 工作台、本地业务服务、Electron 桌面端、授权管理后台、官网、SQL 结构、构建工具和自动测试，用于继续开发、排障和复现构建。
 
 源码历史从不含运行资料的独立快照开始，版本分支在此基础上记录代码变更。商品库、后台用户数据、诊断报告、客户截图、登录会话、API 密钥、签名私钥和安装包均不随仓库分发。测试目录保留构造数据和模拟凭据；类目目录是程序所需的静态定义，不是客户商品库。
 
-**交给 Claude 时先阅读 [CLAUDE.md](CLAUDE.md)、[1.4.105 改动与验收](docs/release-1.4.105.md) 和 [完整开发交接](docs/claude-handoff-1.4.98.md)。** 已有部分真实消费电子链路验证；机械、玩具及医疗等类目的真实发布和回读仍有账号限制与验收缺口，不能把本分支理解为所有客户问题已经解决。
+**交给 Claude 时先阅读 [CLAUDE.md](CLAUDE.md)、[1.4.106 改动与验收](docs/release-1.4.106.md) 和 [完整开发交接](docs/claude-handoff-1.4.98.md)。** 已有部分真实消费电子链路验证；服装、机械、玩具及医疗等类目的真实发布和回读仍有账号限制与验收缺口，不能把本分支理解为所有客户问题已经解决。
+
+1.4.106 修复新版详情图集重绘时仍操作旧节点、图集选中后上传区域尚未挂载的竞态，以及公司图集未输出能力标记而被误判为不支持自定义图集的问题。只有当前作用域内唯一可用的新增控件与明确数量、名称长度限制同时存在，才补充缺失的能力判定；平台明确禁止、同名歧义和容量限制仍阻止操作。规则模式与 AI 辅助共用这段流程，保留全部文字、FAQ、图集名称、图片顺序及平台模型核验，上传结果未知时不重复发送。诊断按根因、类目与模式分配最多 5 份完整证据，并记录有界的当前详情字段定义；兼容现有后台，无需为本次改动部署后台。
+
+本轮完整日志的 5 个快照离线回放 5/5 通过，图片数依次为 14、12、12、12、14，每件 8 组 FAQ；回放使用历史原生字段限额和模拟新增控件能力，不是客户真实草稿或发布验收。更早 9 件 FAQ 失败缺少完整快照，尚不能判定原因；最新 5 件失败不包含 FAQ 缺失。当前授权消费电子账号仅开放旧版详情，服装新版详情的真实草稿、发布和回读未完成。本轮全量 1,150 项中 1,148 项通过、2 项超时取消；对应两个完整套件串行复查 36/36 通过，最终包专项 55/55 通过。启动、载荷、签名和隐私检查已完成；详见本版记录，不能把该结果当作全类目真实成功率。
 
 1.4.105 修复自定义属性推荐菜单遮挡与重复输入，旧版详情仅将平台拒绝的 `㎡` 以等价 `m2` 写入，原始资料和图片地址保留。来源缺少必填产地时仍提示补充，不能猜测。字段错误日志增加位置和脱敏值；仅对本次操作新增且稳定的明确字符拒绝提前结束等待，结果未知时仍禁止重复提交。视频选择器自动展开后不再等待已经消失的高级搜索按钮，保留精确商品与展示角色回读。两件消费电子草稿、正式发布、完整回读和主图视频播放已通过；真实验证范围和未覆盖阶段见本版记录。
 
@@ -96,7 +100,7 @@ Electron 主进程 (electron/)
 推荐 Windows x64、Node.js **22.18 或更新的 22 LTS 版本**及 npm。发行保护加载器依赖较新的 Node 模块 API。实际依赖以 `package-lock.json` 为准，接手时不要直接整体升级 Electron、Playwright 或 Vite。
 
 ```powershell
-git clone --branch codex/1.4.105 --single-branch git@github.com:chentao6306/alibaba-international-product-workbench.git
+git clone --branch codex/1.4.106 --single-branch git@github.com:chentao6306/alibaba-international-product-workbench.git
 cd alibaba-international-product-workbench
 npm ci
 node node_modules/playwright-core/cli.js install chromium
@@ -219,13 +223,14 @@ AI 必须基于来源证据和当前叶类目选项，不能创造产地、重�
 ```powershell
 npm test -- --test-concurrency=1
 node --test test/publish-late-receipt.test.js test/posting-interaction.test.js test/structured-upload-entry.test.js
+node --test test/apparel-gallery-mapping.test.js test/structured-gallery-rerender.test.js test/diagnostic-coverage.test.js test/publish-inline-feedback.test.js
 node --test test/cross-category-attributes.test.js test/sku-dimensions.test.js test/attribute-transfer.test.js
 node --test test/local-service.test.js test/reference-scale.test.js test/state-refresh.test.js
 ```
 
 使用 Node 内置 `node:test` 和 `assert/strict`，部分测试启动 Chromium、Electron 或临时服务。资源有限时串行运行，完整回归可能超过半小时。PostgreSQL 集成测试只使用 `AUTH_TEST_DATABASE_URL` 指向名称为 `auth_qa_` 前缀的隔离库，不能用生产库。
 
-**1.4.102 当前改动与验收见 [版本记录](docs/release-1.4.102.md)。以下为 1.4.98 历史验证基线（2026-11-06）：**
+**1.4.106 当前改动与验收见 [版本记录](docs/release-1.4.106.md)，已记录本轮全量、超时复查、包内 55 项验证和安装包校验结果。以下为 1.4.98 历史验证基线（2026-11-06），不代表本次候选版的测试结果：**
 
 | 项目 | 结果与范围 |
 | --- | --- |
@@ -249,6 +254,7 @@ node --test test/local-service.test.js test/reference-scale.test.js test/state-r
 | `source-persistence-chain-qa.mjs` | 来源副本保存、编辑、重开 |
 | `publish-performance-live-qa.mjs` | 草稿及阶段耗时 |
 | `draft-readback-live-qa.mjs` | 只读重开已确认草稿 |
+| `qa/native-draft-readback.mjs` | 新版详情草稿保存请求与重开后字段、图集及图片内容逐项核对；需调用方提供实际商品与适用账号 |
 | `batch-publication-live-qa.mjs` | 依赖验证草稿的真实提交 |
 | `batch-readback-live-qa.mjs` | 提交后的只读回查 |
 | `medical-unsaved-form-qa.mjs` | 拦截保存/提交的医疗控件探针，不代表发布验收 |
@@ -261,18 +267,18 @@ node --test test/local-service.test.js test/reference-scale.test.js test/state-r
 完整 Windows 安装器需要 Chromium、Electron、Windows C# 编译器和现有更新签名私钥；源码不含私钥。
 
 ```powershell
-$env:CHAODEKUAI_RELEASE_DIR='D:/builds/chaodekuai-1.4.102'
+$env:CHAODEKUAI_RELEASE_DIR='D:/builds/chaodekuai-1.4.106'
 $env:CHAODEKUAI_UPDATE_SIGNING_KEY='D:/private/update-signing-key.pem'
 npm run dist:win:installer
-node tools/desktop-package-qa.mjs D:/builds/chaodekuai-1.4.102
-node tools/protected-package-qa.mjs D:/builds/chaodekuai-1.4.102/win-unpacked
+node tools/desktop-package-qa.mjs D:/builds/chaodekuai-1.4.106
+node tools/protected-package-qa.mjs D:/builds/chaodekuai-1.4.106/win-unpacked
 ```
 
-对外文件为 `chaodekuai-1.4.102-setup.exe` 与同次构建的 `.exe.update.json`。`inner.exe`、`win-unpacked/`、`.packaged/` 是中间产物，不作为客户更新组合。签名与 EXE 必须匹配，更换现有签名密钥会使已安装客户端拒绝更新。
+对外文件命名为 `chaodekuai-1.4.106-setup.exe` 与同次构建的 `.exe.update.json`，实际构建、大小、摘要和签名验证结果以 [1.4.106 记录](docs/release-1.4.106.md) 为准；构建、签名、载荷及启动检查已通过。`inner.exe`、`win-unpacked/`、`.packaged/` 是中间产物，不作为客户更新组合。签名与 EXE 必须匹配，更换现有签名密钥会使已安装客户端拒绝更新。
 
 打包会保护业务模块并混淆前端入口，源码测试不能替代包内测试。详见 [源码保护](docs/source-protection.md) 与 [在线更新](docs/software-updates.md)。同一正式版本不能替换另一份 EXE，修复后需提升版本号。
 
-后台上传两文件并保存草稿，验收完成后再正式发布。**1.4.102 仍为候选版，尚未完成各客户类目的真实验收。**
+后台上传两文件并保存草稿，验收完成后再正式发布。**1.4.106 仍为候选版，尚未完成服装及其他受账号限制类目的真实验收。**
 
 ## 故障排查
 
@@ -284,12 +290,14 @@ node tools/protected-package-qa.mjs D:/builds/chaodekuai-1.4.102/win-unpacked
 | “类型”结果未知 | 点击是否派发、同一控件是否出现目标值、是否重挂载；不要连续补点击 |
 | 图片控件超时 | 主图/规格/详情/公司图集具体阶段、FileList 或图集回执、尺寸体积、已接收数量；不要整组无条件重传 |
 | 页面操作未完成 | 阶段和错误码；保存/提交未知时先回查，不能只看简短客户提示 |
-| FAQ/新版详情失败 | 来源结构、当前模式、编辑器加载、原始文本和容量 |
+| FAQ/新版详情失败 | 来源结构、当前模式、原始文本和容量；区分 FAQ 来源缺失、自定义图集能力和上传区域重绘，核对诊断中的当前详情字段定义 |
 | AI 慢或不可用 | 鉴权/额度/模型、阶段耗时、调用次数、退避，并对照规则流程 |
 | 安装访问被拒绝 | 权限、旧进程占用、空间、恢复副本和安装日志，保留商品资料 |
 | 类目不在线上经营范围 | 用具备该叶类目权限的账号验收，不能错类目发布 |
 
 诊断入口在 `server/runtime-diagnostics.js`、`server/publish-diagnostics.js`、`electron/diagnostics.js`、`auth-server/diagnostics.js`。上传日志会含排障用商品资料，只在授权后台处理，不复制到源码或公开 issue。
+
+1.4.106 在原有最多 60 条失败索引内，先为不同根因选完整证据，再覆盖不同叶类目／执行模式，最后以最近重复项补足最多 5 份；字节预算、保留期限和省略原因继续生效。详情字段定义仅记录白名单限额、选项身份和新增控件状态。报告版本不等于每条历史尝试版本，商品更新时间合成的失败摘要也不一定是一次新尝试；缺少完整快照时不能直接判定来源缺资料或修复已成功。
 
 ## 维护约束
 

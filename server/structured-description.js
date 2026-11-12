@@ -14,6 +14,38 @@ const failure = (message, stage) => Object.assign(new Error(`新版详情未完�
   code: 'PUBLISH_EDITOR_NOT_READY', diagnostics: { reason: 'new-description-editor', stage, automaticDowngrade: false },
 });
 
+// Choosing a native gallery can replace its DOM during the next render. Only
+// scrolling and overlay preparation may be replayed here; the caller dispatches
+// its actual edit/upload separately and must verify its own committed receipt.
+export async function prepareStructuredInteraction(page, target, { clearOverlays = async () => {}, timeoutMs = 30000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let cause;
+  do {
+    try {
+      const count = await target.count();
+      if (count > 1) throw Object.assign(failure('新版详情控件匹配到多个位置，未执行修改', 'control-identity'), {
+        diagnostics: { reason: 'new-description-editor', stage: 'control-identity', target: String(target).slice(0, 500), matches: count, dispatched: false },
+      });
+      if (count === 1) {
+        await target.scrollIntoViewIfNeeded({ timeout: Math.min(2000, Math.max(1, deadline - Date.now())) });
+        await clearOverlays();
+        // Resolve the locator again after overlays/React rendering. A detached
+        // element handle must not be carried into the actual upload operation.
+        if (await target.count() === 1 && await target.evaluate(node => node.isConnected && Boolean(node.getClientRects().length), undefined, { timeout: 1000 })) return;
+      }
+    } catch (error) {
+      if (error.code || /Target.*closed|browser has been closed/i.test(error.message)
+        || (error.name !== 'TimeoutError' && !/detached|not attached/i.test(error.message))) throw error;
+      cause = error;
+    }
+    await page.waitForTimeout(100);
+  } while (Date.now() < deadline);
+  throw Object.assign(failure('新版详情控件重绘后仍未就绪，未执行本次修改或上传', 'control-rerender'), {
+    cause, diagnostics: { reason: 'new-description-editor', stage: 'control-rerender',
+      target: String(target).slice(0, 500), dispatched: false },
+  });
+}
+
 async function until(page, check, message, stage, timeout = 30000) {
   const end = Date.now() + timeout;
   do {
@@ -157,7 +189,8 @@ export async function assignStructuredImageFiles(page, input, files, { gallery, 
     onProgress(`正在核对${label}的图片接收结果，未重复上传`);
     const end = Date.now() + receiptTimeoutMs;
     do {
-      await beforeInteraction(gallery);
+      // Receipt reads do not require scrolling. Repeating interaction setup
+      // here can hide a valid upload behind a second transient DOM-detach error.
       // FileList confirms the dispatch only, not upload success. The caller
       // must still verify every image URL, identity, order and native model.
       const selected = await input.evaluate(node => [...(node.files || [])].map(file => ({ name: file.name, size: file.size })), undefined, { timeout: 1000 })
@@ -190,7 +223,11 @@ export async function uploadStructuredImages(page, files, onProgress = () => {},
   if (!await group.count()) throw failure('当前类目未提供可识别的商品图集，未猜测图片分类', 'gallery-category');
   await setGalleryChecked(page, group.locator('input[type="checkbox"]'), true);
   const gallery = options.galleryName ? root.locator('.gallery-item-container').filter({ has: page.locator('.gallery-item-header-en-name').filter({ hasText: new RegExp(`^${options.galleryName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`) }) }) : root;
-  if (options.galleryName && await gallery.count() !== 1) throw failure(`未能唯一识别图集 ${options.galleryName}`, 'gallery-category');
+  if (options.galleryName) await until(page, async () => {
+    const count = await gallery.count();
+    if (count > 1) throw failure(`未能唯一识别图集 ${options.galleryName}`, 'gallery-category');
+    return count === 1;
+  }, `图集 ${options.galleryName} 勾选后的上传区域仍未加载`, 'gallery-category');
   const galleryLabel = `${options.rootId === 'companyImage' ? '公司图片' : '详情图片'}${options.galleryName ? ` / ${options.galleryName}` : ''}`;
   onProgress(`准备上传${galleryLabel}，共 ${files.length} 张`);
   const input = gallery.locator('input[type="file"]');
@@ -244,7 +281,6 @@ export async function uploadStructuredImages(page, files, onProgress = () => {},
       }, '等待原生图集图片接收超时', 'image-upload', 120000);
     }
   } else await assign(files);
-  let startedAt = Date.now(), retriedSelection = false;
   const uploaded = await until(page, async () => {
     const errors = await gallery.locator('.placeholder-error, .gallery-item-error, .sell-error-message').filter({ visible: true }).allTextContents();
     // Selecting an empty gallery validates it before React mounts the upload
@@ -253,16 +289,9 @@ export async function uploadStructuredImages(page, files, onProgress = () => {},
     if (rejected.length) throw failure(rejected.join('；'), 'image-upload');
     const images = await gallery.locator('.gallery-item-image img').evaluateAll(nodes => nodes.map(node => ({ name: node.alt, url: node.getAttribute('src') })));
     onProgress(`上传${galleryLabel} ${images.length}/${files.length}`);
-    if (Date.now() - startedAt > 10000 && errors.some(text => /勾选该图集后至少上传一张图片|at least one (?:image|picture)/i.test(text))
-      && !images.length && !await gallery.locator('.placeholder-uploading').count()) {
-      if (retriedSelection) throw failure('图集未接收到所选图片', 'image-upload');
-      // Some category changes replace the file input while it is receiving
-      // files. Retry only an entirely empty, unqueued gallery, never one with
-      // an in-flight or accepted image that could otherwise be duplicated.
-      retriedSelection = true; startedAt = Date.now();
-      await input.setInputFiles([]); await assign(files);
-      return false;
-    }
+    // An empty rerender and a stale required hint do not prove an upload was
+    // rejected. Keep reading the original dispatch; never send those files a
+    // second time while the platform may still be processing the first upload.
     if (images.length !== files.length || await gallery.locator('.placeholder-uploading').count()) return false;
     return expected.map(name => {
       const found = images.filter(image => image.name === name);

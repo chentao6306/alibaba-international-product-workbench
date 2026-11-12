@@ -169,3 +169,49 @@ test('failure evidence redacts model credentials and tokens at truncation bounda
   assert.doesNotMatch(JSON.stringify(diagnosticData({ apiKey: 'PRIVATE_API_KEY', privateKey: 'PRIVATE_KEY', token: 'PRIVATE_TOKEN',
     details: { bearer: 'Bearer PRIVATE_BEARER', message: 'token=PRIVATE_MESSAGE' }, price: 12 })), /PRIVATE_/);
 });
+
+test('gallery mapping repeats cannot crowd out FAQ evidence in the same leaf category', () => {
+  const f = fixture();
+  try {
+    const stages = ['faq-source', 'gallery-schema', ...Array(6).fill('gallery-mapping')];
+    stages.forEach((stage, index) => {
+      f.store.write({ product: { id: `detail-${index}` }, targetCategoryId: '201', mode: 'submit', processingMode: 'rules',
+        stage: '检查新版详情：商品卖点、公司介绍和 FAQ',
+        error: { code: 'PUBLISH_DESCRIPTION_STRUCTURE_MISMATCH', diagnostics: { stage } } });
+      const file = fs.readdirSync(f.directory).map(name => path.join(f.directory, name))
+        .find(file => JSON.parse(fs.readFileSync(file)).product.id === `detail-${index}`);
+      const time = new Date(Date.now() - 10000 + index * 1000);
+      fs.utimesSync(file, time, time);
+    });
+    const result = f.store.read();
+    assert.equal(result.failures.length, 5);
+    assert.deepEqual(new Set(result.failures.map(item => item.error.diagnostics.stage)), new Set(['faq-source', 'gallery-schema', 'gallery-mapping']));
+    assert.equal(result.failureIndex.length, 8);
+  } finally { f.close(); }
+});
+
+test('new failures across five categories reserve evidence for an older distinct FAQ cause', () => {
+  const f = fixture();
+  try {
+    const cases = [
+      ['201', 'PUBLISH_DESCRIPTION_STRUCTURE_MISMATCH', 'faq-source', '检查新版详情'],
+      ['202', 'PUBLISH_DESCRIPTION_STRUCTURE_MISMATCH', 'gallery-mapping', '检查新版详情'],
+      ['203', 'PUBLISH_DESCRIPTION_STRUCTURE_MISMATCH', 'gallery-mapping', '检查新版详情'],
+      ['204', 'PUBLISH_PAGE_INCOMPLETE', '', '准备上传详情图片'],
+      ['205', 'PUBLISH_PAGE_INCOMPLETE', '', '准备上传详情图片'],
+      ['206', 'PUBLISH_PAGE_INCOMPLETE', '', '准备上传详情图片'],
+    ];
+    cases.forEach(([targetCategoryId, code, stage, progress], index) => {
+      f.store.write({ product: { id: `cross-${index}` }, targetCategoryId, mode: 'draft', processingMode: 'rules', stage: progress,
+        error: { code, diagnostics: { stage } } });
+      const file = fs.readdirSync(f.directory).map(name => path.join(f.directory, name))
+        .find(file => JSON.parse(fs.readFileSync(file)).product.id === `cross-${index}`);
+      const time = new Date(Date.now() - 10000 + index * 1000); fs.utimesSync(file, time, time);
+    });
+    const result = f.store.read();
+    assert.equal(result.failures.length, 5);
+    assert.ok(result.failures.some(item => item.product.id === 'cross-0'));
+    assert.equal(result.failures[0].product.id, 'cross-5');
+    assert.equal(result.failureIndex.length, 6);
+  } finally { f.close(); }
+});
